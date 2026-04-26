@@ -12,7 +12,9 @@ Arguments / environment:
   HERMES_CHECKOUT   Existing Hermes git checkout to use as the clean base.
                     Defaults to $HERMES_CHECKOUT, then current directory when it
                     looks like a Hermes checkout.
-  HERMES_BASE_REF   Base ref for the temporary worktree. Defaults to origin/main.
+  HERMES_BASE_REF   Base ref for the temporary worktree. Defaults to the
+                    base= SHA in patches/hermes-safe-fetch-context/base.ref.
+                    Set HERMES_BASE_REF=origin/main to verify against upstream main.
   KEEP_WORKTREE=1   Keep the temporary worktree for debugging.
 USAGE
 }
@@ -26,6 +28,7 @@ script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 patch_repo=$(cd -- "$script_dir/.." && pwd)
 stack_dir="$patch_repo/patches/hermes-safe-fetch-context"
 series_file="$stack_dir/series"
+base_ref_file="$stack_dir/base.ref"
 
 if [[ ! -f "$series_file" ]]; then
   echo "ERROR: missing series file: $series_file" >&2
@@ -44,7 +47,27 @@ if [[ -z "$checkout" ]]; then
 fi
 
 checkout=$(cd -- "$checkout" && pwd)
-base_ref=${HERMES_BASE_REF:-origin/main}
+if [[ -n "${HERMES_BASE_REF:-}" ]]; then
+  base_ref=$HERMES_BASE_REF
+else
+  if [[ ! -f "$base_ref_file" ]]; then
+    echo "ERROR: missing base.ref file: $base_ref_file" >&2
+    exit 1
+  fi
+  base_ref=$(python - "$base_ref_file" <<'PY'
+from pathlib import Path
+import sys
+base_ref = None
+for line in Path(sys.argv[1]).read_text().splitlines():
+    if line.startswith("base="):
+        base_ref = line.split("=", 1)[1].strip()
+        break
+if not base_ref:
+    raise SystemExit("ERROR: base.ref does not contain a base= value")
+print(base_ref)
+PY
+)
+fi
 worktree=${TMPDIR:-/tmp}/hermes-safe-fetch-context-verify-$$
 cleanup() {
   if [[ "${KEEP_WORKTREE:-0}" != "1" ]]; then
@@ -60,14 +83,104 @@ git -C "$checkout" rev-parse --verify "$base_ref^{commit}" >/dev/null
 echo "Creating clean verification worktree from $base_ref"
 git -C "$checkout" worktree add --detach "$worktree" "$base_ref" >/dev/null
 
+echo "Checking manifest/series consistency"
+python - "$stack_dir" "$series_file" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+stack_dir = Path(sys.argv[1])
+series_file = Path(sys.argv[2])
+manifest_file = stack_dir / "manifest.yaml"
+if not manifest_file.exists():
+    raise SystemExit(f"ERROR: missing manifest: {manifest_file}")
+series = [line.strip() for line in series_file.read_text().splitlines() if line.strip() and not line.lstrip().startswith("#")]
+manifest_text = manifest_file.read_text()
+
+patch_blocks: list[dict[str, object]] = []
+current: dict[str, object] | None = None
+section: str | None = None
+for raw in manifest_text.splitlines():
+    if match := re.match(r"^  - file: (\S+\.patch)\s*$", raw):
+        current = {"file": match.group(1), "owns": []}
+        patch_blocks.append(current)
+        section = None
+        continue
+    if current is None:
+        continue
+    if re.match(r"^    owns:\s*$", raw):
+        section = "owns"
+        continue
+    if re.match(r"^    [a-zA-Z_]+:\s*$", raw):
+        section = None
+        continue
+    if section == "owns":
+        if match := re.match(r"^      - (.+?)\s*$", raw):
+            current["owns"].append(match.group(1))
+
+manifest_patches = [str(block["file"]) for block in patch_blocks]
+if series != manifest_patches:
+    raise SystemExit(
+        "ERROR: series/manifest patch order mismatch\n"
+        f"series={series}\nmanifest={manifest_patches}"
+    )
+for patch_name in series:
+    patch_path = stack_dir / patch_name
+    if not patch_path.exists():
+        raise SystemExit(f"ERROR: series patch missing on disk: {patch_path}")
+    if patch_path.stat().st_size == 0:
+        raise SystemExit(f"ERROR: series patch is empty: {patch_path}")
+required_phases = {
+    "context_promotion_scanning_and_fencing",
+    "safe_fetch_remote_byte_ingress",
+    "patch_stack_integrity_tooling",
+    "artifact_quarantine_provenance_and_taint",
+    "action_authority_regression_tests",
+}
+missing = [phase for phase in sorted(required_phases) if phase not in manifest_text]
+if missing:
+    raise SystemExit(f"ERROR: manifest missing required phases: {missing}")
+
+for block in patch_blocks:
+    patch_name = str(block["file"])
+    patch_path = stack_dir / patch_name
+    patch_text = patch_path.read_text(errors="replace")
+    diff_paths = set(re.findall(r"^diff --git a/(.*?) b/", patch_text, flags=re.MULTILINE))
+    owned_paths = list(block["owns"])
+    missing_owned = [path for path in owned_paths if path not in diff_paths]
+    if missing_owned:
+        raise SystemExit(
+            f"ERROR: manifest owns paths missing from {patch_name} diff headers: {missing_owned}"
+        )
+print("manifest consistency ok")
+PY
+
+cd "$worktree"
+
+echo "Verifying all series patch files are tracked"
+tracked_paths=(
+  "patches/hermes-safe-fetch-context/base.ref"
+  "patches/hermes-safe-fetch-context/series"
+  "patches/hermes-safe-fetch-context/manifest.yaml"
+)
+while IFS= read -r patch || [[ -n "$patch" ]]; do
+  [[ -z "$patch" || "$patch" =~ ^[[:space:]]*# ]] && continue
+  tracked_paths+=("patches/hermes-safe-fetch-context/$patch")
+done < "$series_file"
+git -C "$patch_repo" ls-files --error-unmatch "${tracked_paths[@]}" >/dev/null
+
+if [[ -n "$(git status --porcelain)" ]]; then
+  echo "ERROR: verification worktree is not clean before patch apply" >&2
+  git status --short >&2
+  exit 1
+fi
+
 echo "Applying patch stack from $series_file"
 while IFS= read -r patch || [[ -n "$patch" ]]; do
   [[ -z "$patch" || "$patch" =~ ^[[:space:]]*# ]] && continue
   echo "  applying $patch"
-  git -C "$worktree" apply --3way "$stack_dir/$patch"
+  git apply --3way "$stack_dir/$patch"
 done < "$series_file"
-
-cd "$worktree"
 if [[ -n "${PYTHON:-}" ]]; then
   python_bin=$PYTHON
 elif [[ -x "$worktree/.venv/bin/python" ]]; then
@@ -85,12 +198,36 @@ else
 fi
 
 echo "Running py_compile smoke checks"
-"$python_bin" -m py_compile \
-  agent/context_safety.py \
-  agent/artifact_provenance.py \
-  agent/action_authority.py \
-  tools/safe_http.py \
-  tools/customization_tool.py
+"$python_bin" - "$stack_dir/manifest.yaml" <<'PY'
+from pathlib import Path
+import py_compile
+import re
+import sys
+
+manifest = Path(sys.argv[1]).read_text()
+paths: list[str] = []
+current_section = None
+for raw in manifest.splitlines():
+    if re.match(r"^    owns:\s*$", raw):
+        current_section = "owns"
+        continue
+    if re.match(r"^    [a-zA-Z_]+:\s*$", raw):
+        current_section = None
+        continue
+    if current_section == "owns":
+        match = re.match(r"^      - (.+?\.py)\s*$", raw)
+        if match:
+            path = match.group(1)
+            if path not in paths:
+                paths.append(path)
+
+missing = [path for path in paths if not Path(path).exists()]
+if missing:
+    raise SystemExit(f"ERROR: py_compile paths missing after patch apply: {missing}")
+for path in paths:
+    py_compile.compile(path, doraise=True)
+print(f"py_compile ok ({len(paths)} files)")
+PY
 
 echo "Running import smoke checks"
 "$python_bin" - <<'PY'

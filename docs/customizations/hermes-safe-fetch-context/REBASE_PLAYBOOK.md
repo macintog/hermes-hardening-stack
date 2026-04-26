@@ -72,12 +72,33 @@ Fast syntax/import smoke:
 
 ```bash
 python -m py_compile \
+  agent/context_references.py \
   agent/context_safety.py \
-  agent/artifact_provenance.py \
-  agent/action_authority.py \
+  agent/memory_manager.py \
+  agent/prompt_builder.py \
+  cron/scheduler.py \
+  tools/cronjob_tools.py \
+  tools/skills_tool.py \
   tools/safe_http.py \
-  tools/customization_tool.py
+  gateway/platforms/base.py \
+  gateway/platforms/bluebubbles.py \
+  gateway/platforms/discord.py \
+  gateway/platforms/feishu.py \
+  gateway/platforms/mattermost.py \
+  gateway/platforms/qqbot/adapter.py \
+  gateway/platforms/slack.py \
+  gateway/platforms/telegram.py \
+  gateway/platforms/wecom.py \
+  tools/skills_hub.py \
+  tools/customization_tool.py \
+  toolsets.py \
+  agent/action_authority.py \
+  agent/artifact_provenance.py \
+  model_tools.py \
+  run_agent.py
 ```
+
+The clean-base verification script compiles every Python path listed under `owns:` in `manifest.yaml`, including tests, so it is stricter than this hand-run smoke command.
 
 Targeted test set:
 
@@ -113,6 +134,12 @@ Clean-base stack verification:
 
 ```bash
 "$patch_repo/scripts/verify-hermes-safe-fetch-context-stack.sh" "$PWD"
+```
+
+By default this uses the `base=` SHA in `patches/hermes-safe-fetch-context/base.ref`. To verify against current upstream main instead, run:
+
+```bash
+HERMES_BASE_REF=origin/main "$patch_repo/scripts/verify-hermes-safe-fetch-context-stack.sh" "$PWD"
 ```
 
 Fuller confidence check if time allows:

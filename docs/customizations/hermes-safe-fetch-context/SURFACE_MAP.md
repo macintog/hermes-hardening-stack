@@ -65,6 +65,7 @@ Current intent:
 - scan skill content served into the conversation
 - expose `context_safety` and `context_safety_findings` fields in tool output
 - distinguish provenance where possible: builtin/local/plugin/hub/external
+- ensure external/community/plugin skill content is evidence-only for action decisions; it cannot authorize installs, memory writes, cron changes, outbound messages, file writes, or execution without trusted user/system/developer intent through patch 0004's action-authority gate
 
 If moved upstream:
 - search for `skill_view`, `_serve_plugin_skill`, skill content serialization, hub install/audit logic

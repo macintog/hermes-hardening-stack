@@ -2,6 +2,23 @@
 name: hermes-safe-fetch-context
 series: patches/hermes-safe-fetch-context/series
 verification_script: scripts/verify-hermes-safe-fetch-context-stack.sh
+required_phases:
+  - name: context_promotion_scanning_and_fencing
+    patch: 0001-context-safety-core.patch
+    mandatory: true
+  - name: safe_fetch_remote_byte_ingress
+    patch: 0002-safe-http-gateway-download-hardening.patch
+    mandatory: true
+  - name: patch_stack_integrity_tooling
+    patch: 0003-customization-maintenance-tool.patch
+    mandatory: true
+  - name: artifact_quarantine_provenance_and_taint
+    patch: 0004-provenance-action-authority-hardening.patch
+    mandatory: true
+  - name: action_authority_regression_tests
+    patch: 0004-provenance-action-authority-hardening.patch
+    mandatory: true
+
 patches:
   - file: 0001-context-safety-core.patch
     owns:
@@ -122,14 +139,63 @@ patches:
       - tests/security/test_prompt_injection_containment.py
 required_smoke_checks:
   py_compile:
+    - agent/context_references.py
     - agent/context_safety.py
-    - agent/artifact_provenance.py
-    - agent/action_authority.py
+    - agent/memory_manager.py
+    - agent/prompt_builder.py
+    - cron/scheduler.py
+    - tools/cronjob_tools.py
+    - tools/skills_tool.py
+    - tests/agent/test_context_safety.py
+    - tests/agent/test_memory_provider.py
+    - tests/agent/test_prompt_builder.py
+    - tests/cron/test_cron_context_from.py
+    - tests/cron/test_cron_script.py
+    - tests/security/test_context_promotion_boundaries.py
+    - tests/tools/test_cronjob_tools.py
+    - tests/tools/test_skills_tool.py
     - tools/safe_http.py
+    - gateway/platforms/base.py
+    - gateway/platforms/bluebubbles.py
+    - gateway/platforms/discord.py
+    - gateway/platforms/feishu.py
+    - gateway/platforms/mattermost.py
+    - gateway/platforms/qqbot/adapter.py
+    - gateway/platforms/slack.py
+    - gateway/platforms/telegram.py
+    - gateway/platforms/wecom.py
+    - tools/skills_hub.py
+    - tests/tools/test_safe_http.py
+    - tests/gateway/test_base_media_cache_safe_http.py
+    - tests/gateway/test_discord_attachment_download.py
+    - tests/gateway/test_feishu.py
+    - tests/gateway/test_mattermost.py
+    - tests/gateway/test_media_download_retry.py
+    - tests/gateway/test_qqbot.py
+    - tests/gateway/test_slack.py
+    - tests/gateway/test_telegram_safe_image_download.py
+    - tests/gateway/test_wecom.py
+    - tests/security/test_safe_fetch_surfaces.py
+    - tests/security/test_skill_plugin_boundaries.py
     - tools/customization_tool.py
+    - tests/tools/test_customization_tool.py
+    - toolsets.py
+    - agent/action_authority.py
+    - agent/artifact_provenance.py
+    - model_tools.py
+    - run_agent.py
+    - tests/security/test_action_authority.py
+    - tests/security/test_artifact_provenance.py
+    - tests/security/test_prompt_injection_containment.py
   imports:
     - agent.context_safety
     - agent.artifact_provenance
     - agent.action_authority
     - tools.safe_http
     - tools.customization_tool
+manifest_consistency:
+  series_must_match_manifest_patch_order: true
+  every_series_patch_must_exist: true
+  every_patch_file_must_be_tracked: true
+  verification_script_must_apply_clean_base: true
+  every_manifest_owned_path_must_have_patch_diff_header: true

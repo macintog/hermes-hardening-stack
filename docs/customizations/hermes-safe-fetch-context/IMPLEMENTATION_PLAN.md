@@ -7,7 +7,7 @@ Project docs: `$HOME/.config/hermes-agent-patches/docs/customizations/hermes-saf
 
 ## Current repo state
 
-Patch-stack note (2026-04-26): the current executable patch stack does not contain any WeCom diff. Older planning bullets below that mention a WeCom first-caller migration are historical from the implementation thread; the current source of truth is `patches/hermes-safe-fetch-context/0002-safe-http-gateway-download-hardening.patch` plus `SURFACE_MAP.md`.
+Patch-stack note (2026-04-26): the current executable patch stack includes WeCom in patch `0002-safe-http-gateway-download-hardening.patch`. `SURFACE_MAP.md`, `manifest.yaml`, and the patch itself are the source of truth for current 0002 contents.
 
 - Branch: `main`.
 - Pre-existing unrelated change: `web/package-lock.json` is modified. Do not touch it.
@@ -46,7 +46,7 @@ Completed in this master thread:
 12. Wired `tools/cronjob_tools.py::_scan_cron_prompt` through `agent.context_safety.scan_context_text`, preserving existing `Blocked:` string behavior including exact invisible-unicode codepoint formatting.
 13. Wired `cron/scheduler.py::_build_job_prompt` to fence cron script output and `context_from` prior job output as untrusted evidence.
 14. Wired `agent/memory_manager.py::build_memory_context_block` to scan/render memory provider prefetch context as untrusted recalled evidence while preserving the exact outer `<memory-context>` fence and system note.
-15. Wired `tools/skills_tool.py::skill_view` and plugin skill loading to add report-only structured `context_safety` findings for local, configured external, and plugin skill content without changing returned content or linked-file JSON shape.
+15. Wired `tools/skills_tool.py::skill_view` and plugin skill loading to add structured `context_safety` findings for local, configured external, and plugin skill content without changing returned content or linked-file JSON shape. This compatibility layer is report-only at the read API, but external/community/plugin skill content remains evidence-only and cannot authorize installs, memory writes, cron changes, outbound messages, file writes, or execution because patch 0004's action-authority gate blocks those side effects without trusted user/system/developer intent.
 16. Migrated `gateway/platforms/feishu.py::_download_remote_document` to `tools.safe_http.safe_download_bytes` with redirect revalidation, redacted safe_http errors, a 25 MiB cap, and streaming max-byte enforcement.
 17. Migrated `gateway/platforms/slack.py::_download_slack_file` and `_download_slack_file_bytes` to `tools.safe_http.safe_download_bytes` with a 20 MiB cap, same-origin credential redirect enforcement, private redirect blocking, and redacted signed-URL logging.
 18. Migrated `gateway/platforms/qqbot/adapter.py` media/STT download paths to `tools.safe_http.safe_download_bytes` with caps for image, voice/STT, and other attachments, credentialed redirect enforcement, private redirect blocking, and redacted media/STT URLs.
@@ -433,7 +433,7 @@ These context wiring slices are complete and reviewed:
 1. `agent/prompt_builder.py::_scan_context_content` and `tools/cronjob_tools.py::_scan_cron_prompt` now use the shared scanner while preserving exact blocked marker/error strings.
 2. `cron/scheduler.py::_build_job_prompt` now fences cron script output and `context_from` prior output.
 3. `agent/memory_manager.py::build_memory_context_block` now fences/scans memory provider prefetch context while preserving the outer `<memory-context>` shape.
-4. `tools/skills_tool.py::skill_view` and plugin skill loading now return report-only structured findings without changing content or linked-file JSON shape.
+4. `tools/skills_tool.py::skill_view` and plugin skill loading now return structured findings without changing content or linked-file JSON shape; external/community/plugin content is still evidence-only for action decisions via the required 0004 action-authority gate.
 
 Verification examples:
 
@@ -487,7 +487,7 @@ Medium-high:
 
 Medium:
 
-- `gateway/platforms/wecom.py::_download_remote_bytes`: already streams and caps bytes, but redirect target is not revalidated.
+- `gateway/platforms/wecom.py::_download_remote_bytes`: migrated in patch 0002 to `safe_download_bytes`, preserving streaming caps and adding redirect target revalidation.
 - `gateway/platforms/telegram.py` fallback image download: full-body read and weak redirect/cap behavior.
 
 Leave initially:
@@ -506,11 +506,11 @@ Completed guarded surfaces:
 - `tools/skills_guard.py` scans external/community skill installation.
 - `agent/memory_manager.py` scans/fences provider prefetch text inside the preserved outer `<memory-context>` wrapper.
 - `cron/scheduler.py` fences cron script stdout/stderr and `context_from` prior output as untrusted evidence.
-- `tools/skills_tool.py::skill_view` returns report-only structured context-safety findings for local, configured external, and plugin skill content without content rewrite.
+- `tools/skills_tool.py::skill_view` returns structured context-safety findings for local, configured external, and plugin skill content without content rewrite. The final containment boundary is not report-only: external/community/plugin skill content is evidence-only and patch 0004's action-authority gate blocks it from authorizing installs, memory writes, cron changes, outbound messages, file writes, or execution.
 
-Remaining context-promotion gaps are optional follow-ups unless the next session decides they are required before final completion:
+Required context-promotion and authority work for the stated hostile-content threat model is in-scope, not optional:
 
-- External `MemoryProvider.system_prompt_block()` can enter the system prompt directly; it was intentionally left unchanged for compatibility.
+- External `MemoryProvider.system_prompt_block()` is now scanned/rendered as untrusted memory context in patch 0001 before it reaches model-visible prompt context.
 - Plugin `pre_llm_call` context is appended to the current user message without scan/fence.
 - Gateway reply context and document context can enter user message context without scan/fence.
 - `@` context references fence file/git/url content in markdown but do not prompt-injection scan content.
@@ -575,4 +575,4 @@ Required before reporting complete:
   - memory provider tests
   - skill_view tests
 - No unrelated files are touched, especially `web/package-lock.json`.
-- Artifact provenance and action-authority follow-ups are completed in `0004-provenance-action-authority-hardening.patch` or any future upstream equivalent is documented.
+- Artifact provenance, quarantine/taint labels, and action-authority regression tests are required phases and are completed in `0004-provenance-action-authority-hardening.patch` or any future upstream equivalent is documented.

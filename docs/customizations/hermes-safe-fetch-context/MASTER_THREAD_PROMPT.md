@@ -24,7 +24,7 @@ prior related project notes, if available locally
 
 ## Current project state
 
-Patch-stack note (2026-04-26): this prompt preserves historical implementation-thread notes. The current executable patch stack has no WeCom diff; `SURFACE_MAP.md` and `patches/hermes-safe-fetch-context/0002-safe-http-gateway-download-hardening.patch` are authoritative for current 0002 contents.
+Patch-stack note (2026-04-26): the current executable patch stack includes WeCom in `0002-safe-http-gateway-download-hardening.patch`; `SURFACE_MAP.md`, `manifest.yaml`, and the patch itself are authoritative for current 0002 contents.
 
 The safe_fetch first wave and the first context-promotion centralization wave are complete.
 
@@ -50,7 +50,7 @@ Completed:
 17. Slice 3C security/spec review passed and code-quality/regression review approved.
 18. `agent/memory_manager.py::build_memory_context_block` now scans/renders memory provider prefetch context as untrusted recalled evidence while preserving the outer `<memory-context>` fence.
 19. Memory provider context fencing/scanning security/spec review passed and code-quality/regression review approved.
-20. `tools/skills_tool.py::skill_view` and plugin skill loading now add report-only structured `context_safety` findings for local, configured external, and plugin skill content without changing returned content or linked-file JSON shape.
+20. `tools/skills_tool.py::skill_view` and plugin skill loading now add structured `context_safety` findings for local, configured external, and plugin skill content without changing returned content or linked-file JSON shape. The read API remains compatibility/report-only, but external/community/plugin skill content is evidence-only and cannot authorize side-effecting actions through the required 0004 action-authority gate.
 21. Skill_view findings security/spec review passed and code-quality/regression review approved after fixes for report-only verdicts and external provenance.
 22. `gateway/platforms/feishu.py::_download_remote_document` is migrated to `tools.safe_http.safe_download_bytes` with a 25 MiB cap, redirect revalidation, redacted errors, and streaming max-byte enforcement.
 23. Feishu migration security/spec review passed and code-quality/regression review approved after fixing streaming/no-Content-Length over-cap handling.
@@ -87,9 +87,9 @@ Important review-found fixes already applied:
   - invisible Unicode still returns exactly:
     `Blocked: prompt contains invisible unicode U+XXXX (possible injection).`
 - Skill_view compatibility:
-  - main local/external/plugin skill responses add report-only `context_safety` and `context_safety_findings` fields only.
+  - main local/external/plugin skill responses add `context_safety` and `context_safety_findings` fields without changing existing content fields.
   - linked `file_path` responses preserve their exact previous JSON shape.
-  - returned skill content is not fenced, rewritten, sanitized, or blocked.
+  - returned skill content is not rewritten at this compatibility boundary, but external/community/plugin skill content is evidence-only and cannot authorize installs, memory writes, cron changes, outbound messages, file writes, or execution through the 0004 action-authority gate.
 
 Expected Hermes repo working tree state at handoff:
 - Modified by this project from the original safe_fetch wave:
@@ -162,8 +162,8 @@ Target pipeline:
 ```text
 Remote bytes
   -> safe fetch
-  -> artifact quarantine/provenance
-  -> optional text extraction
+  -> artifact quarantine/provenance (required)
+  -> text extraction when content is promoted
   -> context safety scan
   -> fenced promotion as evidence
   -> side-effecting tools require trusted user/system/developer intent
@@ -334,11 +334,12 @@ Modified files:
 
 Implemented behavior:
 - `skill_view()` reports structured `context_safety` and `context_safety_findings` for local, configured external, and plugin skill content.
-- Presentation verdict is report-only: `safe` when no findings, `warn` when findings exist.
+- Presentation verdict is compatibility/report-only at this read API: `safe` when no findings, `warn` when findings exist.
 - Underlying scanner verdict is preserved as `raw_verdict` for diagnostics.
 - Provenance is explicit: `local`, `external`, or `plugin`; plugin responses include `plugin_namespace`.
-- `enforcement` is always `report_only` in this slice.
-- Returned skill content is not fenced, rewritten, sanitized, or blocked.
+- Final containment is enforced by patch 0004: external/community/plugin skill content is evidence-only and cannot authorize installs, memory writes, cron changes, outbound messages, file writes, or execution without trusted user/system/developer intent.
+- `enforcement` is `report_only` only for the compatibility-sensitive `skill_view()` read response; action authorization is enforced separately by patch 0004.
+- Returned skill content is not rewritten at this read boundary, but it is not action authority.
 - Linked `file_path` responses preserve their exact old JSON shape.
 
 Verification:
@@ -353,7 +354,7 @@ Review gates:
 
 ## Remaining work to complete the project
 
-All core context-promotion surfaces named in the definition of done are complete. Remaining work is now the fetch-caller migration set plus provenance and action-authority hardening.
+All core context-promotion surfaces named in the definition of done are complete. Fetch-caller migrations, provenance/taint hardening, and action-authority regression tests are required patch-stack phases and are included in patches 0002 and 0004.
 
 ### Remaining required work: additional safe_fetch caller migrations
 
@@ -381,16 +382,16 @@ For each fetch migration:
 - Redact signed URLs and credentials from logs/errors.
 - Run security/spec and code-quality/regression reviews before moving on.
 
-### Completed follow-up: artifact quarantine/provenance
+### Required phase: artifact quarantine/provenance
 
-Do after fetch migrations are stable, unless a migration naturally exposes an existing cache/temp artifact flow.
+This is mandatory for the hostile-content threat model. It is implemented in patch 0004 and must stay in the required patch stack during rebases.
 - Add sidecar metadata only where there is an existing artifact/cache/temp flow.
 - Include redacted source URL, redacted final URL, content type, bytes read, sha256, source type, fetch policy, and context scan verdict when available.
 - Do not introduce a broad new artifact store unless required by concrete caller needs.
 
-### Remaining optional follow-up: action authority regression tests
+### Required phase: action-authority regression tests
 
-Do after context fencing and fetch migrations are stable.
+This is mandatory for the hostile-content threat model. Patch 0004 adds deterministic tests proving untrusted downloaded/retrieved/gateway/skill/memory/cron content cannot authorize side-effecting tool calls.
 - Add tests proving untrusted retrieved/recalled/cron/plugin/gateway content cannot authorize side-effecting actions by itself.
 - Start with regression tests and prompt/fence semantics rather than a broad new permission framework.
 - High-impact actions to cover eventually: installs, deletes, exfiltration, persistence, auth/system service edits, out-of-scope file writes, messages/emails, cron creation/update, memory/profile writes, secret reads/transmission, downloaded code execution, credentialed network calls.
@@ -408,7 +409,7 @@ The project is complete when:
 7. Security/spec and code-quality/regression reviews pass for each slice.
 8. Targeted tests pass for every touched surface.
 9. No unrelated files are touched.
-10. Remaining optional work is explicitly documented in `IMPLEMENTATION_PLAN.md`.
+10. No mandatory hostile-context containment phase is marked optional; any residual gap is explicitly documented as out of scope or future upstream drift work.
 
 ## Final verification before reporting completion
 
