@@ -6,8 +6,8 @@ Repo:
 `/Users/ryand/.hermes/hermes-agent`
 
 Project docs:
-- `/Users/ryand/playground/hermes-safe-fetch-context/RECOMMENDATION.md`
-- `/Users/ryand/playground/hermes-safe-fetch-context/DELEGATION_MATRIX.md`
+- `docs/customizations/hermes-safe-fetch-context/README.md`
+- `docs/customizations/hermes-safe-fetch-context/DELEGATION_MATRIX.md`
 - context safety design spec from the master thread or `subagents/08-context-safety-design-spec.md`
 
 Mission:

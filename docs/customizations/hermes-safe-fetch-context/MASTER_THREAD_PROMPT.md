@@ -8,19 +8,19 @@ Repo:
 `/Users/ryand/.hermes/hermes-agent`
 
 Project docs:
-`/Users/ryand/playground/hermes-safe-fetch-context/`
+`$HOME/.config/hermes-agent-patches/docs/customizations/hermes-safe-fetch-context/`
 
 Primary recommendation:
-`/Users/ryand/playground/hermes-safe-fetch-context/RECOMMENDATION.md`
+`docs/customizations/hermes-safe-fetch-context/README.md`
 
 Implementation plan:
-`/Users/ryand/playground/hermes-safe-fetch-context/IMPLEMENTATION_PLAN.md`
+`docs/customizations/hermes-safe-fetch-context/IMPLEMENTATION_PLAN.md`
 
 Subagent prompts:
-`/Users/ryand/playground/hermes-safe-fetch-context/subagents/`
+`docs/customizations/hermes-safe-fetch-context/subagents/`
 
 Prior related project:
-`/Users/ryand/playground/hermes-content-safety/`
+prior related project notes, if available locally
 
 ## Current project state
 
@@ -115,8 +115,8 @@ Expected Hermes repo working tree state at handoff:
   - `tools/skills_tool.py`
   - `tests/tools/test_skills_tool.py`
 - Project docs modified outside repo:
-  - `/Users/ryand/playground/hermes-safe-fetch-context/IMPLEMENTATION_PLAN.md`
-  - `/Users/ryand/playground/hermes-safe-fetch-context/MASTER_THREAD_PROMPT.md`
+  - `docs/customizations/hermes-safe-fetch-context/IMPLEMENTATION_PLAN.md`
+  - `docs/customizations/hermes-safe-fetch-context/MASTER_THREAD_PROMPT.md`
 - Pre-existing unrelated change:
   - `web/package-lock.json`
   - Do not touch it. Do not include it in any final diff/commit for this work.

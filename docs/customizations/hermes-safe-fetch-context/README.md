@@ -2,6 +2,12 @@
 
 This directory documents the downstream customization currently carried outside Hermes proper.
 
+
+Canonical location:
+- Local: `$HOME/.config/hermes-agent-patches`
+- Remote: `http://m2mini.local:3000/gitprime/hermes-agent-patches.git`
+- Hermes config pointer: `~/.hermes/config.yaml` → `customizations.hermes_agent_patches`
+
 Goal: keep the customization understandable and portable while upstream Hermes changes frequently.
 
 Current shape:

@@ -6,11 +6,11 @@ Repo:
 `/Users/ryand/.hermes/hermes-agent`
 
 Project docs:
-- `/Users/ryand/playground/hermes-safe-fetch-context/RECOMMENDATION.md`
-- `/Users/ryand/playground/hermes-safe-fetch-context/DELEGATION_MATRIX.md`
+- `docs/customizations/hermes-safe-fetch-context/README.md`
+- `docs/customizations/hermes-safe-fetch-context/DELEGATION_MATRIX.md`
 
 Prior related project:
-`/Users/ryand/playground/hermes-content-safety/`
+prior related project notes, if available locally
 
 Mission:
 Design `agent/context_safety.py` as a higher-level provenance-aware scan/fence/promotion wrapper. This is design-only unless explicitly told otherwise. Do not modify files.

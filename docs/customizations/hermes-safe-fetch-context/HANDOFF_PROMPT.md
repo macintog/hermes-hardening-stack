@@ -3,7 +3,9 @@
 Use this prompt when handing the customization to a fresh Hermes/Codex/Claude thread.
 
 ```
-We maintain a downstream Hermes customization documented at:
+We maintain a downstream Hermes customization. The canonical local repo is `$HOME/.config/hermes-agent-patches`; Hermes config records this at `customizations.hermes_agent_patches`.
+
+Documented at:
   docs/customizations/hermes-safe-fetch-context/
 
 The executable patch stack is at:

@@ -3,10 +3,10 @@
 This file captures the recommended subagent split for the master thread.
 
 Source docs:
-- Recommendation: `/Users/ryand/playground/hermes-safe-fetch-context/RECOMMENDATION.md`
-- Master thread prompt: `/Users/ryand/playground/hermes-safe-fetch-context/MASTER_THREAD_PROMPT.md`
-- Prompt files: `/Users/ryand/playground/hermes-safe-fetch-context/subagents/`
-- Prior related project: `/Users/ryand/playground/hermes-content-safety/`
+- Recommendation: `docs/customizations/hermes-safe-fetch-context/README.md`
+- Master thread prompt: `docs/customizations/hermes-safe-fetch-context/MASTER_THREAD_PROMPT.md`
+- Prompt files: `docs/customizations/hermes-safe-fetch-context/subagents/`
+- Prior related project: prior related project notes, if available locally
 
 ## Track A: Plan and task graph
 Prompt file: `subagents/01-plan-and-task-graph.md`

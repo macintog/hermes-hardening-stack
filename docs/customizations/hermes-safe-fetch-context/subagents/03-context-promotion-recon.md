@@ -6,11 +6,11 @@ Repo:
 `/Users/ryand/.hermes/hermes-agent`
 
 Project docs:
-- `/Users/ryand/playground/hermes-safe-fetch-context/RECOMMENDATION.md`
-- `/Users/ryand/playground/hermes-safe-fetch-context/DELEGATION_MATRIX.md`
+- `docs/customizations/hermes-safe-fetch-context/README.md`
+- `docs/customizations/hermes-safe-fetch-context/DELEGATION_MATRIX.md`
 
 Prior related project:
-`/Users/ryand/playground/hermes-content-safety/`
+prior related project notes, if available locally
 
 Mission:
 Inspect Hermes for places where text is promoted into model context, especially untrusted/recalled/external text. This is read-only. Do not modify files.

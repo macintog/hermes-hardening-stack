@@ -6,8 +6,8 @@ Repo:
 `/Users/ryand/.hermes/hermes-agent`
 
 Project docs:
-- `/Users/ryand/playground/hermes-safe-fetch-context/RECOMMENDATION.md`
-- `/Users/ryand/playground/hermes-safe-fetch-context/DELEGATION_MATRIX.md`
+- `docs/customizations/hermes-safe-fetch-context/README.md`
+- `docs/customizations/hermes-safe-fetch-context/DELEGATION_MATRIX.md`
 
 Mission:
 Review the current implementation against the security spec. This is primarily read-only. Do not modify files unless the master thread explicitly asks you to produce a patch.

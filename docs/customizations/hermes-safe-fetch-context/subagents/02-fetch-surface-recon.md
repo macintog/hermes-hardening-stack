@@ -6,8 +6,8 @@ Repo:
 `/Users/ryand/.hermes/hermes-agent`
 
 Project docs:
-- `/Users/ryand/playground/hermes-safe-fetch-context/RECOMMENDATION.md`
-- `/Users/ryand/playground/hermes-safe-fetch-context/DELEGATION_MATRIX.md`
+- `docs/customizations/hermes-safe-fetch-context/README.md`
+- `docs/customizations/hermes-safe-fetch-context/DELEGATION_MATRIX.md`
 
 Mission:
 Inspect Hermes for remote fetch/download surfaces and identify the safest first caller to migrate to a shared `safe_http` helper. This is read-only. Do not modify files.

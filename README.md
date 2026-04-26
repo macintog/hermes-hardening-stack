@@ -1,6 +1,6 @@
 # Hermes Agent downstream patch stack
 
-This repository contains only the downstream patch stack and maintainer documentation for local Hermes Agent customizations.
+This repository lives at `$HOME/.config/hermes-agent-patches` by convention and contains only the downstream patch stack and maintainer documentation for local Hermes Agent customizations.
 
 It intentionally does not vendor, mirror, or fork the Hermes Agent source tree.
 
@@ -22,8 +22,8 @@ Basic apply flow from a clean Hermes checkout:
 ```bash
 while read -r patch; do
   [ -z "$patch" ] && continue
-  git apply --3way /path/to/hermes-agent-patches/patches/hermes-safe-fetch-context/$patch
-done < /path/to/hermes-agent-patches/patches/hermes-safe-fetch-context/series
+  git apply --3way $HOME/.config/hermes-agent-patches/patches/hermes-safe-fetch-context/$patch
+done < $HOME/.config/hermes-agent-patches/patches/hermes-safe-fetch-context/series
 ```
 
 See `REBASE_PLAYBOOK.md` for the full maintenance workflow.

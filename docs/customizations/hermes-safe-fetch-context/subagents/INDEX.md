@@ -3,10 +3,10 @@
 This directory contains one prompt file per subagent role for the Hermes safe-fetch and context-promotion hardening project.
 
 Source docs:
-- Recommendation: `/Users/ryand/playground/hermes-safe-fetch-context/RECOMMENDATION.md`
-- Master thread prompt: `/Users/ryand/playground/hermes-safe-fetch-context/MASTER_THREAD_PROMPT.md`
-- Delegation matrix: `/Users/ryand/playground/hermes-safe-fetch-context/DELEGATION_MATRIX.md`
-- Prior related project: `/Users/ryand/playground/hermes-content-safety/`
+- Recommendation: `docs/customizations/hermes-safe-fetch-context/README.md`
+- Master thread prompt: `docs/customizations/hermes-safe-fetch-context/MASTER_THREAD_PROMPT.md`
+- Delegation matrix: `docs/customizations/hermes-safe-fetch-context/DELEGATION_MATRIX.md`
+- Prior related project: prior related project notes, if available locally
 
 ## Prompt files
 

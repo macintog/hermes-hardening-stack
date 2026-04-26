@@ -11,6 +11,14 @@ Use this when updating Hermes while preserving the customization.
 
 ## Patch stack location
 
+Canonical local repo:
+
+```bash
+patch_repo=${HERMES_AGENT_PATCHES:-$HOME/.config/hermes-agent-patches}
+```
+
+Hermes config also records this path at `customizations.hermes_agent_patches`.
+
 - `patches/hermes-safe-fetch-context/series`
 - `patches/hermes-safe-fetch-context/0001-context-safety-core.patch`
 - `patches/hermes-safe-fetch-context/0002-safe-http-gateway-download-hardening.patch`
@@ -42,8 +50,8 @@ Apply patches in order:
 ```bash
 while read -r patch; do
   [ -z "$patch" ] && continue
-  git apply --3way "patches/hermes-safe-fetch-context/$patch"
-done < patches/hermes-safe-fetch-context/series
+  git apply --3way "$patch_repo/patches/hermes-safe-fetch-context/$patch"
+done < "$patch_repo/patches/hermes-safe-fetch-context/series"
 ```
 
 If a patch fails:
