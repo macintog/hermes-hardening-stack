@@ -5,7 +5,7 @@ This directory documents the downstream customization currently carried outside 
 
 Canonical location:
 - Local: `$HOME/.config/hermes-agent-patches`
-- Remote: `http://m2mini.local:3000/gitprime/hermes-agent-patches.git`
+- Remote: `the configured `origin` remote (see `git remote -v`)`
 - Hermes config pointer: `~/.hermes/config.yaml` → `customizations.hermes_agent_patches`
 
 Goal: keep the customization understandable and portable while upstream Hermes changes frequently.
@@ -46,4 +46,4 @@ Preferred maintenance model:
 5. Refresh patches from the repaired working tree.
 6. Run the verification commands in `REBASE_PLAYBOOK.md`.
 
-Do not treat the full `gitprime/hermes-agent-customizations` repository as the source of truth for intent. It is a capture of a full Hermes checkout. The durable source of truth should be this documentation plus the patch stack.
+Do not treat the full the old full-Hermes customizations clone repository as the source of truth for intent. It is a capture of a full Hermes checkout. The durable source of truth should be this documentation plus the patch stack.
