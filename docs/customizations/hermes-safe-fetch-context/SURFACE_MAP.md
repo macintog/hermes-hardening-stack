@@ -1,6 +1,6 @@
 # Surface map
 
-Use this when upstream Hermes moves code around. The point is to preserve the behavior, not the exact line numbers.
+This maps the implementation to the Hermes files it changes.
 
 ## Patch 0001: context safety core
 
@@ -15,7 +15,7 @@ Purpose:
 - return structured findings
 - render untrusted context blocks with metadata
 
-If moved upstream:
+Search hints:
 - search for prompt/context safety helpers
 - keep a single shared scanner rather than per-tool regex copies
 
@@ -26,9 +26,9 @@ Current file:
 
 Current intent:
 - use `scan_context_text(...)` for context files promoted into system prompt context
-- convert structured scanner result into legacy blocking/error behavior where required
+- convert structured scanner result into caller-visible blocking/error behavior where required
 
-If moved upstream:
+Search hints:
 - search for `SOUL.md`, `AGENTS.md`, `CLAUDE.md`, `.cursorrules`, `_scan_context_content`, or prompt context file loading
 
 ### Memory provider context
@@ -40,7 +40,7 @@ Current intent:
 - scan memory provider output before including it in model context
 - render provider output as an untrusted context block with findings metadata when relevant
 
-If moved upstream:
+Search hints:
 - search for `build_memory_context_block`, memory provider context rendering, `MEMORY.md`, or `USER.md`
 
 ### Cron prompt/script output context
@@ -53,7 +53,7 @@ Current intent:
 - scan cron prompts before saving/scheduling
 - render cron pre-run script output and upstream job context as untrusted data when building job prompts
 
-If moved upstream:
+Search hints:
 - search for `_build_job_prompt`, `context_from`, `prerun_script`, `cronjob`, or cron prompt validation
 
 ### Skill view/install surfaces
@@ -67,7 +67,7 @@ Current intent:
 - distinguish provenance where possible: builtin/local/plugin/hub/external
 - ensure external/community/plugin skill content is evidence-only for action decisions; it cannot authorize installs, memory writes, cron changes, outbound messages, file writes, or execution without trusted user/system/developer intent through patch 0004's action-authority gate
 
-If moved upstream:
+Search hints:
 - search for `skill_view`, `_serve_plugin_skill`, skill content serialization, hub install/audit logic
 
 ## Patch 0002: safe HTTP and gateway download hardening
@@ -77,10 +77,6 @@ If moved upstream:
 Current file:
 - `tools/safe_http.py`
 
-Ownership/status:
-- Downstream-owned in this stack. Patch `0002-safe-http-gateway-download-hardening.patch` creates `tools/safe_http.py` and `tests/tools/test_safe_http.py`; do not assume Hermes upstream provides this module unless a future rebase proves it.
-- If Hermes upstream later adds an equivalent safe HTTP/download helper, rename or narrow patch 0002 to gateway migration/policy glue and document the upstream replacement here.
-
 Purpose:
 - validate URL scheme and resolved hosts
 - block loopback/private/link-local/internal IPs
@@ -89,7 +85,7 @@ Purpose:
 - redact URLs for logs
 - return structured download result metadata
 
-If moved upstream:
+Search hints:
 - search for URL safety helpers, SSRF guards, browser URL blocklist, or download utilities
 - keep redirect validation explicit
 
@@ -103,7 +99,7 @@ Current intent:
 - preserve retry behavior
 - enforce media byte caps
 
-If moved upstream:
+Search hints:
 - search for `cache_image_from_url`, `cache_audio_from_url`, `IMAGE_CACHE_DIR`, `AUDIO_CACHE_DIR`
 
 
@@ -117,7 +113,7 @@ Current intent:
 - preserve configured/private BlueBubbles server origins through narrow allowed-private-origin policy
 - enforce explicit attachment byte caps and URL redaction
 
-If moved upstream:
+Search hints:
 - search for BlueBubbles attachment download helpers, `safe_download_bytes`, and `MAX_ATTACHMENT_DOWNLOAD_BYTES`
 
 ### Discord
@@ -131,7 +127,7 @@ Current intent:
 - block/redact unsafe fallback URLs
 - enforce media/attachment byte caps
 
-If moved upstream:
+Search hints:
 - search for Discord attachment download fallback, `attachment.url`, `proxy_url`, `to_file`, image/audio attachment handling
 
 ### Slack
@@ -144,7 +140,7 @@ Current intent:
 - use team-specific token/header behavior
 - apply per-media byte caps
 
-If moved upstream:
+Search hints:
 - search for `url_private`, `url_private_download`, `_download_slack_file`, Slack file headers
 
 ### Mattermost
@@ -156,7 +152,7 @@ Current intent:
 - download Mattermost files through safe downloader with auth headers
 - enforce explicit caps because downloads are held in memory
 
-If moved upstream:
+Search hints:
 - search for file download endpoint handling, `files/{file_id}`, image/audio/document handling
 
 ### Feishu
@@ -167,7 +163,7 @@ Current file:
 Current intent:
 - download Feishu media through safe downloader with auth headers
 
-If moved upstream:
+Search hints:
 - search for media/file download functions and Feishu token headers
 
 ### QQBot
@@ -179,7 +175,7 @@ Current intent:
 - use safe downloader for QQ image/audio/media URLs while preserving required Authorization headers
 - redact unsafe URLs in logs
 
-If moved upstream:
+Search hints:
 - search for QQ media URL fetches, `file_info`, audio transcription temp file handling
 
 ### Telegram
@@ -191,7 +187,7 @@ Current intent:
 - handle user-provided image URL downloads through safe downloader
 - block unsafe URLs before cache/write
 
-If moved upstream:
+Search hints:
 - search for image URL detection, `cache_image_from_url`, Telegram message image handling
 
 ### WeCom
@@ -204,7 +200,7 @@ Current intent/status:
 - preserve required access-token behavior
 - include `tests/gateway/test_wecom.py` coverage in patch 0002
 
-If moved upstream:
+Search hints:
 - search for `gateway/platforms/wecom.py`, `_download_remote_bytes`, and `tests/gateway/test_wecom.py::TestMediaUpload`
 
 
@@ -218,7 +214,7 @@ Current intent:
 - validate redirects and block unsafe/private targets unless explicitly scoped by provider policy
 - cap bytes and redact URLs at error/log boundaries before skill content reaches cache/install/view flows
 
-If moved upstream:
+Search hints:
 - search for `WellKnownSkillSource`, remote skill source fetch helpers, hub/community/GitHub raw fetches, and any provider-mediated skill bundle download path
 
 ## Tests to keep aligned
@@ -271,7 +267,7 @@ Current intent:
 - scan tracked patch-stack contents for common user-specific paths, PII, and secret-looking tokens
 - verify `series` entries point to tracked patch files
 
-If moved upstream:
+Search hints:
 - search for `hermes_customizations`, `customizations.hermes_agent_patches`, or patch-stack maintenance helpers
 - preserve the repo-separation and PII-audit behavior even if the toolset name changes
 
@@ -298,7 +294,7 @@ Current intent:
 - treat untrusted retrieved/downloaded/skill/plugin/memory/cron text as evidence, never as action authority
 - expose deterministic denial/confirmation outcomes for tests and tool-dispatch integration
 
-If moved upstream:
+Search hints:
 - search for tool-call authorization gates, side-effecting tool metadata, provenance/taint envelopes, or confirmation policy helpers
 - preserve fail-closed behavior for missing provenance before side effects
 
@@ -331,6 +327,6 @@ Current intent:
 - block concrete side-effect targets/args that appear only in evidence-only content, even when trusted user text contains a broad action verb
 - keep `tests/security/test_tool_result_promotion.py` and taint-loss dispatch tests mandatory
 
-If moved upstream:
+Search hints:
 - search for tool-result message creation, function-call result serialization, action registry/classification, skill command loading, browser/web extraction output, gateway attachment/transcript promotion, and prior-message taint collection
 - preserve fail-closed action classification, default model-visible string-result fencing, and prior-tool-result taint propagation

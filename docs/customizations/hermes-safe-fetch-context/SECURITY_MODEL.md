@@ -34,8 +34,8 @@ In-scope attacker-controlled or attacker-influenced inputs include:
 - Cron script stdout/stderr and prior job output supplied through `context_from`.
 - Skill content from local user skills, external/community/hub skills, and plugin-provided skills.
 - Plugin hook output, including transformed tool results or plugin-supplied context.
-- @-referenced files, retrieved snippets, and future retrieval/context-engine outputs.
-- Terminal/tool output only when it is promoted back into future prompt/context.
+- @-referenced files and retrieved snippets.
+- Terminal/tool output when it is promoted back into prompt/context.
 
 In-scope authority-bearing actions include:
 
@@ -158,7 +158,7 @@ Authority for side effects must come from the active user turn or an explicit pe
 
 ### Tool results are untrusted when re-promoted
 
-Tool/terminal/gateway outputs may be accurate observations, but if their text is placed into future context it is `evidence_only` unless a trusted component generated it as policy. Tool output cannot bootstrap authority for the next tool call.
+Tool/terminal/gateway outputs may be accurate observations, but if their text is placed into later model context it is `evidence_only` unless a trusted component generated it as policy. Tool output cannot bootstrap authority for the next tool call.
 
 ## Risk classification and enforcement layers
 
@@ -216,8 +216,7 @@ A call site or feature is done for this security model only when all applicable 
 10. The default for missing provenance is fail-closed for side effects: `evidence_only`.
 11. Tests cover representative hostile text for every touched surface and tests prove evidence-only content cannot authorize side effects by itself.
 12. Logs/errors redact raw signed URLs, credentials, cookies, tokens, and secret-bearing values.
-13. Existing compatibility-sensitive shapes are preserved unless intentionally changed: provider tool message shapes, legacy prompt-builder blocked markers, cron `Blocked:` strings, memory outer fence, and skill linked-file JSON shape.
-14. `web/package-lock.json` and unrelated dirty working-tree changes remain untouched.
+13. The implemented tests cover the caller-visible behavior that exists in this stack.
 
 ## Non-goals
 

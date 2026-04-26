@@ -1,72 +1,55 @@
-# Hermes safe fetch + context safety customization
+# Hermes safe fetch + context safety hardening
 
-This directory documents the downstream customization currently carried outside Hermes proper.
+This directory documents the implementation carried by the patch stack in:
 
+- `patches/hermes-safe-fetch-context/series`
+- `patches/hermes-safe-fetch-context/*.patch`
+- `scripts/verify-hermes-safe-fetch-context-stack.sh`
 
-Canonical location:
-- Local: `$HOME/.config/hermes-agent-patches`
-- Remote: the configured `origin` remote (see `git remote -v`)
-- Hermes config pointer: `~/.hermes/config.yaml` → `customizations.hermes_agent_patches`
+The implementation has four current invariants.
 
-Canonical sources for this customization:
-- Patch order: `patches/hermes-safe-fetch-context/series`
-- Machine-readable manifest: `patches/hermes-safe-fetch-context/manifest.yaml`
-- Clean-base verifier: `scripts/verify-hermes-safe-fetch-context-stack.sh`
-- Executable patch payloads: `patches/hermes-safe-fetch-context/*.patch`
-- This docs directory is explanatory/maintenance guidance only and must not override the series, manifest, verifier, or patch files.
+## 1. Safe HTTP download boundary
 
-Goal: keep the customization understandable and portable while upstream Hermes changes frequently.
+Remote byte ingress must go through a reviewed safe-fetch path or an equivalent call-site policy.
 
-Current shape:
-- Patch stack: `patches/hermes-safe-fetch-context/`
-- Series file: `patches/hermes-safe-fetch-context/series`
-- Manifest: `patches/hermes-safe-fetch-context/manifest.yaml`
-- Base reference: `patches/hermes-safe-fetch-context/base.ref`
-- Verification script: `scripts/verify-hermes-safe-fetch-context-stack.sh`
-- Intent docs: this directory, explanatory only
+Required behavior:
+- validate initial URL before fetch
+- validate every redirect before following it
+- block private, loopback, link-local, metadata, and malformed targets
+- enforce caller-owned byte caps
+- prevent credential/header leakage on unsafe redirects
+- redact signed URLs, credentials, cookies, tokens, and raw query material in logs/errors
 
-The customization has four separable mandatory intentions:
+## 2. Context safety boundary
 
-1. Safe HTTP download boundary
-   - Centralize URL validation and redirect validation for gateway/media downloads.
-   - Block private/internal/link-local/loopback targets before fetching and on redirects.
-   - Enforce explicit byte caps at call sites.
-   - Redact sensitive URLs in logs/errors.
+Text promoted from external, recalled, cron, skill, gateway, browser, extraction, or tool-result surfaces is evidence, not authority.
 
-2. Context safety boundary
-   - Centralize scanning of text that is promoted into privileged prompt/context slots.
-   - Preserve raw external content as quoted/fenced data where possible.
-   - Return structured findings so callers can block, warn, or report consistently.
-   - Avoid broad ad hoc pattern copies across tools.
+Required behavior:
+- scan/render promoted risky text through shared context-safety helpers
+- preserve structured findings and provenance labels
+- escape spoofed fences/markup
+- default model-visible string tool results to untrusted evidence unless explicitly exempted as trusted internal control output
 
-3. Artifact provenance and action authority boundary
-   - Carry evidence-only provenance/taint for downloaded, extracted, recalled, plugin, skill, browser, and tool-derived content.
-   - Require trusted scoped user/system/developer authority before side-effecting tools can act on concrete targets or arguments.
-   - Fail closed for secret reads/transmission, persistence, outbound messages, cron/memory writes, skill/plugin execution, browser credentialed actions, and unknown side effects when untrusted evidence is involved.
+## 3. Artifact provenance and action authority boundary
 
-4. Tool-result promotion and action-registry boundary
-   - Treat model-visible string tool outputs as untrusted evidence by default unless an explicit trusted internal control-tool exemption exists.
-   - Keep registered tool action classification explicit and fail closed for unknown side-effect behavior.
-   - Propagate prior tool-result/evidence taint into later action decisions so clean-looking arguments derived from hostile evidence are still gated.
+Side effects require trusted scoped authority.
 
-This is not intended to fork Hermes behavior broadly. It is a narrow hardening layer around:
-- untrusted network fetches entering local cache/tool flows
-- untrusted text entering prompt-like context surfaces
-- external/tool-derived evidence reaching side-effecting action decisions
+Required behavior:
+- preserve evidence-only taint across fetch, extraction, cache/temp artifacts, summaries, prompt promotion, and tool decisions
+- block evidence-only attempts to authorize file writes, terminal execution, secret reads/transmission, outbound messages, memory/cron writes, skill/plugin execution, browser credentialed actions, config changes, and unknown side effects
+- treat missing provenance as evidence-only for side-effect decisions
 
-Patch files:
-- `0001-context-safety-core.patch`: `agent/context_safety.py` plus memory, prompt-builder, cron, and skill/cron tool integrations and tests.
-- `0002-safe-http-gateway-download-hardening.patch`: downstream-owned `tools/safe_http.py`, `tests/tools/test_safe_http.py`, gateway downloader integrations, related gateway tests, and current WeCom hardening for `gateway/platforms/wecom.py` plus `tests/gateway/test_wecom.py`.
-- `0003-customization-maintenance-tool.patch`: `tools/customization_tool.py` and tests for auditing downstream patch-stack repos as this pattern repeats.
-- `0004-provenance-action-authority-hardening.patch`: artifact provenance, taint/quarantine metadata, action-authority gating, and deterministic containment tests.
-- `0005-tool-result-promotion-action-registry.patch`: mandatory tool-result-promotion and action-registry hardening, including default fencing for model-visible string tool outputs, prior tool-result taint propagation into the agent-loop action gate, scoped argument/target checks for evidence-derived side effects, unknown side-effect confirmation, and `tests/security/test_tool_result_promotion.py`.
+## 4. Skill load execution boundary
 
-Preferred maintenance model:
-1. Update Hermes upstream normally.
-2. Re-apply this patch stack in order.
-3. If a patch fails, use `SURFACE_MAP.md` to find the new upstream equivalent surface.
-4. Preserve intention first; do not mechanically preserve old line placements.
-5. Refresh patches from the repaired working tree.
-6. Run the verification commands in `REBASE_PLAYBOOK.md`.
+Skill text without explicit trusted local authority is evidence-only.
 
-Do not treat the old full-Hermes customizations clone repository as the source of truth for intent. It is a capture of a full Hermes checkout. The durable canonical sources are `patches/hermes-safe-fetch-context/series`, `patches/hermes-safe-fetch-context/manifest.yaml`, `scripts/verify-hermes-safe-fetch-context-stack.sh`, and the executable patch files; this documentation is explanatory only.
+Required behavior:
+- missing `loaded_skill["authority"]` defaults to evidence-only/untrusted
+- inline shell expansion runs only for explicit `trusted_by_local_policy`
+- external/community/plugin/unknown skill content must be fenced/rendered as data before it can influence action decisions
+
+## Mechanical maintenance
+
+The numbered patch files are mechanical layers. They are not a project history.
+
+When refreshing the stack, do not generate a later patch from a base-to-tip diff if it shares paths with an earlier patch. Use per-layer commits/refs and diff each layer against the previous layer.

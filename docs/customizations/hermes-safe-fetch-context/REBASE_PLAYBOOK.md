@@ -157,19 +157,26 @@ python -m pytest -o 'addopts=' -q tests/agent tests/tools tests/cron tests/gatew
 
 ## Refreshing the patch stack after a successful rebase
 
-After conflicts are resolved and tests pass, refresh the patches from the new upstream base.
+After conflicts are resolved and tests pass, refresh patches incrementally, one layer at a time.
 
-Set variables:
+Important: do not use `git diff "$base" "$tip"` for overlapping patch-owned paths. `0004` and `0005` both touch `agent/action_authority.py`, `model_tools.py`, and `run_agent.py`. A base-to-tip diff for `0005` would accidentally include `0004`'s changes and corrupt the stack. Always diff each refreshed patch against the previous phase commit/ref.
+
+Create phase commits or refs in the patched Hermes worktree:
 
 ```bash
 base=$(git merge-base HEAD origin/main)
-tip=$(git rev-parse HEAD)
+# Start from $base, apply/resolve 0001, commit it, then continue layer by layer.
+phase_0001=<commit-after-0001>
+phase_0002=<commit-after-0002>
+phase_0003=<commit-after-0003>
+phase_0004=<commit-after-0004>
+phase_0005=<commit-after-0005>
 ```
 
-Regenerate patch 0001 (context safety and promotion):
+Regenerate patch 0001 (context safety and promotion) from base to phase 0001:
 
 ```bash
-git diff --binary "$base" "$tip" -- \
+git diff --binary "$base" "$phase_0001" -- \
   agent/context_references.py \
   agent/context_safety.py \
   agent/memory_manager.py \
@@ -188,10 +195,10 @@ git diff --binary "$base" "$tip" -- \
   > "$patch_repo/patches/hermes-safe-fetch-context/0001-context-safety-core.patch"
 ```
 
-Regenerate patch 0002 (safe HTTP and remote-byte ingress):
+Regenerate patch 0002 (safe HTTP and remote-byte ingress) from phase 0001 to phase 0002:
 
 ```bash
-git diff --binary "$base" "$tip" -- \
+git diff --binary "$phase_0001" "$phase_0002" -- \
   tools/safe_http.py \
   gateway/platforms/base.py \
   gateway/platforms/bluebubbles.py \
@@ -218,20 +225,20 @@ git diff --binary "$base" "$tip" -- \
   > "$patch_repo/patches/hermes-safe-fetch-context/0002-safe-http-gateway-download-hardening.patch"
 ```
 
-Regenerate patch 0003 (customization maintenance tool):
+Regenerate patch 0003 (customization maintenance tool) from phase 0002 to phase 0003:
 
 ```bash
-git diff --binary "$base" "$tip" -- \
+git diff --binary "$phase_0002" "$phase_0003" -- \
   tools/customization_tool.py \
   tests/tools/test_customization_tool.py \
   toolsets.py \
   > "$patch_repo/patches/hermes-safe-fetch-context/0003-customization-maintenance-tool.patch"
 ```
 
-Regenerate patch 0004 (provenance/action-authority hardening):
+Regenerate patch 0004 (provenance/action-authority hardening) from phase 0003 to phase 0004:
 
 ```bash
-git diff --binary "$base" "$tip" -- \
+git diff --binary "$phase_0003" "$phase_0004" -- \
   agent/action_authority.py \
   agent/artifact_provenance.py \
   model_tools.py \
@@ -243,10 +250,10 @@ git diff --binary "$base" "$tip" -- \
   > "$patch_repo/patches/hermes-safe-fetch-context/0004-provenance-action-authority-hardening.patch"
 ```
 
-Regenerate patch 0005 (tool-result promotion/action-registry hardening):
+Regenerate patch 0005 (tool-result promotion/action-registry hardening) from phase 0004 to phase 0005:
 
 ```bash
-git diff --binary "$base" "$tip" -- \
+git diff --binary "$phase_0004" "$phase_0005" -- \
   agent/action_authority.py \
   agent/context_safety.py \
   agent/skill_commands.py \
@@ -269,7 +276,7 @@ printf '%s\n' \
   0005-tool-result-promotion-action-registry.patch \
   > "$patch_repo/patches/hermes-safe-fetch-context/series"
 # Only write tip= after committing the patched Hermes tree; omit tip= for working-tree generated stacks.
-printf 'base=%s\ntip=%s\n' "$base" "$tip" > "$patch_repo/patches/hermes-safe-fetch-context/base.ref"
+printf 'base=%s\ntip=%s\n' "$base" "$phase_0005" > "$patch_repo/patches/hermes-safe-fetch-context/base.ref"
 ```
 
 Check patch applicability against a clean upstream worktree before trusting the refresh:
