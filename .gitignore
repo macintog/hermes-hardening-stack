@@ -3,6 +3,7 @@
 *.swo
 /tmp/
 /worktrees/
+/verification-output/*.log
 /verification-output/*.raw.log
 /verification-output/*.local.log
 /verification-output/*.tmp

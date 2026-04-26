@@ -106,6 +106,20 @@ Current intent:
 If moved upstream:
 - search for `cache_image_from_url`, `cache_audio_from_url`, `IMAGE_CACHE_DIR`, `AUDIO_CACHE_DIR`
 
+
+### BlueBubbles
+
+Current file:
+- `gateway/platforms/bluebubbles.py`
+
+Current intent:
+- use `safe_download_bytes` for BlueBubbles attachment/media URLs
+- preserve configured/private BlueBubbles server origins through narrow allowed-private-origin policy
+- enforce explicit attachment byte caps and URL redaction
+
+If moved upstream:
+- search for BlueBubbles attachment download helpers, `safe_download_bytes`, and `MAX_ATTACHMENT_DOWNLOAD_BYTES`
+
 ### Discord
 
 Current file:
@@ -192,6 +206,20 @@ Current intent/status:
 
 If moved upstream:
 - search for `gateway/platforms/wecom.py`, `_download_remote_bytes`, and `tests/gateway/test_wecom.py::TestMediaUpload`
+
+
+### Skills hub remote fetches
+
+Current file:
+- `tools/skills_hub.py`
+
+Current intent:
+- fetch remote/community skill text through `safe_download_bytes`
+- validate redirects and block unsafe/private targets unless explicitly scoped by provider policy
+- cap bytes and redact URLs at error/log boundaries before skill content reaches cache/install/view flows
+
+If moved upstream:
+- search for `WellKnownSkillSource`, remote skill source fetch helpers, hub/community/GitHub raw fetches, and any provider-mediated skill bundle download path
 
 ## Tests to keep aligned
 

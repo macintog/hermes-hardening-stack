@@ -25,7 +25,7 @@ Current shape:
 - Verification script: `scripts/verify-hermes-safe-fetch-context-stack.sh`
 - Intent docs: this directory, explanatory only
 
-The customization has two separable intentions:
+The customization has four separable mandatory intentions:
 
 1. Safe HTTP download boundary
    - Centralize URL validation and redirect validation for gateway/media downloads.
@@ -39,9 +39,20 @@ The customization has two separable intentions:
    - Return structured findings so callers can block, warn, or report consistently.
    - Avoid broad ad hoc pattern copies across tools.
 
+3. Artifact provenance and action authority boundary
+   - Carry evidence-only provenance/taint for downloaded, extracted, recalled, plugin, skill, browser, and tool-derived content.
+   - Require trusted scoped user/system/developer authority before side-effecting tools can act on concrete targets or arguments.
+   - Fail closed for secret reads/transmission, persistence, outbound messages, cron/memory writes, skill/plugin execution, browser credentialed actions, and unknown side effects when untrusted evidence is involved.
+
+4. Tool-result promotion and action-registry boundary
+   - Treat model-visible string tool outputs as untrusted evidence by default unless an explicit trusted internal control-tool exemption exists.
+   - Keep registered tool action classification explicit and fail closed for unknown side-effect behavior.
+   - Propagate prior tool-result/evidence taint into later action decisions so clean-looking arguments derived from hostile evidence are still gated.
+
 This is not intended to fork Hermes behavior broadly. It is a narrow hardening layer around:
 - untrusted network fetches entering local cache/tool flows
 - untrusted text entering prompt-like context surfaces
+- external/tool-derived evidence reaching side-effecting action decisions
 
 Patch files:
 - `0001-context-safety-core.patch`: `agent/context_safety.py` plus memory, prompt-builder, cron, and skill/cron tool integrations and tests.
