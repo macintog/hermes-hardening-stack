@@ -37,6 +37,7 @@ This is not intended to fork Hermes behavior broadly. It is a narrow hardening l
 Patch files:
 - `0001-context-safety-core.patch`: `agent/context_safety.py` plus memory, prompt-builder, cron, and skill/cron tool integrations and tests.
 - `0002-safe-http-gateway-download-hardening.patch`: `tools/safe_http.py` plus gateway downloader integrations and tests.
+- `0003-customization-maintenance-tool.patch`: `tools/customization_tool.py` and tests for auditing downstream patch-stack repos as this pattern repeats.
 
 Preferred maintenance model:
 1. Update Hermes upstream normally.

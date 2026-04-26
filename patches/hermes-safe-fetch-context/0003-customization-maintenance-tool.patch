@@ -1,0 +1,395 @@
+diff --git a/tests/tools/test_customization_tool.py b/tests/tools/test_customization_tool.py
+new file mode 100644
+index 00000000..e39870fd
+--- /dev/null
++++ b/tests/tools/test_customization_tool.py
+@@ -0,0 +1,103 @@
++import json
++import subprocess
++from pathlib import Path
++
++from tools.customization_tool import hermes_customizations
++
++
++def _git(repo: Path, *args: str) -> str:
++    return subprocess.check_output(["git", "-C", str(repo), *args], text=True).strip()
++
++
++def _init_repo(repo: Path) -> None:
++    repo.mkdir()
++    _git(repo, "init", "-b", "main")
++    _git(repo, "config", "user.email", "test.invalid")
++    _git(repo, "config", "user.name", "Test User")
++
++
++def test_audit_passes_for_patch_docs_only_repo(tmp_path):
++    repo = tmp_path / "patches"
++    _init_repo(repo)
++    (repo / "patches/example").mkdir(parents=True)
++    (repo / "docs/customizations/example").mkdir(parents=True)
++    (repo / "patches/example/series").write_text("0001-demo.patch\n")
++    (repo / "patches/example/0001-demo.patch").write_text("diff --git a/README.md b/README.md\n")
++    (repo / "docs/customizations/example/README.md").write_text("Intent docs\n")
++    _git(repo, "add", ".")
++    _git(repo, "commit", "-m", "init")
++
++    result = json.loads(hermes_customizations(action="audit", repo_path=str(repo)))
++
++    assert result["ok"] is True
++    assert result["repo_path"] == str(repo)
++    assert result["tracked_file_count"] == 3
++    assert result["forbidden_source_tree_hits"] == []
++    assert result["pii_hits"] == []
++    assert result["series"] == {"patches/example/series": ["0001-demo.patch"]}
++
++
++def test_audit_flags_hermes_source_tree_duplication(tmp_path):
++    repo = tmp_path / "bad"
++    _init_repo(repo)
++    (repo / "agent").mkdir()
++    (repo / "agent/context_safety.py").write_text("# vendored source\n")
++    _git(repo, "add", ".")
++    _git(repo, "commit", "-m", "bad")
++
++    result = json.loads(hermes_customizations(action="audit", repo_path=str(repo)))
++
++    assert result["ok"] is False
++    assert "agent/context_safety.py" in result["forbidden_source_tree_hits"]
++
++
++def test_audit_flags_user_specific_pii_in_docs(tmp_path):
++    repo = tmp_path / "pii"
++    _init_repo(repo)
++    (repo / "docs/customizations/example").mkdir(parents=True)
++    pii_path = "/" + "Users" + "/alice/.hermes/hermes-agent"
++    (repo / "docs/customizations/example/README.md").write_text(f"Repo: {pii_path}\n")
++    _git(repo, "add", ".")
++    _git(repo, "commit", "-m", "pii")
++
++    result = json.loads(hermes_customizations(action="audit", repo_path=str(repo)))
++
++    assert result["ok"] is False
++    assert result["pii_hits"]
++    assert result["pii_hits"][0]["pattern"] == "macos_user_path"
++
++
++def test_audit_ignores_redacted_url_userinfo_in_patch_fixtures(tmp_path):
++    repo = tmp_path / "fixtures"
++    _init_repo(repo)
++    (repo / "patches/example").mkdir(parents=True)
++    (repo / "patches/example/series").write_text("0001-demo.patch\n")
++    userinfo_url = "https://user:" + "pass" + "@files.example/report.pdf?token=***"
++    (repo / "patches/example/0001-demo.patch").write_text(
++        f"+ assert redact_url('{userinfo_url}')\n"
++    )
++    _git(repo, "add", ".")
++    _git(repo, "commit", "-m", "fixtures")
++
++    result = json.loads(hermes_customizations(action="audit", repo_path=str(repo)))
++
++    assert result["ok"] is True
++    assert result["pii_hits"] == []
++
++
++def test_status_reads_customization_pointer_from_config(tmp_path):
++    config = tmp_path / "config.yaml"
++    repo = tmp_path / "patches"
++    repo.mkdir()
++    config.write_text(
++        "customizations:\n"
++        f"  hermes_agent_patches: {repo}\n"
++        "  hermes_agent_patches_remote: https://example.invalid/repo.git\n"
++    )
++
++    result = json.loads(hermes_customizations(action="status", config_path=str(config)))
++
++    assert result["ok"] is True
++    assert result["configured_repo_path"] == str(repo)
++    assert result["configured_remote"] == "https://example.invalid/repo.git"
++    assert result["repo_exists"] is True
+diff --git a/tools/customization_tool.py b/tools/customization_tool.py
+new file mode 100644
+index 00000000..438d466f
+--- /dev/null
++++ b/tools/customization_tool.py
+@@ -0,0 +1,254 @@
++#!/usr/bin/env python3
++"""Hermes downstream customization maintenance tool.
++
++Audits lightweight patch-stack repositories used to preserve local Hermes
++customizations without vendoring the Hermes source tree.
++"""
++
++from __future__ import annotations
++
++import json
++import re
++import subprocess
++from pathlib import Path
++from typing import Any
++
++from tools.registry import registry, tool_error
++
++
++FORBIDDEN_SOURCE_ROOTS = {
++    "agent",
++    "tools",
++    "gateway",
++    "cron",
++    "tests",
++    "web",
++    "website",
++    "hermes_cli",
++    "run_agent.py",
++    "cli.py",
++    "pyproject.toml",
++    "uv.lock",
++}
++
++PII_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
++    ("macos_user_path", re.compile(r"/Users/[^/\s`'\"]+")),
++    ("linux_user_path", re.compile(r"/home/[^/\s`'\"]+")),
++    ("email", re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")),
++    ("aws_access_key", re.compile(r"AKIA[0-9A-Z]{16}")),
++    ("github_token", re.compile(r"gh[pousr]_[A-Za-z0-9_]{20,}")),
++    ("openai_key", re.compile(r"sk-[A-Za-z0-9]{20,}")),
++    ("private_key_header", re.compile(r"BEGIN (?:RSA |OPENSSH |EC |DSA |)PRIVATE KEY")),
++]
++
++
++def _run_git(repo: Path, *args: str) -> tuple[int, str]:
++    proc = subprocess.run(
++        ["git", "-C", str(repo), *args],
++        text=True,
++        stdout=subprocess.PIPE,
++        stderr=subprocess.STDOUT,
++        check=False,
++    )
++    return proc.returncode, proc.stdout.strip()
++
++
++def _tracked_files(repo: Path) -> list[str]:
++    code, output = _run_git(repo, "ls-tree", "-r", "--name-only", "HEAD")
++    if code != 0:
++        raise RuntimeError(output or "not a git repository with commits")
++    return [line for line in output.splitlines() if line]
++
++
++def _is_forbidden_source_file(path: str) -> bool:
++    first = path.split("/", 1)[0]
++    if first in {"patches", "docs"}:
++        return False
++    return path in FORBIDDEN_SOURCE_ROOTS or first in FORBIDDEN_SOURCE_ROOTS
++
++
++def _scan_pii(repo: Path, files: list[str]) -> list[dict[str, Any]]:
++    hits: list[dict[str, Any]] = []
++    for rel in files:
++        path = repo / rel
++        try:
++            text = path.read_text(encoding="utf-8")
++        except UnicodeDecodeError:
++            continue
++        except OSError:
++            continue
++        for line_no, line in enumerate(text.splitlines(), 1):
++            if "PII_PATTERNS" in line or "re.compile" in line:
++                continue
++            if line.lstrip().startswith(("+@pytest", "-@pytest", "@pytest")):
++                continue
++            normalized = (
++                line.replace("token=***", "")
++                .replace("Signature=***", "")
++                .replace("X-Amz-Signature=***", "")
++            )
++            # URL userinfo fixtures can look like contact addresses to a broad
++            # regex, but they are redaction/URL tests rather than contact PII.
++            # Strip the userinfo portion before email checks.
++            normalized = re.sub(r"https?://[^\s/'\"]+@", "https://", normalized)
++            for name, pattern in PII_PATTERNS:
++                match = pattern.search(normalized)
++                if match:
++                    hits.append({
++                        "path": rel,
++                        "line": line_no,
++                        "pattern": name,
++                        "match": match.group(0),
++                    })
++    return hits
++
++
++def _read_series_files(repo: Path, files: list[str]) -> dict[str, list[str]]:
++    series: dict[str, list[str]] = {}
++    for rel in files:
++        if not rel.endswith("/series"):
++            continue
++        entries: list[str] = []
++        for line in (repo / rel).read_text(encoding="utf-8").splitlines():
++            stripped = line.strip()
++            if stripped and not stripped.startswith("#"):
++                entries.append(stripped)
++        series[rel] = entries
++    return series
++
++
++def _parse_config_pointer(config_path: Path) -> tuple[str, str]:
++    if not config_path.exists():
++        return "", ""
++    in_customizations = False
++    repo_path = ""
++    remote = ""
++    for raw in config_path.read_text(encoding="utf-8").splitlines():
++        if raw.strip() == "customizations:":
++            in_customizations = True
++            continue
++        if in_customizations and raw and not raw.startswith(" "):
++            break
++        if not in_customizations:
++            continue
++        stripped = raw.strip()
++        if stripped.startswith("hermes_agent_patches:"):
++            repo_path = stripped.split(":", 1)[1].strip().strip('"\'')
++        elif stripped.startswith("hermes_agent_patches_remote:"):
++            remote = stripped.split(":", 1)[1].strip().strip('"\'')
++    return repo_path, remote
++
++
++def _default_config_path() -> Path:
++    return Path.home() / ".hermes" / "config.yaml"
++
++
++def _default_repo_path(config_path: Path | None = None) -> Path:
++    config = config_path or _default_config_path()
++    configured, _ = _parse_config_pointer(config)
++    if configured:
++        return Path(configured).expanduser()
++    return Path.home() / ".config" / "hermes-agent-patches"
++
++
++def _audit_repo(repo: Path) -> dict[str, Any]:
++    files = _tracked_files(repo)
++    forbidden = [path for path in files if _is_forbidden_source_file(path)]
++    pii_hits = _scan_pii(repo, files)
++    series = _read_series_files(repo, files)
++    missing_series_entries: list[dict[str, str]] = []
++    for series_path, entries in series.items():
++        base_dir = str(Path(series_path).parent)
++        for entry in entries:
++            rel = str(Path(base_dir) / entry)
++            if rel not in files:
++                missing_series_entries.append({"series": series_path, "entry": entry})
++
++    ok = not forbidden and not pii_hits and not missing_series_entries
++    return {
++        "ok": ok,
++        "repo_path": str(repo),
++        "tracked_file_count": len(files),
++        "forbidden_source_tree_hits": forbidden,
++        "pii_hits": pii_hits,
++        "series": series,
++        "missing_series_entries": missing_series_entries,
++    }
++
++
++def hermes_customizations(
++    action: str = "status",
++    repo_path: str | None = None,
++    config_path: str | None = None,
++) -> str:
++    """Inspect or audit the downstream Hermes customization patch-stack repo."""
++    action = (action or "status").strip().lower()
++    config = Path(config_path).expanduser() if config_path else _default_config_path()
++    repo = Path(repo_path).expanduser() if repo_path else _default_repo_path(config)
++
++    try:
++        if action == "status":
++            configured_repo, configured_remote = _parse_config_pointer(config)
++            return json.dumps({
++                "ok": True,
++                "config_path": str(config),
++                "configured_repo_path": configured_repo,
++                "configured_remote": configured_remote,
++                "default_repo_path": str(_default_repo_path(config)),
++                "repo_path": str(repo),
++                "repo_exists": repo.exists(),
++                "is_git_repo": (repo / ".git").exists(),
++            }, ensure_ascii=False)
++        if action == "audit":
++            return json.dumps(_audit_repo(repo), ensure_ascii=False)
++        return tool_error("action must be one of: status, audit")
++    except Exception as exc:
++        return json.dumps({"ok": False, "error": str(exc), "repo_path": str(repo)}, ensure_ascii=False)
++
++
++def check_customization_requirements() -> bool:
++    return True
++
++
++HERMES_CUSTOMIZATIONS_SCHEMA = {
++    "name": "hermes_customizations",
++    "description": (
++        "Inspect or audit the downstream Hermes customization patch-stack repo. "
++        "Use this before or after creating local Hermes patch stacks to verify the "
++        "repo is separate from Hermes source, has no obvious PII/secrets, and has "
++        "valid series files."
++    ),
++    "parameters": {
++        "type": "object",
++        "properties": {
++            "action": {
++                "type": "string",
++                "enum": ["status", "audit"],
++                "description": "status reads configured paths; audit checks repo contents.",
++                "default": "status",
++            },
++            "repo_path": {
++                "type": "string",
++                "description": "Optional patch-stack repo path. Defaults to config pointer or ~/.config/hermes-agent-patches.",
++            },
++            "config_path": {
++                "type": "string",
++                "description": "Optional Hermes config.yaml path. Defaults to ~/.hermes/config.yaml.",
++            },
++        },
++    },
++}
++
++
++registry.register(
++    name="hermes_customizations",
++    toolset="customizations",
++    schema=HERMES_CUSTOMIZATIONS_SCHEMA,
++    handler=lambda args, **kw: hermes_customizations(
++        action=args.get("action", "status"),
++        repo_path=args.get("repo_path"),
++        config_path=args.get("config_path"),
++    ),
++    check_fn=check_customization_requirements,
++    emoji="🧩",
++)
+diff --git a/toolsets.py b/toolsets.py
+index 1c113afe..2c0d86e9 100644
+--- a/toolsets.py
++++ b/toolsets.py
+@@ -56,6 +56,8 @@ _HERMES_CORE_TOOLS = [
+     "execute_code", "delegate_task",
+     # Cronjob management
+     "cronjob",
++    # Hermes downstream customization maintenance
++    "hermes_customizations",
+     # Cross-platform messaging (gated on gateway running via check_fn)
+     "send_message",
+     # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)
+@@ -126,6 +128,12 @@ TOOLSETS = {
+         "tools": ["cronjob"],
+         "includes": []
+     },
++
++    "customizations": {
++        "description": "Hermes downstream customization patch-stack maintenance and audit tools",
++        "tools": ["hermes_customizations"],
++        "includes": []
++    },
+     
+     "messaging": {
+         "description": "Cross-platform messaging: send messages to Telegram, Discord, Slack, SMS, etc.",

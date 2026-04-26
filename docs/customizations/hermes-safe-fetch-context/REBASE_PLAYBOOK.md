@@ -90,6 +90,7 @@ python -m pytest -o 'addopts=' -q \
   tests/cron/test_cron_script.py \
   tests/tools/test_cronjob_tools.py \
   tests/tools/test_skills_tool.py \
+  tests/tools/test_customization_tool.py \
   tests/gateway/test_base_media_cache_safe_http.py \
   tests/gateway/test_discord_attachment_download.py \
   tests/gateway/test_feishu.py \
@@ -97,7 +98,8 @@ python -m pytest -o 'addopts=' -q \
   tests/gateway/test_media_download_retry.py \
   tests/gateway/test_qqbot.py \
   tests/gateway/test_slack.py \
-  tests/gateway/test_telegram_safe_image_download.py
+  tests/gateway/test_telegram_safe_image_download.py \
+  tests/tools/test_customization_tool.py
 ```
 
 Fuller confidence check if time allows:
@@ -158,6 +160,7 @@ git diff --binary "$base" "$tip" -- \
   tests/gateway/test_qqbot.py \
   tests/gateway/test_slack.py \
   tests/gateway/test_telegram_safe_image_download.py \
+  tests/tools/test_customization_tool.py \
   > patches/hermes-safe-fetch-context/0002-safe-http-gateway-download-hardening.patch
 ```
 

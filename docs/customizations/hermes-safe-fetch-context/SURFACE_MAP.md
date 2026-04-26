@@ -198,3 +198,23 @@ Gateway integration tests:
 - `tests/gateway/test_qqbot.py`
 - `tests/gateway/test_slack.py`
 - `tests/gateway/test_telegram_safe_image_download.py`
+
+## Patch 0003: customization maintenance tool
+
+### Tool implementation
+
+Current files:
+- `tools/customization_tool.py`
+- `tests/tools/test_customization_tool.py`
+- `toolsets.py`
+
+Current intent:
+- expose `hermes_customizations` for status/audit of downstream Hermes patch-stack repos
+- read the informational config pointer at `customizations.hermes_agent_patches`
+- verify patch-stack repos do not vendor Hermes source roots
+- scan tracked patch-stack contents for common user-specific paths, PII, and secret-looking tokens
+- verify `series` entries point to tracked patch files
+
+If moved upstream:
+- search for `hermes_customizations`, `customizations.hermes_agent_patches`, or patch-stack maintenance helpers
+- preserve the repo-separation and PII-audit behavior even if the toolset name changes

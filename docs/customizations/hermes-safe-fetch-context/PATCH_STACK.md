@@ -8,6 +8,7 @@ This patch stack is meant to be small, reviewable, and portable across frequent 
 
 1. `0001-context-safety-core.patch`
 2. `0002-safe-http-gateway-download-hardening.patch`
+3. `0003-customization-maintenance-tool.patch`
 
 `base.ref` records the upstream-ish base and captured tip used to generate the current patches.
 
@@ -38,6 +39,15 @@ Owns network fetch/download safety:
 - gateway downloader call-site migrations
 
 This patch should remain independent of prompt/context scanning.
+
+### Patch 0003: customization maintenance tool
+
+Owns the reusable guardrail for this recurring downstream-maintenance pattern:
+- `tools/customization_tool.py`
+- `tests/tools/test_customization_tool.py`
+- `toolsets.py` registration for the `customizations` toolset
+
+This patch should stay focused on inspecting/auditing patch-stack repos. It should not contain project-specific safe-fetch logic.
 
 ## Why not one giant patch?
 
