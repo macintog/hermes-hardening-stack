@@ -19,12 +19,17 @@ patch_repo=${HERMES_AGENT_PATCHES:-$HOME/.config/hermes-agent-patches}
 
 Hermes config also records this path at `customizations.hermes_agent_patches`.
 
+Canonical sources:
 - `patches/hermes-safe-fetch-context/series`
+- `patches/hermes-safe-fetch-context/manifest.yaml`
+- `scripts/verify-hermes-safe-fetch-context-stack.sh`
 - `patches/hermes-safe-fetch-context/0001-context-safety-core.patch`
 - `patches/hermes-safe-fetch-context/0002-safe-http-gateway-download-hardening.patch`
 - `patches/hermes-safe-fetch-context/0003-customization-maintenance-tool.patch`
 - `patches/hermes-safe-fetch-context/0004-provenance-action-authority-hardening.patch`
-- `patches/hermes-safe-fetch-context/manifest.yaml`
+- `patches/hermes-safe-fetch-context/0005-tool-result-promotion-action-registry.patch`
+
+Docs in `docs/customizations/hermes-safe-fetch-context/` are explanatory only; when in doubt, follow the series, manifest, verifier, and patch payloads.
 
 ## Normal update workflow
 
@@ -74,6 +79,7 @@ Fast syntax/import smoke:
 python -m py_compile \
   agent/context_references.py \
   agent/context_safety.py \
+  agent/skill_commands.py \
   agent/memory_manager.py \
   agent/prompt_builder.py \
   cron/scheduler.py \
@@ -127,7 +133,8 @@ python -m pytest -o 'addopts=' -q \
   tests/security/test_skill_plugin_boundaries.py \
   tests/security/test_artifact_provenance.py \
   tests/security/test_action_authority.py \
-  tests/security/test_prompt_injection_containment.py
+  tests/security/test_prompt_injection_containment.py \
+  tests/security/test_tool_result_promotion.py
 ```
 
 Clean-base stack verification:
@@ -236,6 +243,21 @@ git diff --binary "$base" "$tip" -- \
   > "$patch_repo/patches/hermes-safe-fetch-context/0004-provenance-action-authority-hardening.patch"
 ```
 
+Regenerate patch 0005 (tool-result promotion/action-registry hardening):
+
+```bash
+git diff --binary "$base" "$tip" -- \
+  agent/action_authority.py \
+  agent/context_safety.py \
+  agent/skill_commands.py \
+  model_tools.py \
+  run_agent.py \
+  tests/security/test_action_authority.py \
+  tests/security/test_prompt_injection_containment.py \
+  tests/security/test_tool_result_promotion.py \
+  > "$patch_repo/patches/hermes-safe-fetch-context/0005-tool-result-promotion-action-registry.patch"
+```
+
 Refresh `series` and `base.ref`:
 
 ```bash
@@ -244,6 +266,7 @@ printf '%s\n' \
   0002-safe-http-gateway-download-hardening.patch \
   0003-customization-maintenance-tool.patch \
   0004-provenance-action-authority-hardening.patch \
+  0005-tool-result-promotion-action-registry.patch \
   > "$patch_repo/patches/hermes-safe-fetch-context/series"
 # Only write tip= after committing the patched Hermes tree; omit tip= for working-tree generated stacks.
 printf 'base=%s\ntip=%s\n' "$base" "$tip" > "$patch_repo/patches/hermes-safe-fetch-context/base.ref"

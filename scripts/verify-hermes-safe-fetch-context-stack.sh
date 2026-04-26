@@ -109,14 +109,17 @@ fi
 echo "Creating clean verification worktree from $base_ref"
 git -C "$checkout" worktree add --detach "$worktree" "$base_ref" >/dev/null
 
-echo "Checking manifest/series consistency"
-python - "$stack_dir" "$series_file" <<'PY'
+echo "Checking manifest/series/doc consistency"
+playbook_file="$patch_repo/docs/customizations/hermes-safe-fetch-context/REBASE_PLAYBOOK.md"
+python - "$stack_dir" "$series_file" "$playbook_file" "$script_dir/verify-hermes-safe-fetch-context-stack.sh" <<'PY'
 from pathlib import Path
 import re
 import sys
 
 stack_dir = Path(sys.argv[1])
 series_file = Path(sys.argv[2])
+playbook_file = Path(sys.argv[3])
+verifier_file = Path(sys.argv[4])
 manifest_file = stack_dir / "manifest.yaml"
 if not manifest_file.exists():
     raise SystemExit(f"ERROR: missing manifest: {manifest_file}")
@@ -128,7 +131,7 @@ current: dict[str, object] | None = None
 section: str | None = None
 for raw in manifest_text.splitlines():
     if match := re.match(r"^  - file: (\S+\.patch)\s*$", raw):
-        current = {"file": match.group(1), "owns": []}
+        current = {"file": match.group(1), "owns": [], "required_tests": []}
         patch_blocks.append(current)
         section = None
         continue
@@ -137,18 +140,33 @@ for raw in manifest_text.splitlines():
     if re.match(r"^    owns:\s*$", raw):
         section = "owns"
         continue
+    if re.match(r"^    required_tests:\s*$", raw):
+        section = "required_tests"
+        continue
     if re.match(r"^    [a-zA-Z_]+:\s*$", raw):
         section = None
         continue
-    if section == "owns":
+    if section in {"owns", "required_tests"}:
         if match := re.match(r"^      - (.+?)\s*$", raw):
-            current["owns"].append(match.group(1))
+            current[section].append(match.group(1))
 
+REQUIRED_PATCHES = [
+    "0001-context-safety-core.patch",
+    "0002-safe-http-gateway-download-hardening.patch",
+    "0003-customization-maintenance-tool.patch",
+    "0004-provenance-action-authority-hardening.patch",
+    "0005-tool-result-promotion-action-registry.patch",
+]
 manifest_patches = [str(block["file"]) for block in patch_blocks]
 if series != manifest_patches:
     raise SystemExit(
         "ERROR: series/manifest patch order mismatch\n"
         f"series={series}\nmanifest={manifest_patches}"
+    )
+if series[:len(REQUIRED_PATCHES)] != REQUIRED_PATCHES:
+    raise SystemExit(
+        "ERROR: mandatory patch prefix changed; do not drop or reorder required hardening phases\n"
+        f"expected_prefix={REQUIRED_PATCHES}\nactual={series}"
     )
 for patch_name in series:
     patch_path = stack_dir / patch_name
@@ -156,18 +174,44 @@ for patch_name in series:
         raise SystemExit(f"ERROR: series patch missing on disk: {patch_path}")
     if patch_path.stat().st_size == 0:
         raise SystemExit(f"ERROR: series patch is empty: {patch_path}")
-required_phases = {
-    "context_promotion_scanning_and_fencing",
-    "safe_fetch_remote_byte_ingress",
-    "patch_stack_integrity_tooling",
-    "artifact_quarantine_provenance_and_taint",
-    "action_authority_regression_tests",
-    "registry_action_classification",
-    "tool_result_promotion_policy",
-}
-missing = [phase for phase in sorted(required_phases) if phase not in manifest_text]
-if missing:
-    raise SystemExit(f"ERROR: manifest missing required phases: {missing}")
+
+required_phase_tuples = [
+    ("context_promotion_scanning_and_fencing", "0001-context-safety-core.patch"),
+    ("safe_fetch_remote_byte_ingress", "0002-safe-http-gateway-download-hardening.patch"),
+    ("patch_stack_integrity_tooling", "0003-customization-maintenance-tool.patch"),
+    ("artifact_quarantine_provenance_and_taint", "0004-provenance-action-authority-hardening.patch"),
+    ("action_authority_regression_tests", "0004-provenance-action-authority-hardening.patch"),
+    ("registry_action_classification", "0005-tool-result-promotion-action-registry.patch"),
+    ("tool_result_promotion_policy", "0005-tool-result-promotion-action-registry.patch"),
+]
+phase_blocks: list[dict[str, str]] = []
+current_phase: dict[str, str] | None = None
+in_required_phases = False
+for raw in manifest_text.splitlines():
+    if raw == "required_phases:":
+        in_required_phases = True
+        continue
+    if in_required_phases and raw and not raw.startswith("  "):
+        in_required_phases = False
+    if not in_required_phases:
+        continue
+    if match := re.match(r"^  - name: (\S+)\s*$", raw):
+        current_phase = {"name": match.group(1)}
+        phase_blocks.append(current_phase)
+        continue
+    if current_phase is not None:
+        if match := re.match(r"^    patch: (\S+\.patch)\s*$", raw):
+            current_phase["patch"] = match.group(1)
+        elif match := re.match(r"^    mandatory: (true|false)\s*$", raw):
+            current_phase["mandatory"] = match.group(1)
+phase_map = {phase.get("name"): phase for phase in phase_blocks}
+missing_phases = []
+for name, patch_name in required_phase_tuples:
+    phase = phase_map.get(name)
+    if not phase or phase.get("patch") != patch_name or phase.get("mandatory") != "true":
+        missing_phases.append({"name": name, "patch": patch_name, "mandatory": "true", "actual": phase})
+if missing_phases:
+    raise SystemExit(f"ERROR: manifest missing mandatory required phase mappings: {missing_phases}")
 
 for block in patch_blocks:
     patch_name = str(block["file"])
@@ -180,7 +224,86 @@ for block in patch_blocks:
         raise SystemExit(
             f"ERROR: manifest owns paths missing from {patch_name} diff headers: {missing_owned}"
         )
-print("manifest consistency ok")
+def dedupe(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in items:
+        if item not in seen:
+            seen.add(item)
+            result.append(item)
+    return result
+
+def extract_section(text: str, heading: str, next_heading_level: int = 2) -> str:
+    pattern = re.compile(rf"^{'#' * next_heading_level} {re.escape(heading)}\s*$", re.MULTILINE)
+    match = pattern.search(text)
+    if not match:
+        raise SystemExit(f"ERROR: playbook missing heading: {'#' * next_heading_level} {heading}")
+    start = match.end()
+    next_match = re.search(rf"^{'#' * next_heading_level} ", text[start:], flags=re.MULTILINE)
+    end = start + next_match.start() if next_match else len(text)
+    return text[start:end]
+
+def extract_fenced_block_after(text: str, marker: str) -> str:
+    marker_index = text.find(marker)
+    if marker_index < 0:
+        raise SystemExit(f"ERROR: playbook missing marker: {marker}")
+    fence = re.search(r"```[^\n]*\n(.*?)\n```", text[marker_index:], flags=re.DOTALL)
+    if not fence:
+        raise SystemExit(f"ERROR: playbook missing fenced block after marker: {marker}")
+    return fence.group(1)
+
+def compare_ordered(label: str, expected: list[str], actual: list[str]) -> None:
+    if expected != actual:
+        raise SystemExit(
+            f"ERROR: {label} does not match series\n"
+            f"expected={expected}\nactual={actual}\n"
+            f"missing={[item for item in expected if item not in actual]}\n"
+            f"extra={[item for item in actual if item not in expected]}"
+        )
+
+def compare_sets(label: str, expected: list[str], actual: list[str]) -> None:
+    expected_set = set(expected)
+    actual_set = set(actual)
+    if expected_set != actual_set:
+        raise SystemExit(
+            f"ERROR: {label} does not match manifest required_tests\n"
+            f"missing={sorted(expected_set - actual_set)}\n"
+            f"extra={sorted(actual_set - expected_set)}"
+        )
+
+if not playbook_file.exists():
+    raise SystemExit(f"ERROR: missing playbook: {playbook_file}")
+playbook_text = playbook_file.read_text()
+patch_location_section = extract_section(playbook_text, "Patch stack location")
+playbook_patch_list = dedupe(re.findall(r"patches/hermes-safe-fetch-context/(\S+\.patch)`?", patch_location_section))
+compare_ordered("playbook patch stack location", series, playbook_patch_list)
+
+refresh_block = extract_fenced_block_after(playbook_text, "Refresh `series` and `base.ref`:")
+refresh_series = re.findall(r"^\s*(\d{4}-\S+\.patch)\s*\\\\?$", refresh_block, flags=re.MULTILINE)
+compare_ordered("playbook refresh series block", series, refresh_series)
+
+manifest_required_tests = dedupe(
+    test
+    for block in patch_blocks
+    for test in list(block["required_tests"])
+)
+playbook_tests_block = extract_fenced_block_after(playbook_text, "Targeted test set:")
+playbook_tests = dedupe(re.findall(r"tests/[\w./-]+\.py(?:::[\w.\[\]-]+)?", playbook_tests_block))
+playbook_tests = dedupe([test.split("::", 1)[0] for test in playbook_tests])
+compare_sets("playbook targeted tests", manifest_required_tests, playbook_tests)
+
+verifier_text = verifier_file.read_text()
+verifier_tests_match = re.search(
+    r"echo \"Running targeted tests\"\n(?P<cmd>.*?tests/security/test_tool_result_promotion\.py)",
+    verifier_text,
+    flags=re.DOTALL,
+)
+if not verifier_tests_match:
+    raise SystemExit("ERROR: verifier targeted test command missing or does not include tests/security/test_tool_result_promotion.py")
+verifier_tests = dedupe(re.findall(r"tests/[\w./-]+\.py", verifier_tests_match.group("cmd")))
+compare_sets("verifier targeted tests", manifest_required_tests, verifier_tests)
+
+print("manifest/series/doc consistency ok")
 PY
 
 cd "$worktree"
@@ -203,7 +326,8 @@ if [[ -n "$(git status --porcelain)" ]]; then
   exit 1
 fi
 
-echo "Applying patch stack from $series_file"
+series_display="patches/hermes-safe-fetch-context/series"
+echo "Applying patch stack from $series_display"
 while IFS= read -r patch || [[ -n "$patch" ]]; do
   [[ -z "$patch" || "$patch" =~ ^[[:space:]]*# ]] && continue
   echo "  applying $patch"
@@ -273,6 +397,8 @@ PY
 
 echo "Running targeted tests"
 "$python_bin" -m pytest -o 'addopts=' -q \
+  -W "ignore:.*asyncio.get_event_loop_policy.*deprecated.*:DeprecationWarning" \
+  -W "ignore::DeprecationWarning:tests.conftest" \
   tests/agent/test_context_safety.py \
   tests/tools/test_safe_http.py \
   tests/tools/test_customization_tool.py \

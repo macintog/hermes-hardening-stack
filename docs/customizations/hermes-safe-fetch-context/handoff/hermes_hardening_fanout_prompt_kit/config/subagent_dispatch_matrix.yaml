@@ -1,0 +1,69 @@
+source_repo: macintog/hermes-hardening-stack
+patch_stack: patches/hermes-safe-fetch-context
+current_series:
+  - 0001-context-safety-core.patch
+  - 0002-safe-http-gateway-download-hardening.patch
+  - 0003-customization-maintenance-tool.patch
+  - 0004-provenance-action-authority-hardening.patch
+  - 0005-tool-result-promotion-action-registry.patch
+non_negotiables:
+  - Do not drop 0005.
+  - Treat regex scanning and textual fences as aids, not security boundaries.
+  - Side effects after untrusted influence require deterministic trusted scoped authorization.
+  - Tool output strings are untrusted by default unless explicit metadata says otherwise.
+  - Persisted untrusted-derived content remains tainted on recall.
+subagents:
+  S00:
+    file: subagent_prompts/S00_repo_snapshot_and_gap_triage.md
+    phase: analysis
+    output: repo snapshot and docs/manifest/verifier drift list
+  S01:
+    file: subagent_prompts/S01_threat_model_and_invariants.md
+    phase: analysis
+    output: threat model, invariants, acceptance tests
+  S02:
+    file: subagent_prompts/S02_structured_taint_and_authority_grants.md
+    phase: design_implementation
+    output: structured taint and scoped authorization design/tests
+  S03:
+    file: subagent_prompts/S03_tool_registry_metadata_fail_closed.md
+    phase: design_implementation
+    output: tool metadata schema and fail-closed behavior
+  S04:
+    file: subagent_prompts/S04_tool_result_promotion_default_taint.md
+    phase: design_implementation
+    output: default-taint promotion policy and tests
+  S05:
+    file: subagent_prompts/S05_safe_http_ssrf_parser_hardening.md
+    phase: design_implementation
+    output: safe HTTP/parser hardening matrix/tests
+  S06:
+    file: subagent_prompts/S06_persistence_memory_cron_skills_plugins.md
+    phase: design_implementation
+    output: durable taint for persistence and skill/plugin safety
+  S07:
+    file: subagent_prompts/S07_adversarial_e2e_harness.md
+    phase: test_design
+    output: adversarial E2E test suite
+  S08:
+    file: subagent_prompts/S08_docs_manifest_playbook_ci.md
+    phase: maintenance
+    output: docs/manifest/verifier/CI drift hardening
+  S09:
+    file: subagent_prompts/S09_final_red_team_review.md
+    phase: final_review
+    output: bypass review and residual risk register
+  S10:
+    file: subagent_prompts/S10_integration_patch_refresh.md
+    phase: integration
+    output: final patch stack and verification summary
+reviews:
+  R01:
+    file: review_prompts/R01_security_boundary_review.md
+    phase: final_review
+  R02:
+    file: review_prompts/R02_regression_test_review.md
+    phase: final_review
+  R03:
+    file: review_prompts/R03_doc_drift_review.md
+    phase: final_review

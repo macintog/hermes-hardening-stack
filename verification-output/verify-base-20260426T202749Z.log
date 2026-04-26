@@ -1,5 +1,5 @@
-Creating clean verification worktree from origin/main
-Preparing worktree (detached HEAD 087e74d4)
+Creating clean verification worktree from eaa7e2db670ba0879bc040c22c39d5abb39b897c
+Preparing worktree (detached HEAD eaa7e2db)
 Checking manifest/series/doc consistency
 manifest/series/doc consistency ok
 Verifying all series patch files are tracked
@@ -64,6 +64,7 @@ Applied patch to 'agent/skill_commands.py' cleanly.
 Applied patch to 'model_tools.py' cleanly.
 Applied patch to 'run_agent.py' cleanly.
 Applied patch to 'tests/security/test_action_authority.py' cleanly.
+Applied patch to 'tests/security/test_prompt_injection_containment.py' cleanly.
 Falling back to direct application...
 Running py_compile smoke checks
 py_compile ok (50 files)
@@ -83,36 +84,37 @@ sssssssssssssssss......sssssssssssssssss................................ [ 58%]
 ........................................................................ [ 80%]
 ........................................................................ [ 87%]
 ........................................................................ [ 95%]
-..............................................                           [100%]
+.................................................                        [100%]
 =============================== warnings summary ===============================
-cli.py:7578
-  <verify-worktree>/cli.py:7578: SyntaxWarning: 'return' in a 'finally' block
+cli.py:7572
+  <verification-worktree>/cli.py:7572: SyntaxWarning: 'return' in a 'finally' block
     return
 
 tests/gateway/test_qqbot.py::TestDispatchPayload::test_op10_updates_heartbeat_interval
-  <verify-worktree>/gateway/platforms/qqbot/adapter.py:737: RuntimeWarning: coroutine 'QQAdapter._send_identify' was never awaited
+  <verification-worktree>/gateway/platforms/qqbot/adapter.py:737: RuntimeWarning: coroutine 'QQAdapter._send_identify' was never awaited
     self._create_task(self._send_identify())
   Enable tracemalloc to get traceback where the object was allocated.
   See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
 
+tests/gateway/test_slack.py::TestSendDocument::test_send_document_with_thread
+tests/gateway/test_slack.py::TestFormatMessage::test_bold_conversion
+  /opt/homebrew/Cellar/python@3.14/3.14.4/Frameworks/Python.framework/Versions/3.14/lib/python3.14/unittest/mock.py:2259: RuntimeWarning: coroutine 'AsyncMockMixin._execute_mock_call' was never awaited
+    def __init__(self, name, parent):
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
 tests/gateway/test_slack.py: 12 warnings
-  <verify-worktree>/gateway/platforms/slack.py:1264: RuntimeWarning: coroutine 'AsyncMockMixin._execute_mock_call' was never awaited
+  <verification-worktree>/gateway/platforms/slack.py:1241: RuntimeWarning: coroutine 'AsyncMockMixin._execute_mock_call' was never awaited
     user_name = await self._resolve_user_name(user_id, chat_id=channel_id)
   Enable tracemalloc to get traceback where the object was allocated.
   See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
 
-tests/gateway/test_slack.py::TestFormatMessage::test_escapes_control_characters
-  <python-stdlib>/unittest/mock.py:460: RuntimeWarning: coroutine 'AsyncMockMixin._execute_mock_call' was never awaited
-    new = type(cls.__name__, bases, {'__doc__': cls.__doc__})
-  Enable tracemalloc to get traceback where the object was allocated.
-  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
-
 tests/gateway/test_slack.py::TestAssistantThreadLifecycle::test_message_uses_cached_assistant_thread_identity
-  <venv-site-packages>/_pytest/stash.py:108: RuntimeWarning: coroutine 'AsyncMockMixin._execute_mock_call' was never awaited
+  <hermes-venv>/lib/python3.14/site-packages/_pytest/stash.py:108: RuntimeWarning: coroutine 'AsyncMockMixin._execute_mock_call' was never awaited
     del self._storage[key]
   Enable tracemalloc to get traceback where the object was allocated.
   See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
 
 -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
-944 passed, 38 skipped, 16 warnings in 5.70s
+947 passed, 38 skipped, 17 warnings in 5.97s
 Patch stack verification passed

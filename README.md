@@ -4,10 +4,13 @@ This repository lives at `$HOME/.config/hermes-agent-patches` by convention and 
 
 It intentionally does not vendor, mirror, or fork the Hermes Agent source tree.
 
-Canonical contents:
+Canonical sources for the executable stack:
 
-- `patches/hermes-safe-fetch-context/` — executable patch stack
-- `docs/customizations/hermes-safe-fetch-context/` — intent, surface map, rebase playbook, and handoff docs
+- `patches/hermes-safe-fetch-context/series` — canonical patch order
+- `patches/hermes-safe-fetch-context/manifest.yaml` — canonical machine-readable ownership, phases, and required checks
+- `scripts/verify-hermes-safe-fetch-context-stack.sh` — canonical clean-base stack verifier
+- `patches/hermes-safe-fetch-context/*.patch` — executable patch payloads
+- `docs/customizations/hermes-safe-fetch-context/` — explanatory/maintenance documentation only; do not treat docs as overriding the series, manifest, verifier, or patch files
 
 Start here:
 

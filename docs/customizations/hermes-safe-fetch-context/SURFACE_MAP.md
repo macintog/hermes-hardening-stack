@@ -225,6 +225,7 @@ Security boundary tests:
 - `tests/security/test_artifact_provenance.py`
 - `tests/security/test_action_authority.py`
 - `tests/security/test_prompt_injection_containment.py`
+- `tests/security/test_tool_result_promotion.py`
 
 ## Patch 0003: customization maintenance tool
 
@@ -272,3 +273,36 @@ Current intent:
 If moved upstream:
 - search for tool-call authorization gates, side-effecting tool metadata, provenance/taint envelopes, or confirmation policy helpers
 - preserve fail-closed behavior for missing provenance before side effects
+
+## Patch 0005: tool-result promotion and action-registry hardening
+
+### Action registry classification
+
+Current files:
+- `agent/action_authority.py`
+- `model_tools.py`
+- `run_agent.py`
+
+Current intent:
+- keep side-effecting action classification explicit and fail-closed
+- require confirmation for unknown or unclassified side-effect behavior
+- prevent untrusted or derived tool output from becoming action authority
+
+### Tool-result promotion policy
+
+Current files:
+- `agent/context_safety.py`
+- `agent/skill_commands.py`
+- `model_tools.py`
+- `run_agent.py`
+
+Current intent:
+- fence model-visible string tool results by default unless an explicit trusted-internal control-tool exemption applies
+- preserve specific provenance labels for browser/web extraction, PDF/OCR/document/YouTube/STT/transcript-like outputs, skill content, session-search/recalled content, and gateway attachment-like text
+- propagate prior model-visible tool/evidence text into the action-authority gate before later side-effecting tools run, so clean-looking args derived from hostile evidence are still gated
+- block concrete side-effect targets/args that appear only in evidence-only content, even when trusted user text contains a broad action verb
+- keep `tests/security/test_tool_result_promotion.py` and taint-loss dispatch tests mandatory
+
+If moved upstream:
+- search for tool-result message creation, function-call result serialization, action registry/classification, skill command loading, browser/web extraction output, gateway attachment/transcript promotion, and prior-message taint collection
+- preserve fail-closed action classification, default model-visible string-result fencing, and prior-tool-result taint propagation

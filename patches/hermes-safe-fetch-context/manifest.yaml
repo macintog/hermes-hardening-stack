@@ -152,6 +152,7 @@ patches:
       - model_tools.py
       - run_agent.py
       - tests/security/test_action_authority.py
+      - tests/security/test_prompt_injection_containment.py
       - tests/security/test_tool_result_promotion.py
     surfaces:
       - registry_action_classification
@@ -160,6 +161,7 @@ patches:
       - generic_tool_result_promotion_policy
     required_tests:
       - tests/security/test_action_authority.py
+      - tests/security/test_prompt_injection_containment.py
       - tests/security/test_tool_result_promotion.py
 required_smoke_checks:
   py_compile:

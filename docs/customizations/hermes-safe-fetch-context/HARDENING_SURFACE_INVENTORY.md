@@ -1,6 +1,6 @@
 # Hermes hostile-content hardening surface inventory
 
-Recon date: 2026-04-26. Live checkout inspected: `/Users/ryand/.hermes/hermes-agent`.
+Recon date: 2026-04-26. Live checkout inspected: `<hermes-checkout>`.
 
 This inventory complements `SURFACE_MAP.md`. It records byte-ingress, extraction/cache, context-promotion, and side-effect surfaces relevant to hostile downloaded or externally-derived content. Status terms: covered, partially covered, uncovered, not applicable / read-only / no model promotion, needs policy decision.
 

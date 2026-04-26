@@ -70,10 +70,11 @@ This patch should remain independent of gateway downloader migrations and the cu
 Owns the follow-up containment boundary for derived hostile text and unknown tools:
 - complete built-in registered-tool action classification
 - default confirmation for unknown side-effect behavior
-- taint-loss regression tests for downloaded text, gateway attachment text, and skill README instructions
-- targeted model-visible tool-result fencing for browser/web extraction, PDF/OCR/document/YouTube/STT/transcript-like outputs, skill content, and gateway attachment-like text
+- taint-loss regression tests for downloaded text, gateway attachment text, browser snapshots, recalled/session-search output, cron output, and skill README instructions
+- model-visible string tool-result fencing by default, with only explicitly trusted internal agent-loop control output preserving raw shape
+- agent-loop propagation of prior model-visible tool/evidence text into the action-authority gate, plus deterministic checks that concrete side-effect targets/args copied from evidence-only content are not authorized by vague trusted requests
 
-This patch builds on 0004 and should stay focused on tool-result promotion plus action-classification coverage.
+This patch builds on 0004 and should stay focused on tool-result promotion plus action-classification coverage. Do not re-introduce a targeted-only result-fencing policy unless an equivalent registry-backed output-trust metadata layer is added and verified.
 
 ## Why not one giant patch?
 
