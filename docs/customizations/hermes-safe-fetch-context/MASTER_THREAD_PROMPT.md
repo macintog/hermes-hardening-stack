@@ -353,7 +353,7 @@ Review gates:
 
 ## Remaining work to complete the project
 
-All core context-promotion surfaces named in the definition of done are complete. Remaining work is now the fetch-caller migration set plus optional provenance/authority follow-ups.
+All core context-promotion surfaces named in the definition of done are complete. Remaining work is now the fetch-caller migration set plus provenance and action-authority hardening.
 
 ### Remaining required work: additional safe_fetch caller migrations
 
@@ -381,7 +381,7 @@ For each fetch migration:
 - Redact signed URLs and credentials from logs/errors.
 - Run security/spec and code-quality/regression reviews before moving on.
 
-### Remaining optional follow-up: artifact quarantine/provenance
+### Completed follow-up: artifact quarantine/provenance
 
 Do after fetch migrations are stable, unless a migration naturally exposes an existing cache/temp artifact flow.
 - Add sidecar metadata only where there is an existing artifact/cache/temp flow.

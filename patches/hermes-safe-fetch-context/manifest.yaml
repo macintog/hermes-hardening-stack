@@ -5,6 +5,7 @@ verification_script: scripts/verify-hermes-safe-fetch-context-stack.sh
 patches:
   - file: 0001-context-safety-core.patch
     owns:
+      - agent/context_references.py
       - agent/context_safety.py
       - agent/memory_manager.py
       - agent/prompt_builder.py
@@ -16,6 +17,7 @@ patches:
       - tests/agent/test_prompt_builder.py
       - tests/cron/test_cron_context_from.py
       - tests/cron/test_cron_script.py
+      - tests/security/test_context_promotion_boundaries.py
       - tests/tools/test_cronjob_tools.py
       - tests/tools/test_skills_tool.py
     surfaces:
@@ -25,12 +27,14 @@ patches:
       - cron_prompt_validation
       - cron_output_context_rendering
       - skill_view_context_findings
+      - context_promotion_boundaries
     required_tests:
       - tests/agent/test_context_safety.py
       - tests/agent/test_memory_provider.py
       - tests/agent/test_prompt_builder.py
       - tests/cron/test_cron_context_from.py
       - tests/cron/test_cron_script.py
+      - tests/security/test_context_promotion_boundaries.py
       - tests/tools/test_cronjob_tools.py
       - tests/tools/test_skills_tool.py
 
@@ -38,12 +42,15 @@ patches:
     owns:
       - tools/safe_http.py
       - gateway/platforms/base.py
+      - gateway/platforms/bluebubbles.py
       - gateway/platforms/discord.py
       - gateway/platforms/feishu.py
       - gateway/platforms/mattermost.py
       - gateway/platforms/qqbot/adapter.py
       - gateway/platforms/slack.py
       - gateway/platforms/telegram.py
+      - gateway/platforms/wecom.py
+      - tools/skills_hub.py
       - tests/tools/test_safe_http.py
       - tests/gateway/test_base_media_cache_safe_http.py
       - tests/gateway/test_discord_attachment_download.py
@@ -53,15 +60,21 @@ patches:
       - tests/gateway/test_qqbot.py
       - tests/gateway/test_slack.py
       - tests/gateway/test_telegram_safe_image_download.py
+      - tests/gateway/test_wecom.py
+      - tests/security/test_safe_fetch_surfaces.py
+      - tests/security/test_skill_plugin_boundaries.py
     surfaces:
       - safe_http_core
       - base_gateway_media_cache
+      - bluebubbles_media_downloads
       - discord_attachment_downloads
       - feishu_media_downloads
       - mattermost_file_downloads
       - qqbot_media_and_stt_downloads
       - slack_file_downloads
       - telegram_fallback_image_downloads
+      - wecom_media_downloads
+      - skill_hub_remote_fetches
     required_tests:
       - tests/tools/test_safe_http.py
       - tests/gateway/test_base_media_cache_safe_http.py
@@ -72,14 +85,15 @@ patches:
       - tests/gateway/test_qqbot.py
       - tests/gateway/test_slack.py
       - tests/gateway/test_telegram_safe_image_download.py
-    notes:
-      wecom: not owned by current 0002 stack; earlier WeCom first-slice work is documented, but the current patch series does not include gateway/platforms/wecom.py or tests/gateway/test_wecom.py.
+      - tests/gateway/test_wecom.py
+      - tests/security/test_safe_fetch_surfaces.py
+      - tests/security/test_skill_plugin_boundaries.py
 
   - file: 0003-customization-maintenance-tool.patch
     owns:
       - tools/customization_tool.py
-      - toolsets.py
       - tests/tools/test_customization_tool.py
+      - toolsets.py
     surfaces:
       - hermes_customizations_tool
       - patch_stack_repo_status
@@ -87,12 +101,35 @@ patches:
       - patch_stack_pii_secret_audit
     required_tests:
       - tests/tools/test_customization_tool.py
+
+  - file: 0004-provenance-action-authority-hardening.patch
+    owns:
+      - agent/action_authority.py
+      - agent/artifact_provenance.py
+      - model_tools.py
+      - run_agent.py
+      - HARDENING_SURFACE_INVENTORY.md
+      - tests/security/test_action_authority.py
+      - tests/security/test_artifact_provenance.py
+      - tests/security/test_prompt_injection_containment.py
+    surfaces:
+      - artifact_provenance
+      - action_authority_gate
+      - prompt_injection_containment
+    required_tests:
+      - tests/security/test_action_authority.py
+      - tests/security/test_artifact_provenance.py
+      - tests/security/test_prompt_injection_containment.py
 required_smoke_checks:
   py_compile:
     - agent/context_safety.py
+    - agent/artifact_provenance.py
+    - agent/action_authority.py
     - tools/safe_http.py
     - tools/customization_tool.py
   imports:
     - agent.context_safety
+    - agent.artifact_provenance
+    - agent.action_authority
     - tools.safe_http
     - tools.customization_tool

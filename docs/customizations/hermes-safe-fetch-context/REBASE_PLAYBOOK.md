@@ -23,6 +23,7 @@ Hermes config also records this path at `customizations.hermes_agent_patches`.
 - `patches/hermes-safe-fetch-context/0001-context-safety-core.patch`
 - `patches/hermes-safe-fetch-context/0002-safe-http-gateway-download-hardening.patch`
 - `patches/hermes-safe-fetch-context/0003-customization-maintenance-tool.patch`
+- `patches/hermes-safe-fetch-context/0004-provenance-action-authority-hardening.patch`
 - `patches/hermes-safe-fetch-context/manifest.yaml`
 
 ## Normal update workflow
@@ -72,6 +73,8 @@ Fast syntax/import smoke:
 ```bash
 python -m py_compile \
   agent/context_safety.py \
+  agent/artifact_provenance.py \
+  agent/action_authority.py \
   tools/safe_http.py \
   tools/customization_tool.py
 ```
@@ -96,7 +99,14 @@ python -m pytest -o 'addopts=' -q \
   tests/gateway/test_media_download_retry.py \
   tests/gateway/test_qqbot.py \
   tests/gateway/test_slack.py \
-  tests/gateway/test_telegram_safe_image_download.py
+  tests/gateway/test_telegram_safe_image_download.py \
+  tests/gateway/test_wecom.py \
+  tests/security/test_context_promotion_boundaries.py \
+  tests/security/test_safe_fetch_surfaces.py \
+  tests/security/test_skill_plugin_boundaries.py \
+  tests/security/test_artifact_provenance.py \
+  tests/security/test_action_authority.py \
+  tests/security/test_prompt_injection_containment.py
 ```
 
 Clean-base stack verification:
@@ -122,10 +132,11 @@ base=$(git merge-base HEAD origin/main)
 tip=$(git rev-parse HEAD)
 ```
 
-Regenerate patch 0001:
+Regenerate patch 0001 (context safety and promotion):
 
 ```bash
 git diff --binary "$base" "$tip" -- \
+  agent/context_references.py \
   agent/context_safety.py \
   agent/memory_manager.py \
   agent/prompt_builder.py \
@@ -137,23 +148,27 @@ git diff --binary "$base" "$tip" -- \
   tests/agent/test_prompt_builder.py \
   tests/cron/test_cron_context_from.py \
   tests/cron/test_cron_script.py \
+  tests/security/test_context_promotion_boundaries.py \
   tests/tools/test_cronjob_tools.py \
   tests/tools/test_skills_tool.py \
-  > patches/hermes-safe-fetch-context/0001-context-safety-core.patch
+  > "$patch_repo/patches/hermes-safe-fetch-context/0001-context-safety-core.patch"
 ```
 
-Regenerate patch 0002:
+Regenerate patch 0002 (safe HTTP and remote-byte ingress):
 
 ```bash
 git diff --binary "$base" "$tip" -- \
   tools/safe_http.py \
   gateway/platforms/base.py \
+  gateway/platforms/bluebubbles.py \
   gateway/platforms/discord.py \
   gateway/platforms/feishu.py \
   gateway/platforms/mattermost.py \
   gateway/platforms/qqbot/adapter.py \
   gateway/platforms/slack.py \
   gateway/platforms/telegram.py \
+  gateway/platforms/wecom.py \
+  tools/skills_hub.py \
   tests/tools/test_safe_http.py \
   tests/gateway/test_base_media_cache_safe_http.py \
   tests/gateway/test_discord_attachment_download.py \
@@ -163,23 +178,47 @@ git diff --binary "$base" "$tip" -- \
   tests/gateway/test_qqbot.py \
   tests/gateway/test_slack.py \
   tests/gateway/test_telegram_safe_image_download.py \
-  > patches/hermes-safe-fetch-context/0002-safe-http-gateway-download-hardening.patch
+  tests/gateway/test_wecom.py \
+  tests/security/test_safe_fetch_surfaces.py \
+  tests/security/test_skill_plugin_boundaries.py \
+  > "$patch_repo/patches/hermes-safe-fetch-context/0002-safe-http-gateway-download-hardening.patch"
 ```
 
-Regenerate patch 0003:
+Regenerate patch 0003 (customization maintenance tool):
 
 ```bash
 git diff --binary "$base" "$tip" -- \
   tools/customization_tool.py \
-  toolsets.py \
   tests/tools/test_customization_tool.py \
-  > patches/hermes-safe-fetch-context/0003-customization-maintenance-tool.patch
+  toolsets.py \
+  > "$patch_repo/patches/hermes-safe-fetch-context/0003-customization-maintenance-tool.patch"
 ```
 
-Refresh `base.ref`:
+Regenerate patch 0004 (provenance/action-authority hardening):
 
 ```bash
-printf 'base=%s\ntip=%s\n' "$base" "$tip" > patches/hermes-safe-fetch-context/base.ref
+git diff --binary "$base" "$tip" -- \
+  agent/action_authority.py \
+  agent/artifact_provenance.py \
+  model_tools.py \
+  run_agent.py \
+  HARDENING_SURFACE_INVENTORY.md \
+  tests/security/test_action_authority.py \
+  tests/security/test_artifact_provenance.py \
+  tests/security/test_prompt_injection_containment.py \
+  > "$patch_repo/patches/hermes-safe-fetch-context/0004-provenance-action-authority-hardening.patch"
+```
+
+Refresh `series` and `base.ref`:
+
+```bash
+printf '%s\n' \
+  0001-context-safety-core.patch \
+  0002-safe-http-gateway-download-hardening.patch \
+  0003-customization-maintenance-tool.patch \
+  0004-provenance-action-authority-hardening.patch \
+  > "$patch_repo/patches/hermes-safe-fetch-context/series"
+printf 'base=%s\ntip=%s\n' "$base" "$tip" > "$patch_repo/patches/hermes-safe-fetch-context/base.ref"
 ```
 
 Check patch applicability against a clean upstream worktree before trusting the refresh:

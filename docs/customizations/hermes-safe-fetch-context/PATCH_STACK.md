@@ -9,12 +9,13 @@ This patch stack is meant to be small, reviewable, and portable across frequent 
 1. `0001-context-safety-core.patch`
 2. `0002-safe-http-gateway-download-hardening.patch`
 3. `0003-customization-maintenance-tool.patch`
+4. `0004-provenance-action-authority-hardening.patch`
 
 `base.ref` records the upstream-ish base and captured tip used to generate the current patches.
 
-## Why two patches?
+## Why four patches?
 
-The two concerns are related but independently maintainable.
+The concerns are related but independently maintainable.
 
 ### Patch 0001: context safety core
 
@@ -39,7 +40,7 @@ Owns network fetch/download safety:
 - URL redaction
 - gateway downloader call-site migrations
 
-Current 0002 is self-contained and includes the safe HTTP helper plus the gateway files/tests listed in `SURFACE_MAP.md`. It does not currently include WeCom; if WeCom remains downstream-owned in a future refresh, add `gateway/platforms/wecom.py` and `tests/gateway/test_wecom.py` to 0002 rather than leaving that migration implicit in planning docs.
+Current 0002 is self-contained and includes the safe HTTP helper plus the gateway files/tests listed in `SURFACE_MAP.md`, including WeCom coverage.
 
 This patch should remain independent of prompt/context scanning.
 
@@ -52,6 +53,17 @@ Owns the reusable guardrail for this recurring downstream-maintenance pattern:
 
 This patch should stay focused on inspecting/auditing patch-stack repos. It should not contain project-specific safe-fetch logic.
 
+### Patch 0004: provenance/action-authority hardening
+
+Owns taint/provenance labels and explicit action-authority gates:
+- `agent/artifact_provenance.py`
+- `agent/action_authority.py`
+- `model_tools.py` and `run_agent.py` integration
+- `HARDENING_SURFACE_INVENTORY.md`
+- security tests for artifact provenance, action authority, and prompt-injection containment
+
+This patch should remain independent of gateway downloader migrations and the customization-maintenance tool.
+
 ## Why not one giant patch?
 
 Hermes changes frequently. Smaller patches make it easier to tell whether a failure is:
@@ -59,6 +71,7 @@ Hermes changes frequently. Smaller patches make it easier to tell whether a fail
 - gateway/platform movement
 - central safe HTTP policy drift
 - central scanner policy drift
+- provenance/action-authority enforcement drift
 
 ## Why not only docs?
 

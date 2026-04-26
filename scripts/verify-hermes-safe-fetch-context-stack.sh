@@ -68,11 +68,27 @@ while IFS= read -r patch || [[ -n "$patch" ]]; do
 done < "$series_file"
 
 cd "$worktree"
-python_bin=${PYTHON:-python}
+if [[ -n "${PYTHON:-}" ]]; then
+  python_bin=$PYTHON
+elif [[ -x "$worktree/.venv/bin/python" ]]; then
+  python_bin="$worktree/.venv/bin/python"
+elif [[ -x "$worktree/venv/bin/python" ]]; then
+  python_bin="$worktree/venv/bin/python"
+elif [[ -x "$checkout/.venv/bin/python" ]]; then
+  python_bin="$checkout/.venv/bin/python"
+elif [[ -x "$checkout/venv/bin/python" ]]; then
+  python_bin="$checkout/venv/bin/python"
+elif [[ -x "$HOME/.hermes/hermes-agent/venv/bin/python" ]]; then
+  python_bin="$HOME/.hermes/hermes-agent/venv/bin/python"
+else
+  python_bin=python
+fi
 
 echo "Running py_compile smoke checks"
 "$python_bin" -m py_compile \
   agent/context_safety.py \
+  agent/artifact_provenance.py \
+  agent/action_authority.py \
   tools/safe_http.py \
   tools/customization_tool.py
 
@@ -81,6 +97,8 @@ echo "Running import smoke checks"
 import importlib
 for module in (
     "agent.context_safety",
+    "agent.artifact_provenance",
+    "agent.action_authority",
     "tools.safe_http",
     "tools.customization_tool",
 ):
@@ -106,6 +124,13 @@ echo "Running targeted tests"
   tests/gateway/test_media_download_retry.py \
   tests/gateway/test_qqbot.py \
   tests/gateway/test_slack.py \
-  tests/gateway/test_telegram_safe_image_download.py
+  tests/gateway/test_telegram_safe_image_download.py \
+  tests/gateway/test_wecom.py \
+  tests/security/test_context_promotion_boundaries.py \
+  tests/security/test_safe_fetch_surfaces.py \
+  tests/security/test_skill_plugin_boundaries.py \
+  tests/security/test_artifact_provenance.py \
+  tests/security/test_action_authority.py \
+  tests/security/test_prompt_injection_containment.py
 
 echo "Patch stack verification passed"

@@ -182,12 +182,12 @@ If moved upstream:
 ### WeCom
 
 Current file:
-- none in the current patch stack
+- `gateway/platforms/wecom.py`
 
 Current intent/status:
-- WeCom was discussed in planning docs as an early candidate caller, but no WeCom migration diff is present in `0001`, `0002`, or `0003`.
-- Patch 0002 is self-contained without WeCom: it owns `tools/safe_http.py`, its tests, and the gateway callers listed above.
-- If a downstream-owned WeCom migration is restored later, add both `gateway/platforms/wecom.py` and `tests/gateway/test_wecom.py` to patch 0002 and this map/manifest in the same change.
+- use `safe_download_bytes` for WeCom media downloads
+- preserve required access-token behavior
+- include `tests/gateway/test_wecom.py` coverage in patch 0002
 
 If moved upstream:
 - search for `gateway/platforms/wecom.py`, `_download_remote_bytes`, and `tests/gateway/test_wecom.py::TestMediaUpload`
@@ -215,6 +215,15 @@ Gateway integration tests:
 - `tests/gateway/test_qqbot.py`
 - `tests/gateway/test_slack.py`
 - `tests/gateway/test_telegram_safe_image_download.py`
+- `tests/gateway/test_wecom.py`
+
+Security boundary tests:
+- `tests/security/test_context_promotion_boundaries.py`
+- `tests/security/test_safe_fetch_surfaces.py`
+- `tests/security/test_skill_plugin_boundaries.py`
+- `tests/security/test_artifact_provenance.py`
+- `tests/security/test_action_authority.py`
+- `tests/security/test_prompt_injection_containment.py`
 
 ## Patch 0003: customization maintenance tool
 
@@ -235,3 +244,30 @@ Current intent:
 If moved upstream:
 - search for `hermes_customizations`, `customizations.hermes_agent_patches`, or patch-stack maintenance helpers
 - preserve the repo-separation and PII-audit behavior even if the toolset name changes
+
+## Patch 0004: provenance/action-authority hardening
+
+### Artifact provenance
+
+Current file:
+- `agent/artifact_provenance.py`
+
+Current intent:
+- represent fetched/extracted/external artifacts with source, trust, authority, URL, content-type, byte-count, sha256, and extraction-chain metadata
+- keep external artifacts evidence-only by default
+
+### Action authority
+
+Current files:
+- `agent/action_authority.py`
+- `model_tools.py`
+- `run_agent.py`
+
+Current intent:
+- require trusted user intent for side-effecting actions
+- treat untrusted retrieved/downloaded/skill/plugin/memory/cron text as evidence, never as action authority
+- expose deterministic denial/confirmation outcomes for tests and tool-dispatch integration
+
+If moved upstream:
+- search for tool-call authorization gates, side-effecting tool metadata, provenance/taint envelopes, or confirmation policy helpers
+- preserve fail-closed behavior for missing provenance before side effects

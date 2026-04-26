@@ -15,7 +15,7 @@ Patch-stack note (2026-04-26): the current executable patch stack does not conta
 - `tools/safe_http.py` now exists with targeted tests.
 - `gateway/platforms/wecom.py::_download_remote_bytes` is migrated to `safe_download_bytes` as the first caller slice.
 - `agent/context_safety.py` now exists with targeted tests and has been wired into prompt-builder, cron, scheduler output, memory provider, and skill_view slices.
-- Remaining required work is additional safe_fetch caller migrations, one platform/caller slice at a time, followed by optional artifact provenance and action-authority regression follow-ups.
+- Remaining required work is maintenance/rebase validation and future upstream drift handling; safe_fetch caller migrations plus artifact provenance and action-authority regression follow-ups have been incorporated into the refreshable patch stack.
 
 ## Implementation status
 
@@ -575,4 +575,4 @@ Required before reporting complete:
   - memory provider tests
   - skill_view tests
 - No unrelated files are touched, especially `web/package-lock.json`.
-- Optional artifact provenance and action-authority follow-ups are either completed or clearly documented as remaining optional work.
+- Artifact provenance and action-authority follow-ups are completed in `0004-provenance-action-authority-hardening.patch` or any future upstream equivalent is documented.
