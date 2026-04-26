@@ -36,7 +36,7 @@ This is not intended to fork Hermes behavior broadly. It is a narrow hardening l
 
 Patch files:
 - `0001-context-safety-core.patch`: `agent/context_safety.py` plus memory, prompt-builder, cron, and skill/cron tool integrations and tests.
-- `0002-safe-http-gateway-download-hardening.patch`: `tools/safe_http.py` plus gateway downloader integrations and tests.
+- `0002-safe-http-gateway-download-hardening.patch`: downstream-owned `tools/safe_http.py`, `tests/tools/test_safe_http.py`, gateway downloader integrations, and related gateway tests. Current 0002 contains no WeCom diff; if downstream WeCom hardening is restored later, add `gateway/platforms/wecom.py` and `tests/gateway/test_wecom.py` to 0002 and update `SURFACE_MAP.md`.
 - `0003-customization-maintenance-tool.patch`: `tools/customization_tool.py` and tests for auditing downstream patch-stack repos as this pattern repeats.
 
 Preferred maintenance model:

@@ -24,6 +24,8 @@ prior related project notes, if available locally
 
 ## Current project state
 
+Patch-stack note (2026-04-26): this prompt preserves historical implementation-thread notes. The current executable patch stack has no WeCom diff; `SURFACE_MAP.md` and `patches/hermes-safe-fetch-context/0002-safe-http-gateway-download-hardening.patch` are authoritative for current 0002 contents.
+
 The safe_fetch first wave and the first context-promotion centralization wave are complete.
 
 Completed:

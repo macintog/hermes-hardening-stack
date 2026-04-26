@@ -76,6 +76,10 @@ If moved upstream:
 Current file:
 - `tools/safe_http.py`
 
+Ownership/status:
+- Downstream-owned in this stack. Patch `0002-safe-http-gateway-download-hardening.patch` creates `tools/safe_http.py` and `tests/tools/test_safe_http.py`; do not assume Hermes upstream provides this module unless a future rebase proves it.
+- If Hermes upstream later adds an equivalent safe HTTP/download helper, rename or narrow patch 0002 to gateway migration/policy glue and document the upstream replacement here.
+
 Purpose:
 - validate URL scheme and resolved hosts
 - block loopback/private/link-local/internal IPs
@@ -174,6 +178,19 @@ Current intent:
 
 If moved upstream:
 - search for image URL detection, `cache_image_from_url`, Telegram message image handling
+
+### WeCom
+
+Current file:
+- none in the current patch stack
+
+Current intent/status:
+- WeCom was discussed in planning docs as an early candidate caller, but no WeCom migration diff is present in `0001`, `0002`, or `0003`.
+- Patch 0002 is self-contained without WeCom: it owns `tools/safe_http.py`, its tests, and the gateway callers listed above.
+- If a downstream-owned WeCom migration is restored later, add both `gateway/platforms/wecom.py` and `tests/gateway/test_wecom.py` to patch 0002 and this map/manifest in the same change.
+
+If moved upstream:
+- search for `gateway/platforms/wecom.py`, `_download_remote_bytes`, and `tests/gateway/test_wecom.py::TestMediaUpload`
 
 ## Tests to keep aligned
 

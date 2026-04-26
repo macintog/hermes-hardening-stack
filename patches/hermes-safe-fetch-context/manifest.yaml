@@ -1,0 +1,98 @@
+# Machine-readable manifest for the hermes-safe-fetch-context patch stack.
+name: hermes-safe-fetch-context
+series: patches/hermes-safe-fetch-context/series
+verification_script: scripts/verify-hermes-safe-fetch-context-stack.sh
+patches:
+  - file: 0001-context-safety-core.patch
+    owns:
+      - agent/context_safety.py
+      - agent/memory_manager.py
+      - agent/prompt_builder.py
+      - cron/scheduler.py
+      - tools/cronjob_tools.py
+      - tools/skills_tool.py
+      - tests/agent/test_context_safety.py
+      - tests/agent/test_memory_provider.py
+      - tests/agent/test_prompt_builder.py
+      - tests/cron/test_cron_context_from.py
+      - tests/cron/test_cron_script.py
+      - tests/tools/test_cronjob_tools.py
+      - tests/tools/test_skills_tool.py
+    surfaces:
+      - context_safety_core
+      - prompt_context_file_ingestion
+      - memory_provider_context
+      - cron_prompt_validation
+      - cron_output_context_rendering
+      - skill_view_context_findings
+    required_tests:
+      - tests/agent/test_context_safety.py
+      - tests/agent/test_memory_provider.py
+      - tests/agent/test_prompt_builder.py
+      - tests/cron/test_cron_context_from.py
+      - tests/cron/test_cron_script.py
+      - tests/tools/test_cronjob_tools.py
+      - tests/tools/test_skills_tool.py
+
+  - file: 0002-safe-http-gateway-download-hardening.patch
+    owns:
+      - tools/safe_http.py
+      - gateway/platforms/base.py
+      - gateway/platforms/discord.py
+      - gateway/platforms/feishu.py
+      - gateway/platforms/mattermost.py
+      - gateway/platforms/qqbot/adapter.py
+      - gateway/platforms/slack.py
+      - gateway/platforms/telegram.py
+      - tests/tools/test_safe_http.py
+      - tests/gateway/test_base_media_cache_safe_http.py
+      - tests/gateway/test_discord_attachment_download.py
+      - tests/gateway/test_feishu.py
+      - tests/gateway/test_mattermost.py
+      - tests/gateway/test_media_download_retry.py
+      - tests/gateway/test_qqbot.py
+      - tests/gateway/test_slack.py
+      - tests/gateway/test_telegram_safe_image_download.py
+    surfaces:
+      - safe_http_core
+      - base_gateway_media_cache
+      - discord_attachment_downloads
+      - feishu_media_downloads
+      - mattermost_file_downloads
+      - qqbot_media_and_stt_downloads
+      - slack_file_downloads
+      - telegram_fallback_image_downloads
+    required_tests:
+      - tests/tools/test_safe_http.py
+      - tests/gateway/test_base_media_cache_safe_http.py
+      - tests/gateway/test_discord_attachment_download.py
+      - tests/gateway/test_feishu.py
+      - tests/gateway/test_mattermost.py
+      - tests/gateway/test_media_download_retry.py
+      - tests/gateway/test_qqbot.py
+      - tests/gateway/test_slack.py
+      - tests/gateway/test_telegram_safe_image_download.py
+    notes:
+      wecom: not owned by current 0002 stack; earlier WeCom first-slice work is documented, but the current patch series does not include gateway/platforms/wecom.py or tests/gateway/test_wecom.py.
+
+  - file: 0003-customization-maintenance-tool.patch
+    owns:
+      - tools/customization_tool.py
+      - toolsets.py
+      - tests/tools/test_customization_tool.py
+    surfaces:
+      - hermes_customizations_tool
+      - patch_stack_repo_status
+      - patch_stack_series_audit
+      - patch_stack_pii_secret_audit
+    required_tests:
+      - tests/tools/test_customization_tool.py
+required_smoke_checks:
+  py_compile:
+    - agent/context_safety.py
+    - tools/safe_http.py
+    - tools/customization_tool.py
+  imports:
+    - agent.context_safety
+    - tools.safe_http
+    - tools.customization_tool

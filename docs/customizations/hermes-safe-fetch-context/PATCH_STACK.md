@@ -32,11 +32,14 @@ This patch should remain independent of gateway/media fetching.
 ### Patch 0002: safe HTTP gateway download hardening
 
 Owns network fetch/download safety:
+- downstream-owned `tools/safe_http.py` and `tests/tools/test_safe_http.py`
 - URL/host validation
 - redirect validation
 - streaming byte caps
 - URL redaction
 - gateway downloader call-site migrations
+
+Current 0002 is self-contained and includes the safe HTTP helper plus the gateway files/tests listed in `SURFACE_MAP.md`. It does not currently include WeCom; if WeCom remains downstream-owned in a future refresh, add `gateway/platforms/wecom.py` and `tests/gateway/test_wecom.py` to 0002 rather than leaving that migration implicit in planning docs.
 
 This patch should remain independent of prompt/context scanning.
 

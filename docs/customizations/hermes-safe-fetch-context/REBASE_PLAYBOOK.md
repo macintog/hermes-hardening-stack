@@ -22,6 +22,8 @@ Hermes config also records this path at `customizations.hermes_agent_patches`.
 - `patches/hermes-safe-fetch-context/series`
 - `patches/hermes-safe-fetch-context/0001-context-safety-core.patch`
 - `patches/hermes-safe-fetch-context/0002-safe-http-gateway-download-hardening.patch`
+- `patches/hermes-safe-fetch-context/0003-customization-maintenance-tool.patch`
+- `patches/hermes-safe-fetch-context/manifest.yaml`
 
 ## Normal update workflow
 
@@ -71,11 +73,7 @@ Fast syntax/import smoke:
 python -m py_compile \
   agent/context_safety.py \
   tools/safe_http.py \
-  agent/memory_manager.py \
-  agent/prompt_builder.py \
-  cron/scheduler.py \
-  tools/cronjob_tools.py \
-  tools/skills_tool.py
+  tools/customization_tool.py
 ```
 
 Targeted test set:
@@ -98,8 +96,13 @@ python -m pytest -o 'addopts=' -q \
   tests/gateway/test_media_download_retry.py \
   tests/gateway/test_qqbot.py \
   tests/gateway/test_slack.py \
-  tests/gateway/test_telegram_safe_image_download.py \
-  tests/tools/test_customization_tool.py
+  tests/gateway/test_telegram_safe_image_download.py
+```
+
+Clean-base stack verification:
+
+```bash
+"$patch_repo/scripts/verify-hermes-safe-fetch-context-stack.sh" "$PWD"
 ```
 
 Fuller confidence check if time allows:
@@ -160,8 +163,17 @@ git diff --binary "$base" "$tip" -- \
   tests/gateway/test_qqbot.py \
   tests/gateway/test_slack.py \
   tests/gateway/test_telegram_safe_image_download.py \
-  tests/tools/test_customization_tool.py \
   > patches/hermes-safe-fetch-context/0002-safe-http-gateway-download-hardening.patch
+```
+
+Regenerate patch 0003:
+
+```bash
+git diff --binary "$base" "$tip" -- \
+  tools/customization_tool.py \
+  toolsets.py \
+  tests/tools/test_customization_tool.py \
+  > patches/hermes-safe-fetch-context/0003-customization-maintenance-tool.patch
 ```
 
 Refresh `base.ref`:
@@ -209,7 +221,7 @@ For each conflict, answer:
 ## Done criteria
 
 A rebase is done when:
-- both patches apply or have been intentionally refreshed
+- all patches apply or have been intentionally refreshed
 - `SURFACE_MAP.md` still matches the live code surfaces
 - targeted tests pass, or failures are documented with root cause
 - patch stack applies cleanly in a fresh upstream worktree

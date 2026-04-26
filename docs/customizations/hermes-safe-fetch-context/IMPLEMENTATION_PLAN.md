@@ -7,6 +7,8 @@ Project docs: `$HOME/.config/hermes-agent-patches/docs/customizations/hermes-saf
 
 ## Current repo state
 
+Patch-stack note (2026-04-26): the current executable patch stack does not contain any WeCom diff. Older planning bullets below that mention a WeCom first-caller migration are historical from the implementation thread; the current source of truth is `patches/hermes-safe-fetch-context/0002-safe-http-gateway-download-hardening.patch` plus `SURFACE_MAP.md`.
+
 - Branch: `main`.
 - Pre-existing unrelated change: `web/package-lock.json` is modified. Do not touch it.
 - `tools/url_safety.py` exists and has SSRF/private-IP checks plus tests.
