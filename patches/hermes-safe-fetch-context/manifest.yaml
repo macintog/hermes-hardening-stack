@@ -18,6 +18,12 @@ required_phases:
   - name: action_authority_regression_tests
     patch: 0004-provenance-action-authority-hardening.patch
     mandatory: true
+  - name: registry_action_classification
+    patch: 0005-tool-result-promotion-action-registry.patch
+    mandatory: true
+  - name: tool_result_promotion_policy
+    patch: 0005-tool-result-promotion-action-registry.patch
+    mandatory: true
 
 patches:
   - file: 0001-context-safety-core.patch
@@ -137,10 +143,29 @@ patches:
       - tests/security/test_action_authority.py
       - tests/security/test_artifact_provenance.py
       - tests/security/test_prompt_injection_containment.py
+
+  - file: 0005-tool-result-promotion-action-registry.patch
+    owns:
+      - agent/action_authority.py
+      - agent/context_safety.py
+      - agent/skill_commands.py
+      - model_tools.py
+      - run_agent.py
+      - tests/security/test_action_authority.py
+      - tests/security/test_tool_result_promotion.py
+    surfaces:
+      - registry_action_classification
+      - unknown_side_effect_confirmation
+      - derived_untrusted_action_taint
+      - generic_tool_result_promotion_policy
+    required_tests:
+      - tests/security/test_action_authority.py
+      - tests/security/test_tool_result_promotion.py
 required_smoke_checks:
   py_compile:
     - agent/context_references.py
     - agent/context_safety.py
+    - agent/skill_commands.py
     - agent/memory_manager.py
     - agent/prompt_builder.py
     - cron/scheduler.py
@@ -187,6 +212,7 @@ required_smoke_checks:
     - tests/security/test_action_authority.py
     - tests/security/test_artifact_provenance.py
     - tests/security/test_prompt_injection_containment.py
+    - tests/security/test_tool_result_promotion.py
   imports:
     - agent.context_safety
     - agent.artifact_provenance
@@ -199,3 +225,6 @@ manifest_consistency:
   every_patch_file_must_be_tracked: true
   verification_script_must_apply_clean_base: true
   every_manifest_owned_path_must_have_patch_diff_header: true
+  base_ref_must_have_base: true
+  tip_must_not_equal_base_when_series_nonempty: true
+  tip_must_be_patched_commit_when_present: true

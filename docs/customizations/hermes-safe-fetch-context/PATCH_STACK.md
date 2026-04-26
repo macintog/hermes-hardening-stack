@@ -10,10 +10,11 @@ This patch stack is meant to be small, reviewable, and portable across frequent 
 2. `0002-safe-http-gateway-download-hardening.patch`
 3. `0003-customization-maintenance-tool.patch`
 4. `0004-provenance-action-authority-hardening.patch`
+5. `0005-tool-result-promotion-action-registry.patch`
 
-`base.ref` records the upstream-ish base and captured tip used to generate the current patches.
+`base.ref` records `base=`, the clean upstream commit the stack applies to. `tip=`, if present, must be the actual patched Hermes commit whose diff against `base=` generated the stack. If the stack is generated from working-tree diffs rather than a committed patched tree, omit `tip=`; the verifier rejects `base == tip` when patches are non-empty.
 
-## Why four patches?
+## Why five patches?
 
 The concerns are related but independently maintainable.
 
@@ -64,6 +65,16 @@ Owns taint/provenance labels and explicit action-authority gates:
 
 This patch should remain independent of gateway downloader migrations and the customization-maintenance tool.
 
+### Patch 0005: tool-result promotion and registry classification
+
+Owns the follow-up containment boundary for derived hostile text and unknown tools:
+- complete built-in registered-tool action classification
+- default confirmation for unknown side-effect behavior
+- taint-loss regression tests for downloaded text, gateway attachment text, and skill README instructions
+- targeted model-visible tool-result fencing for browser/web extraction, PDF/OCR/document/YouTube/STT/transcript-like outputs, skill content, and gateway attachment-like text
+
+This patch builds on 0004 and should stay focused on tool-result promotion plus action-classification coverage.
+
 ## Why not one giant patch?
 
 Hermes changes frequently. Smaller patches make it easier to tell whether a failure is:
@@ -72,6 +83,7 @@ Hermes changes frequently. Smaller patches make it easier to tell whether a fail
 - central safe HTTP policy drift
 - central scanner policy drift
 - provenance/action-authority enforcement drift
+- tool-result promotion / registry classification drift
 
 ## Why not only docs?
 

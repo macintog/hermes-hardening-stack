@@ -15,6 +15,9 @@ Arguments / environment:
   HERMES_BASE_REF   Base ref for the temporary worktree. Defaults to the
                     base= SHA in patches/hermes-safe-fetch-context/base.ref.
                     Set HERMES_BASE_REF=origin/main to verify against upstream main.
+                    If base.ref contains tip=, tip must be the patched Hermes
+                    commit used to generate the stack and must not equal base
+                    when the series contains non-empty patches.
   KEEP_WORKTREE=1   Keep the temporary worktree for debugging.
 USAGE
 }
@@ -47,26 +50,42 @@ if [[ -z "$checkout" ]]; then
 fi
 
 checkout=$(cd -- "$checkout" && pwd)
-if [[ -n "${HERMES_BASE_REF:-}" ]]; then
-  base_ref=$HERMES_BASE_REF
-else
-  if [[ ! -f "$base_ref_file" ]]; then
-    echo "ERROR: missing base.ref file: $base_ref_file" >&2
-    exit 1
-  fi
-  base_ref=$(python - "$base_ref_file" <<'PY'
+if [[ ! -f "$base_ref_file" ]]; then
+  echo "ERROR: missing base.ref file: $base_ref_file" >&2
+  exit 1
+fi
+
+base_ref_meta=$(python - "$base_ref_file" "$series_file" "$stack_dir" <<'PY'
 from pathlib import Path
 import sys
-base_ref = None
-for line in Path(sys.argv[1]).read_text().splitlines():
-    if line.startswith("base="):
-        base_ref = line.split("=", 1)[1].strip()
-        break
+base_ref_file = Path(sys.argv[1])
+series_file = Path(sys.argv[2])
+stack_dir = Path(sys.argv[3])
+meta = {}
+for line in base_ref_file.read_text().splitlines():
+    if not line.strip() or line.lstrip().startswith('#') or '=' not in line:
+        continue
+    key, value = line.split('=', 1)
+    meta[key.strip()] = value.strip()
+base_ref = meta.get('base')
+tip_ref = meta.get('tip')
 if not base_ref:
     raise SystemExit("ERROR: base.ref does not contain a base= value")
+series = [line.strip() for line in series_file.read_text().splitlines() if line.strip() and not line.lstrip().startswith('#')]
+nonempty = [name for name in series if (stack_dir / name).exists() and (stack_dir / name).stat().st_size > 0]
+if tip_ref and tip_ref == base_ref and nonempty:
+    raise SystemExit("ERROR: base.ref has base == tip but series contains non-empty patches; tip must be the patched Hermes commit or be removed/renamed")
 print(base_ref)
+print(tip_ref or "")
 PY
 )
+base_ref=$(printf '%s
+' "$base_ref_meta" | sed -n '1p')
+tip_ref=$(printf '%s
+' "$base_ref_meta" | sed -n '2p')
+
+if [[ -n "${HERMES_BASE_REF:-}" ]]; then
+  base_ref=$HERMES_BASE_REF
 fi
 worktree=${TMPDIR:-/tmp}/hermes-safe-fetch-context-verify-$$
 cleanup() {
@@ -79,6 +98,13 @@ cleanup() {
 trap cleanup EXIT
 
 git -C "$checkout" rev-parse --verify "$base_ref^{commit}" >/dev/null
+if [[ -n "$tip_ref" ]]; then
+  git -C "$checkout" rev-parse --verify "$tip_ref^{commit}" >/dev/null
+  git -C "$checkout" merge-base --is-ancestor "$base_ref" "$tip_ref" || {
+    echo "ERROR: base.ref tip is not descended from base" >&2
+    exit 1
+  }
+fi
 
 echo "Creating clean verification worktree from $base_ref"
 git -C "$checkout" worktree add --detach "$worktree" "$base_ref" >/dev/null
@@ -136,6 +162,8 @@ required_phases = {
     "patch_stack_integrity_tooling",
     "artifact_quarantine_provenance_and_taint",
     "action_authority_regression_tests",
+    "registry_action_classification",
+    "tool_result_promotion_policy",
 }
 missing = [phase for phase in sorted(required_phases) if phase not in manifest_text]
 if missing:
@@ -268,6 +296,7 @@ echo "Running targeted tests"
   tests/security/test_skill_plugin_boundaries.py \
   tests/security/test_artifact_provenance.py \
   tests/security/test_action_authority.py \
-  tests/security/test_prompt_injection_containment.py
+  tests/security/test_prompt_injection_containment.py \
+  tests/security/test_tool_result_promotion.py
 
 echo "Patch stack verification passed"

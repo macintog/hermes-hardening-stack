@@ -245,6 +245,7 @@ printf '%s\n' \
   0003-customization-maintenance-tool.patch \
   0004-provenance-action-authority-hardening.patch \
   > "$patch_repo/patches/hermes-safe-fetch-context/series"
+# Only write tip= after committing the patched Hermes tree; omit tip= for working-tree generated stacks.
 printf 'base=%s\ntip=%s\n' "$base" "$tip" > "$patch_repo/patches/hermes-safe-fetch-context/base.ref"
 ```
 
@@ -292,3 +293,8 @@ A rebase is done when:
 - targeted tests pass, or failures are documented with root cause
 - patch stack applies cleanly in a fresh upstream worktree
 - docs mention any important upstream replacement or retired custom surface
+
+
+## base.ref provenance invariant
+
+`base.ref` must always contain `base=<clean upstream commit>`. `tip=`, when present, must be the actual patched Hermes commit used to generate the current stack. Do not write `tip=` for uncommitted/path-limited working-tree captures. The verifier fails when `base == tip` and the series contains non-empty patches.

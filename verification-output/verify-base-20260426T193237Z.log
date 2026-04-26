@@ -1,0 +1,142 @@
+Creating clean verification worktree from eaa7e2db670ba0879bc040c22c39d5abb39b897c
+Preparing worktree (detached HEAD eaa7e2db)
+Checking manifest/series consistency
+manifest consistency ok
+Verifying all series patch files are tracked
+Applying patch stack from /Users/ryand/.config/hermes-agent-patches/patches/hermes-safe-fetch-context/series
+  applying 0001-context-safety-core.patch
+Applied patch to 'agent/context_references.py' cleanly.
+Falling back to direct application...
+Applied patch to 'agent/memory_manager.py' cleanly.
+Applied patch to 'agent/prompt_builder.py' cleanly.
+Applied patch to 'cron/scheduler.py' cleanly.
+Falling back to direct application...
+Applied patch to 'tests/agent/test_memory_provider.py' cleanly.
+Applied patch to 'tests/agent/test_prompt_builder.py' cleanly.
+Applied patch to 'tests/cron/test_cron_context_from.py' cleanly.
+Applied patch to 'tests/cron/test_cron_script.py' cleanly.
+Falling back to direct application...
+Applied patch to 'tests/tools/test_cronjob_tools.py' cleanly.
+Applied patch to 'tests/tools/test_skills_tool.py' cleanly.
+Applied patch to 'tools/cronjob_tools.py' cleanly.
+Applied patch to 'tools/skills_tool.py' cleanly.
+  applying 0002-safe-http-gateway-download-hardening.patch
+Applied patch to 'gateway/platforms/base.py' cleanly.
+Applied patch to 'gateway/platforms/bluebubbles.py' cleanly.
+Applied patch to 'gateway/platforms/discord.py' cleanly.
+Applied patch to 'gateway/platforms/feishu.py' cleanly.
+Applied patch to 'gateway/platforms/mattermost.py' cleanly.
+Applied patch to 'gateway/platforms/qqbot/adapter.py' cleanly.
+Applied patch to 'gateway/platforms/slack.py' cleanly.
+Applied patch to 'gateway/platforms/telegram.py' cleanly.
+Applied patch to 'gateway/platforms/wecom.py' cleanly.
+Falling back to direct application...
+Applied patch to 'tests/gateway/test_discord_attachment_download.py' cleanly.
+Applied patch to 'tests/gateway/test_feishu.py' cleanly.
+Applied patch to 'tests/gateway/test_mattermost.py' cleanly.
+Applied patch to 'tests/gateway/test_media_download_retry.py' cleanly.
+Applied patch to 'tests/gateway/test_qqbot.py' cleanly.
+Applied patch to 'tests/gateway/test_slack.py' cleanly.
+Falling back to direct application...
+Applied patch to 'tests/gateway/test_wecom.py' cleanly.
+Falling back to direct application...
+Falling back to direct application...
+Falling back to direct application...
+Falling back to direct application...
+Applied patch to 'tools/skills_hub.py' cleanly.
+  applying 0003-customization-maintenance-tool.patch
+Falling back to direct application...
+Falling back to direct application...
+Applied patch to 'toolsets.py' cleanly.
+  applying 0004-provenance-action-authority-hardening.patch
+Falling back to direct application...
+Falling back to direct application...
+Falling back to direct application...
+Applied patch to 'model_tools.py' cleanly.
+Applied patch to 'run_agent.py' cleanly.
+Falling back to direct application...
+Falling back to direct application...
+Falling back to direct application...
+  applying 0005-tool-result-promotion-action-registry.patch
+Applied patch to 'agent/action_authority.py' cleanly.
+Applied patch to 'agent/context_safety.py' cleanly.
+Applied patch to 'agent/skill_commands.py' cleanly.
+Applied patch to 'model_tools.py' cleanly.
+Applied patch to 'run_agent.py' cleanly.
+Applied patch to 'tests/security/test_action_authority.py' cleanly.
+Falling back to direct application...
+Running py_compile smoke checks
+py_compile ok (50 files)
+Running import smoke checks
+imports ok
+Running targeted tests
+........................................................................ [  7%]
+........................................................................ [ 14%]
+................s....................................................... [ 22%]
+........................................................................ [ 29%]
+........................................................................ [ 36%]
+........................................................................ [ 44%]
+.....................................................................sss [ 51%]
+sssssssssssssssss......sssssssssssssssss................................ [ 58%]
+........................................................................ [ 66%]
+........................................................................ [ 73%]
+........................................................................ [ 81%]
+........................................................................ [ 88%]
+........................................................................ [ 95%]
+.........................................                                [100%]
+=============================== warnings summary ===============================
+cli.py:7572
+  /private/var/folders/5m/zqgwy35s2cs2c9fwtpz829080000gn/T/hermes-safe-fetch-context-verify-29678/cli.py:7572: SyntaxWarning: 'return' in a 'finally' block
+    return
+
+tests/agent/test_context_safety.py: 15 warnings
+tests/tools/test_customization_tool.py: 5 warnings
+tests/agent/test_memory_provider.py: 67 warnings
+tests/agent/test_prompt_builder.py: 118 warnings
+tests/cron/test_cron_context_from.py: 23 warnings
+tests/cron/test_cron_script.py: 40 warnings
+tests/tools/test_cronjob_tools.py: 26 warnings
+tests/tools/test_skills_tool.py: 84 warnings
+tests/gateway/test_base_media_cache_safe_http.py: 9 warnings
+tests/gateway/test_feishu.py: 191 warnings
+tests/gateway/test_mattermost.py: 19 warnings
+tests/gateway/test_media_download_retry.py: 19 warnings
+tests/gateway/test_qqbot.py: 67 warnings
+tests/gateway/test_slack.py: 49 warnings
+tests/gateway/test_wecom.py: 18 warnings
+tests/security/test_context_promotion_boundaries.py: 4 warnings
+tests/security/test_skill_plugin_boundaries.py: 6 warnings
+tests/security/test_artifact_provenance.py: 4 warnings
+tests/security/test_action_authority.py: 21 warnings
+tests/security/test_prompt_injection_containment.py: 3 warnings
+tests/security/test_tool_result_promotion.py: 4 warnings
+  /private/var/folders/5m/zqgwy35s2cs2c9fwtpz829080000gn/T/hermes-safe-fetch-context-verify-29678/tests/conftest.py:433: DeprecationWarning: 'asyncio.get_event_loop_policy' is deprecated and slated for removal in Python 3.16
+    loop = asyncio.get_event_loop_policy().get_event_loop()
+
+tests/gateway/test_qqbot.py::TestDispatchPayload::test_op10_updates_heartbeat_interval
+  /private/var/folders/5m/zqgwy35s2cs2c9fwtpz829080000gn/T/hermes-safe-fetch-context-verify-29678/gateway/platforms/qqbot/adapter.py:737: RuntimeWarning: coroutine 'QQAdapter._send_identify' was never awaited
+    self._create_task(self._send_identify())
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/gateway/test_slack.py: 12 warnings
+  /private/var/folders/5m/zqgwy35s2cs2c9fwtpz829080000gn/T/hermes-safe-fetch-context-verify-29678/gateway/platforms/slack.py:1241: RuntimeWarning: coroutine 'AsyncMockMixin._execute_mock_call' was never awaited
+    user_name = await self._resolve_user_name(user_id, chat_id=channel_id)
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/gateway/test_slack.py::TestFormatMessage::test_bold_conversion
+  /opt/homebrew/Cellar/python@3.14/3.14.4/Frameworks/Python.framework/Versions/3.14/lib/python3.14/unittest/mock.py:2259: RuntimeWarning: coroutine 'AsyncMockMixin._execute_mock_call' was never awaited
+    def __init__(self, name, parent):
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+tests/gateway/test_slack.py::TestAssistantThreadLifecycle::test_message_uses_cached_assistant_thread_identity
+  /Users/ryand/.hermes/hermes-agent/.venv/lib/python3.14/site-packages/_pytest/stash.py:108: RuntimeWarning: coroutine 'AsyncMockMixin._execute_mock_call' was never awaited
+    del self._storage[key]
+  Enable tracemalloc to get traceback where the object was allocated.
+  See https://docs.pytest.org/en/stable/how-to/capture-warnings.html#resource-warnings for more info.
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+939 passed, 38 skipped, 808 warnings in 5.89s
+Patch stack verification passed
