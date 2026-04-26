@@ -3,7 +3,7 @@
 You are a design subagent for the `tools/safe_http.py` implementation.
 
 Repo:
-`/Users/ryand/.hermes/hermes-agent`
+`~/.hermes/hermes-agent`
 
 Project docs:
 - `docs/customizations/hermes-safe-fetch-context/README.md`

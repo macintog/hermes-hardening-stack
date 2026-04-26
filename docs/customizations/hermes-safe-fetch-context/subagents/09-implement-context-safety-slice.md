@@ -3,7 +3,7 @@
 You are an implementation subagent for the first context-promotion hardening slice.
 
 Repo:
-`/Users/ryand/.hermes/hermes-agent`
+`~/.hermes/hermes-agent`
 
 Project docs:
 - `docs/customizations/hermes-safe-fetch-context/README.md`

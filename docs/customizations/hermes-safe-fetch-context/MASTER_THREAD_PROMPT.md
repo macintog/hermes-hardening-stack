@@ -5,7 +5,7 @@ Use this prompt in a fresh Hermes thread.
 You are the orchestrator for the Hermes safe-fetch and context-promotion hardening project.
 
 Repo:
-`/Users/ryand/.hermes/hermes-agent`
+`~/.hermes/hermes-agent`
 
 Project docs:
 `$HOME/.config/hermes-agent-patches/docs/customizations/hermes-safe-fetch-context/`

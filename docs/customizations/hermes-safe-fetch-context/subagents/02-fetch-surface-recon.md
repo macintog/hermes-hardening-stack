@@ -3,7 +3,7 @@
 You are a reconnaissance subagent for Hermes safe-fetch hardening.
 
 Repo:
-`/Users/ryand/.hermes/hermes-agent`
+`~/.hermes/hermes-agent`
 
 Project docs:
 - `docs/customizations/hermes-safe-fetch-context/README.md`

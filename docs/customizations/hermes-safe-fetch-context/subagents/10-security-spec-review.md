@@ -3,7 +3,7 @@
 You are a security/spec reviewer for Hermes safe-fetch and context-promotion hardening.
 
 Repo:
-`/Users/ryand/.hermes/hermes-agent`
+`~/.hermes/hermes-agent`
 
 Project docs:
 - `docs/customizations/hermes-safe-fetch-context/README.md`

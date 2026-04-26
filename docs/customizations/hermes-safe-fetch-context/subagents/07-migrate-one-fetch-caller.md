@@ -3,7 +3,7 @@
 You are an implementation subagent for migrating exactly one Hermes remote-download caller to `tools/safe_http.py`.
 
 Repo:
-`/Users/ryand/.hermes/hermes-agent`
+`~/.hermes/hermes-agent`
 
 Project docs:
 - `docs/customizations/hermes-safe-fetch-context/README.md`
