@@ -314,10 +314,10 @@ if "instruction_override" not in cs or "prompt_disclosure" not in cs or "encoded
     fail("scanner quality regression coverage for public prompt-injection misses is missing")
 cron_tests = Path("tests/tools/test_cronjob_tools.py").read_text(errors="replace")
 prompt_builder_tests = Path("tests/agent/test_prompt_builder.py").read_text(errors="replace")
-if "test_legacy_cron_threat_patterns_remain_blocked_via_context_safety" not in cron_tests:
-    fail("legacy cron threat-pattern no-degradation regression is missing")
-if "test_legacy_context_threat_patterns_remain_blocked_via_context_safety" not in prompt_builder_tests:
-    fail("legacy prompt-builder threat-pattern no-degradation regression is missing")
+if "test_cron_prompts_block_high_risk_patterns_via_context_safety" not in cron_tests:
+    fail("cron high-risk pattern regression is missing")
+if "test_context_files_block_high_risk_patterns_via_context_safety" not in prompt_builder_tests:
+    fail("prompt-builder high-risk pattern regression is missing")
 print("static security drift guards ok")
 PY
 

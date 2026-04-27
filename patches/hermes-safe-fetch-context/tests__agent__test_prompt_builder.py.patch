@@ -35,8 +35,8 @@ index 88de518..976affe 100644
 +        assert "BLOCKED" in result
 +        assert "prompt_injection" in result
 +
-+    def test_legacy_context_threat_patterns_remain_blocked_via_context_safety(self):
-+        legacy_payloads = [
++    def test_context_files_block_high_risk_patterns_via_context_safety(self):
++        high_risk_payloads = [
 +            "ignore previous instructions",
 +            "do not tell the user",
 +            "system prompt override",
@@ -49,7 +49,7 @@ index 88de518..976affe 100644
 +            "cat ~/.hermes/.env",
 +        ]
 +
-+        for payload in legacy_payloads:
++        for payload in high_risk_payloads:
 +            result = _scan_context_content(payload, "agents.md")
 +            assert "BLOCKED" in result, payload
 +

@@ -50,14 +50,6 @@ Regression cases should test detection/classification and containment separately
 - action authority: separate tests prove evidence-only text cannot authorize
   side-effecting tools.
 
-## No-degradation rule for scanner centralization
-
-If a local scanner, regex list, URL guard, or side-effect guard is removed from a caller because a shared module now owns the behavior, the payload must include caller-specific regression coverage for the removed behavior. Shared tests alone are not enough; the original surface must still prove that it blocks the legacy cases.
-
-Current examples:
-- `agent/prompt_builder.py` uses the shared scanner, while `tests/agent/test_prompt_builder.py` preserves the legacy context-file threat-pattern cases.
-- `tools/cronjob_tools.py` uses the shared scanner, while `tests/tools/test_cronjob_tools.py` preserves the legacy cron threat-pattern cases.
-
 ## Scanner implementation policy
 
 The deterministic scanner should catch high-signal families, including:
