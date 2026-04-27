@@ -1,8 +1,8 @@
 diff --git a/gateway/platforms/base.py b/gateway/platforms/base.py
-index 8cb4f7c0..16cc83e1 100644
+index 72054e33..97ce6b1f 100644
 --- a/gateway/platforms/base.py
 +++ b/gateway/platforms/base.py
-@@ -421,6 +421,28 @@ async def _ssrf_redirect_guard(response):
+@@ -454,6 +454,28 @@ async def _ssrf_redirect_guard(response):
  
  # Default location: {HERMES_HOME}/cache/images/ (legacy: image_cache/)
  IMAGE_CACHE_DIR = get_hermes_dir("cache/images", "image_cache")
@@ -31,7 +31,7 @@ index 8cb4f7c0..16cc83e1 100644
  
  
  def get_image_cache_dir() -> Path:
-@@ -492,45 +514,48 @@ async def cache_image_from_url(url: str, ext: str = ".jpg", retries: int = 2) ->
+@@ -525,45 +547,48 @@ async def cache_image_from_url(url: str, ext: str = ".jpg", retries: int = 2) ->
      Raises:
          ValueError: If the URL targets a private/internal network (SSRF protection).
      """
@@ -116,7 +116,7 @@ index 8cb4f7c0..16cc83e1 100644
  
  
  def cleanup_image_cache(max_age_hours: int = 24) -> int:
-@@ -606,45 +631,48 @@ async def cache_audio_from_url(url: str, ext: str = ".ogg", retries: int = 2) ->
+@@ -639,45 +664,48 @@ async def cache_audio_from_url(url: str, ext: str = ".ogg", retries: int = 2) ->
      Raises:
          ValueError: If the URL targets a private/internal network (SSRF protection).
      """
@@ -253,7 +253,7 @@ index afcbf1a7..59658b10 100644
  
              if mime.startswith("image/"):
 diff --git a/gateway/platforms/discord.py b/gateway/platforms/discord.py
-index b4018c6d..177a9060 100644
+index 0816fb93..0b48f19c 100644
 --- a/gateway/platforms/discord.py
 +++ b/gateway/platforms/discord.py
 @@ -51,14 +51,12 @@ from gateway.platforms.base import (
@@ -473,7 +473,7 @@ index b4018c6d..177a9060 100644
              )
              return await super().send_animation(chat_id, animation_url, caption, reply_to, metadata=metadata)
          except Exception as e:  # pragma: no cover - defensive logging
-@@ -3087,20 +3073,55 @@ class DiscordAdapter(BasePlatformAdapter):
+@@ -3074,20 +3060,55 @@ class DiscordAdapter(BasePlatformAdapter):
          try:
              return await reader()
          except Exception as e:
@@ -531,7 +531,7 @@ index b4018c6d..177a9060 100644
          """
          raw_bytes = await self._read_attachment_bytes(att)
          if raw_bytes is not None:
-@@ -3111,7 +3132,14 @@ class DiscordAdapter(BasePlatformAdapter):
+@@ -3098,7 +3119,14 @@ class DiscordAdapter(BasePlatformAdapter):
                      "[Discord] cache_image_from_bytes rejected att.read() data; falling back to URL: %s",
                      e,
                  )
@@ -547,7 +547,7 @@ index b4018c6d..177a9060 100644
  
      async def _cache_discord_audio(self, att, ext: str) -> str:
          """Cache a Discord audio attachment to local disk.
-@@ -3119,7 +3147,7 @@ class DiscordAdapter(BasePlatformAdapter):
+@@ -3106,7 +3134,7 @@ class DiscordAdapter(BasePlatformAdapter):
          Primary path: ``att.read()`` + ``cache_audio_from_bytes``
          (authenticated, no SSRF gate).
  
@@ -556,7 +556,7 @@ index b4018c6d..177a9060 100644
          """
          raw_bytes = await self._read_attachment_bytes(att)
          if raw_bytes is not None:
-@@ -3130,41 +3158,35 @@ class DiscordAdapter(BasePlatformAdapter):
+@@ -3117,41 +3145,35 @@ class DiscordAdapter(BasePlatformAdapter):
                      "[Discord] cache_audio_from_bytes failed; falling back to URL: %s",
                      e,
                  )
@@ -616,7 +616,7 @@ index b4018c6d..177a9060 100644
  
      async def _handle_message(self, message: DiscordMessage) -> None:
          """Handle incoming Discord messages."""
-@@ -3338,9 +3360,12 @@ class DiscordAdapter(BasePlatformAdapter):
+@@ -3325,9 +3347,12 @@ class DiscordAdapter(BasePlatformAdapter):
                      media_urls.append(cached_path)
                      media_types.append(content_type)
                      print(f"[Discord] Cached user image: {cached_path}", flush=True)
@@ -630,7 +630,7 @@ index b4018c6d..177a9060 100644
                      media_urls.append(att.url)
                      media_types.append(content_type)
              elif content_type.startswith("audio/"):
-@@ -3352,6 +3377,9 @@ class DiscordAdapter(BasePlatformAdapter):
+@@ -3339,6 +3364,9 @@ class DiscordAdapter(BasePlatformAdapter):
                      media_urls.append(cached_path)
                      media_types.append(content_type)
                      print(f"[Discord] Cached user audio: {cached_path}", flush=True)
@@ -1046,10 +1046,10 @@ index 93284645..ee0e0bbf 100644
                  )
                  return cache_document_from_bytes(audio_data, f"qq_voice{ext}")
 diff --git a/gateway/platforms/slack.py b/gateway/platforms/slack.py
-index 191689a5..414b4e61 100644
+index ea75130a..ea6e350e 100644
 --- a/gateway/platforms/slack.py
 +++ b/gateway/platforms/slack.py
-@@ -79,6 +79,9 @@ class SlackAdapter(BasePlatformAdapter):
+@@ -270,6 +270,9 @@ class SlackAdapter(BasePlatformAdapter):
      """
  
      MAX_MESSAGE_LENGTH = 39000  # Slack API allows 40,000 chars; leave margin
@@ -1059,7 +1059,7 @@ index 191689a5..414b4e61 100644
  
      def __init__(self, config: PlatformConfig):
          super().__init__(config, Platform.SLACK)
-@@ -1648,73 +1651,77 @@ class SlackAdapter(BasePlatformAdapter):
+@@ -2310,82 +2313,88 @@ class SlackAdapter(BasePlatformAdapter):
          except Exception:
              return False
  
@@ -1180,9 +1180,18 @@ index 191689a5..414b4e61 100644
 -                        headers={"Authorization": f"Bearer {bot_token}"},
 -                    )
 -                    response.raise_for_status()
+-                    ct = response.headers.get("content-type", "")
+-                    if "text/html" in ct:
+-                        raise ValueError(
+-                            "Slack returned HTML instead of file bytes "
+-                            f"(content-type: {ct}); "
+-                            "check bot token scopes and file permissions"
+-                        )
 -                    return response.content
--                except (httpx.TimeoutException, httpx.HTTPStatusError) as exc:
+-                except (httpx.TimeoutException, httpx.HTTPStatusError, ValueError) as exc:
 -                    if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code < 429:
+-                        raise
+-                    if isinstance(exc, ValueError):
 -                        raise
 -                    if attempt < 2:
 -                        logger.debug("Slack file download retry %d/2 for %s: %s",
@@ -1193,12 +1202,23 @@ index 191689a5..414b4e61 100644
 +    async def _download_slack_file_bytes(self, url: str, team_id: str = "") -> bytes:
 +        """Download a Slack file and return raw bytes using safe HTTP."""
 +        result = await self._safe_download_slack_file_bytes(url, team_id=team_id, media_kind="document")
++
++        # Slack may return an HTML sign-in/redirect page instead of actual file
++        # bytes (e.g. expired token, restricted file access). Detect this after
++        # the safe download boundary so document paths get the same rejection as
++        # media downloads without bypassing safe_http.
++        if "text/html" in result.content_type.lower():
++            raise ValueError(
++                "Slack returned HTML instead of file bytes "
++                f"(content-type: {result.content_type}); "
++                "check bot token scopes and file permissions"
++            )
 +        return result.content
  
      # ── Channel mention gating ─────────────────────────────────────────────
  
 diff --git a/gateway/platforms/telegram.py b/gateway/platforms/telegram.py
-index be1bf494..28c86681 100644
+index 6c7658b3..6fc77c8f 100644
 --- a/gateway/platforms/telegram.py
 +++ b/gateway/platforms/telegram.py
 @@ -84,6 +84,7 @@ from gateway.platforms.telegram_network import (
@@ -1209,7 +1229,7 @@ index be1bf494..28c86681 100644
  
  
  def check_telegram_requirements() -> bool:
-@@ -1904,19 +1905,35 @@ class TelegramAdapter(BasePlatformAdapter):
+@@ -1929,19 +1930,35 @@ class TelegramAdapter(BasePlatformAdapter):
              return SendResult(success=True, message_id=str(msg.message_id))
          except Exception as e:
              logger.warning(
@@ -1255,7 +1275,7 @@ index be1bf494..28c86681 100644
                  msg = await self._bot.send_photo(
                      chat_id=int(chat_id),
                      photo=image_data,
-@@ -1925,15 +1942,24 @@ class TelegramAdapter(BasePlatformAdapter):
+@@ -1950,15 +1967,24 @@ class TelegramAdapter(BasePlatformAdapter):
                      message_thread_id=self._message_thread_id_for_send(_photo_thread),
                  )
                  return SendResult(success=True, message_id=str(msg.message_id))
@@ -2293,10 +2313,10 @@ index 1ed79a5b..6a3c0e10 100644
 +        msg = self.adapter.handle_message.call_args[0][0]
 +        assert msg.media_urls is None
 diff --git a/tests/gateway/test_media_download_retry.py b/tests/gateway/test_media_download_retry.py
-index 5b5add26..91b48092 100644
+index c43ad092..d6028b7d 100644
 --- a/tests/gateway/test_media_download_retry.py
 +++ b/tests/gateway/test_media_download_retry.py
-@@ -1,923 +1,285 @@
+@@ -1,568 +1,204 @@
 -"""
 -Tests for media download retry logic added in PR #2982.
 -
@@ -2316,7 +2336,7 @@ index 5b5add26..91b48092 100644
  from unittest.mock import AsyncMock, MagicMock, patch
  
  import pytest
--import httpx
+ import httpx
  
 -# ---------------------------------------------------------------------------
 -# Helpers for building httpx exceptions
@@ -2359,9 +2379,15 @@ index 5b5add26..91b48092 100644
 +    return SafeHTTPError(f"HTTP status {status} downloading https://cdn.example.com/media")
  
  
- class TestCacheImageFromBytes:
+-class TestCacheImageFromBytes:
 -    """Tests for gateway.platforms.base.cache_image_from_bytes"""
--
++def _http_status_error(status: int) -> httpx.HTTPStatusError:
++    request = httpx.Request("GET", "https://files.slack.com/file.bin")
++    response = httpx.Response(status_code=status, request=request)
++    return httpx.HTTPStatusError(f"HTTP {status}", request=request, response=response)
+ 
++
++class TestCacheImageFromBytes:
      def test_caches_valid_jpeg(self, tmp_path, monkeypatch):
          monkeypatch.setattr("gateway.platforms.base.IMAGE_CACHE_DIR", tmp_path / "img")
          from gateway.platforms.base import cache_image_from_bytes
@@ -2557,10 +2583,10 @@ index 5b5add26..91b48092 100644
 -                await cache_image_from_url(
 -                    "http://example.com/img.jpg", ext=".jpg", retries=2
 -                )
--
+ 
 -        with pytest.raises(httpx.HTTPStatusError):
 -            asyncio.run(run())
- 
+-
 -        # Only 1 attempt, no sleep
 -        assert mock_client.get.call_count == 1
 -        mock_sleep.assert_not_called()
@@ -2852,11 +2878,8 @@ index 5b5add26..91b48092 100644
 -        ok_response.content = b"\xff\xd8\xff fake jpeg"
 -        ok_response.raise_for_status = MagicMock()
 -        ok_response.is_redirect = False
- 
+-
 -        mock_client, captured, factory = self._make_client_capturing_hooks()
-+                with pytest.raises(SafeHTTPError, match="HTTP status 404"):
-+                    await cache_audio_from_url("https://cdn.example.com/voice.ogg", ext=".ogg", retries=2)
-+                sleep.assert_not_awaited()
  
 -        call_count = 0
 -
@@ -2918,36 +2941,64 @@ index 5b5add26..91b48092 100644
 -
 -
 -def _make_slack_adapter():
--    config = PlatformConfig(enabled=True, token="xoxb-fake-token")
+-    config = PlatformConfig(enabled=True, token="***")
 -    adapter = SlackAdapter(config)
 -    adapter._app = MagicMock()
 -    adapter._app.client = AsyncMock()
 -    adapter._bot_user_id = "U_BOT"
 -    adapter._running = True
 -    return adapter
++                with pytest.raises(SafeHTTPError, match="HTTP status 404"):
++                    await cache_audio_from_url("https://cdn.example.com/voice.ogg", ext=".ogg", retries=2)
++                sleep.assert_not_awaited()
+ 
 +        asyncio.run(run())
 +        assert mock_download.await_count == 1
+ 
+-# ---------------------------------------------------------------------------
+-# SlackAdapter diagnostics helpers
+-# ---------------------------------------------------------------------------
+ 
+ class TestSlackAttachmentDiagnostics:
+     def test_missing_scope_error_returns_actionable_notice(self):
+-        """_describe_slack_api_error translates a missing_scope response into
+-        a user-facing notice mentioning the needed scope and the reinstall
+-        step. This is the helper used by every files.info call site (Slack
+-        Connect stubs + post-download failures) to surface scope problems
+-        without making an extra probe call per attachment.
+-        """
+-        adapter = _make_slack_adapter()
++        from gateway.platforms.slack import SlackAdapter
+ 
++        adapter = SlackAdapter.__new__(SlackAdapter)
+         response = {
+             "error": "missing_scope",
+             "needed": "files:read",
+@@ -575,407 +211,122 @@ class TestSlackAttachmentDiagnostics:
+         assert "chat:write,files:write" in detail
+ 
+     def test_download_failure_403_returns_permission_notice(self):
+-        adapter = _make_slack_adapter()
+-        exc = _make_http_status_error(403)
+-        detail = adapter._describe_slack_download_failure(exc, file_obj={"name": "report.pdf"})
++        from gateway.platforms.slack import SlackAdapter
++
++        adapter = SlackAdapter.__new__(SlackAdapter)
++        detail = adapter._describe_slack_download_failure(_http_status_error(403), file_obj={"name": "report.pdf"})
+         assert "403" in detail
+         assert "permission or scope" in detail
  
  
 -# ---------------------------------------------------------------------------
 -# SlackAdapter._download_slack_file
 -# ---------------------------------------------------------------------------
-+class TestSlackDownloads:
-+    def _adapter(self):
-+        from gateway.platforms.slack import SlackAdapter
- 
+-
 -class TestSlackDownloadSlackFile:
 -    """Tests for SlackAdapter._download_slack_file"""
-+        adapter = SlackAdapter.__new__(SlackAdapter)
-+        adapter.config = MagicMock(token="xoxb-test")
-+        adapter._team_clients = {}
-+        adapter.MAX_FILE_DOWNLOAD_BYTES = 10 * 1024 * 1024
-+        return adapter
- 
+-
 -    def test_success_on_first_attempt(self, tmp_path, monkeypatch):
 -        """Successful download on first try returns a cached file path."""
-+    def test_download_slack_file_caches_image(self, tmp_path, monkeypatch):
-         monkeypatch.setattr("gateway.platforms.base.IMAGE_CACHE_DIR", tmp_path / "img")
+-        monkeypatch.setattr("gateway.platforms.base.IMAGE_CACHE_DIR", tmp_path / "img")
 -        adapter = _make_slack_adapter()
 -
 -        fake_response = MagicMock()
@@ -2959,27 +3010,20 @@ index 5b5add26..91b48092 100644
 -        mock_client.get = AsyncMock(return_value=fake_response)
 -        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
 -        mock_client.__aexit__ = AsyncMock(return_value=False)
-+        adapter = self._adapter()
-+        mock_download = AsyncMock(return_value=_result(b"\x89PNG\r\n\x1a\n image", content_type="image/png"))
- 
-         async def run():
+-
+-        async def run():
 -            with patch("httpx.AsyncClient", return_value=mock_client):
 -                return await adapter._download_slack_file(
 -                    "https://files.slack.com/img.jpg", ext=".jpg"
 -                )
-+            with patch("tools.safe_http.safe_download_bytes", mock_download):
-+                return await adapter._download_slack_file("https://files.slack.com/img.png", ext=".png")
- 
+-
 -        path = asyncio.run(run())
 -        assert path.endswith(".jpg")
 -        mock_client.get.assert_called_once()
-+        assert asyncio.run(run()).endswith(".png")
-+        mock_download.assert_awaited_once()
- 
+-
 -    def test_rejects_html_response(self, tmp_path, monkeypatch):
 -        """An HTML sign-in page from Slack is rejected, not cached as image."""
-+    def test_download_slack_file_retries_transport_error(self, tmp_path, monkeypatch):
-         monkeypatch.setattr("gateway.platforms.base.IMAGE_CACHE_DIR", tmp_path / "img")
+-        monkeypatch.setattr("gateway.platforms.base.IMAGE_CACHE_DIR", tmp_path / "img")
 -        adapter = _make_slack_adapter()
 -
 -        fake_response = MagicMock()
@@ -2991,30 +3035,33 @@ index 5b5add26..91b48092 100644
 -        mock_client.get = AsyncMock(return_value=fake_response)
 -        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
 -        mock_client.__aexit__ = AsyncMock(return_value=False)
-+        adapter = self._adapter()
-+        mock_download = AsyncMock(side_effect=[_transport_error(), _result()])
++class TestSlackDownloads:
++    def _adapter(self):
++        from gateway.platforms.slack import SlackAdapter
  
-         async def run():
+-        async def run():
 -            with patch("httpx.AsyncClient", return_value=mock_client):
 -                await adapter._download_slack_file(
 -                    "https://files.slack.com/img.jpg", ext=".jpg"
 -                )
-+            with patch("tools.safe_http.safe_download_bytes", mock_download), patch("asyncio.sleep", new_callable=AsyncMock):
-+                return await adapter._download_slack_file("https://files.slack.com/img.jpg", ext=".jpg")
- 
+-
 -        with pytest.raises(ValueError, match="HTML instead of media"):
 -            asyncio.run(run())
-+        assert asyncio.run(run()).endswith(".jpg")
-+        assert mock_download.await_count == 2
- 
+-
 -        # Verify nothing was cached
 -        img_dir = tmp_path / "img"
 -        if img_dir.exists():
 -            assert list(img_dir.iterdir()) == []
--
++        adapter = SlackAdapter.__new__(SlackAdapter)
++        adapter.config = MagicMock(token="xoxb-test")
++        adapter._team_clients = {}
++        adapter.MAX_FILE_DOWNLOAD_BYTES = 10 * 1024 * 1024
++        return adapter
+ 
 -    def test_retries_on_timeout_then_succeeds(self, tmp_path, monkeypatch):
 -        """Timeout on first attempt triggers retry; success on second."""
--        monkeypatch.setattr("gateway.platforms.base.IMAGE_CACHE_DIR", tmp_path / "img")
++    def test_download_slack_file_caches_image(self, tmp_path, monkeypatch):
+         monkeypatch.setattr("gateway.platforms.base.IMAGE_CACHE_DIR", tmp_path / "img")
 -        adapter = _make_slack_adapter()
 -
 -        fake_response = MagicMock()
@@ -3030,48 +3077,48 @@ index 5b5add26..91b48092 100644
 -        mock_client.__aexit__ = AsyncMock(return_value=False)
 -
 -        mock_sleep = AsyncMock()
--
--        async def run():
++        adapter = self._adapter()
++        mock_download = AsyncMock(return_value=_result(b"\x89PNG\r\n\x1a\n image", content_type="image/png"))
+ 
+         async def run():
 -            with patch("httpx.AsyncClient", return_value=mock_client), \
 -                 patch("asyncio.sleep", mock_sleep):
 -                return await adapter._download_slack_file(
 -                    "https://files.slack.com/img.jpg", ext=".jpg"
 -                )
--
++            with patch("tools.safe_http.safe_download_bytes", mock_download):
++                return await adapter._download_slack_file("https://files.slack.com/img.png", ext=".png")
+ 
 -        path = asyncio.run(run())
 -        assert path.endswith(".jpg")
 -        assert mock_client.get.call_count == 2
 -        mock_sleep.assert_called_once()
--
++        assert asyncio.run(run()).endswith(".png")
++        mock_download.assert_awaited_once()
+ 
 -    def test_raises_after_max_retries(self, tmp_path, monkeypatch):
 -        """Timeout on every attempt eventually raises after 3 total tries."""
--        monkeypatch.setattr("gateway.platforms.base.IMAGE_CACHE_DIR", tmp_path / "img")
++    def test_download_slack_file_retries_transport_error(self, tmp_path, monkeypatch):
+         monkeypatch.setattr("gateway.platforms.base.IMAGE_CACHE_DIR", tmp_path / "img")
 -        adapter = _make_slack_adapter()
 -
 -        mock_client = AsyncMock()
 -        mock_client.get = AsyncMock(side_effect=_make_timeout_error())
 -        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
 -        mock_client.__aexit__ = AsyncMock(return_value=False)
-+    def test_download_slack_file_bytes_returns_bytes(self):
-+        adapter = self._adapter()
-+        mock_download = AsyncMock(return_value=_result(b"raw bytes", content_type="application/octet-stream"))
- 
-         async def run():
+-
+-        async def run():
 -            with patch("httpx.AsyncClient", return_value=mock_client), \
 -                 patch("asyncio.sleep", new_callable=AsyncMock):
 -                await adapter._download_slack_file(
 -                    "https://files.slack.com/img.jpg", ext=".jpg"
 -                )
-+            with patch("tools.safe_http.safe_download_bytes", mock_download):
-+                return await adapter._download_slack_file_bytes("https://files.slack.com/file.bin")
- 
+-
 -        with pytest.raises(httpx.TimeoutException):
 -            asyncio.run(run())
 -
 -        assert mock_client.get.call_count == 3
-+        assert asyncio.run(run()) == b"raw bytes"
-+        mock_download.assert_awaited_once()
- 
+-
 -    def test_non_retryable_403_raises_immediately(self, tmp_path, monkeypatch):
 -        """A 403 is not retried; it raises immediately."""
 -        monkeypatch.setattr("gateway.platforms.base.IMAGE_CACHE_DIR", tmp_path / "img")
@@ -3082,9 +3129,8 @@ index 5b5add26..91b48092 100644
 -        mock_client.get = AsyncMock(side_effect=_make_http_status_error(403))
 -        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
 -        mock_client.__aexit__ = AsyncMock(return_value=False)
-+    def test_download_slack_file_bytes_raises_after_retries(self):
 +        adapter = self._adapter()
-+        mock_download = AsyncMock(side_effect=_transport_error())
++        mock_download = AsyncMock(side_effect=[_transport_error(), _result()])
  
          async def run():
 -            with patch("httpx.AsyncClient", return_value=mock_client), \
@@ -3093,13 +3139,11 @@ index 5b5add26..91b48092 100644
 -                    "https://files.slack.com/img.jpg", ext=".jpg"
 -                )
 +            with patch("tools.safe_http.safe_download_bytes", mock_download), patch("asyncio.sleep", new_callable=AsyncMock):
-+                await adapter._download_slack_file_bytes("https://files.slack.com/file.bin")
++                return await adapter._download_slack_file("https://files.slack.com/img.jpg", ext=".jpg")
  
 -        with pytest.raises(httpx.HTTPStatusError):
-+        with pytest.raises(SafeHTTPError, match="HTTP download failed"):
-             asyncio.run(run())
-+        assert mock_download.await_count == 3
- 
+-            asyncio.run(run())
+-
 -        assert mock_client.get.call_count == 1
 -        mock_sleep.assert_not_called()
 -
@@ -3118,21 +3162,63 @@ index 5b5add26..91b48092 100644
 -        fake_response = MagicMock()
 -        fake_response.content = b"raw bytes here"
 -        fake_response.raise_for_status = MagicMock()
+-        fake_response.headers = {"content-type": "application/pdf"}
++        assert asyncio.run(run()).endswith(".jpg")
++        assert mock_download.await_count == 2
+ 
+-        mock_client = AsyncMock()
+-        mock_client.get = AsyncMock(return_value=fake_response)
+-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+-        mock_client.__aexit__ = AsyncMock(return_value=False)
++    def test_download_slack_file_bytes_returns_bytes(self):
++        adapter = self._adapter()
++        mock_download = AsyncMock(return_value=_result(b"raw bytes", content_type="application/octet-stream"))
+ 
+         async def run():
+-            with patch("httpx.AsyncClient", return_value=mock_client):
+-                return await adapter._download_slack_file_bytes(
+-                    "https://files.slack.com/file.bin"
+-                )
++            with patch("tools.safe_http.safe_download_bytes", mock_download):
++                return await adapter._download_slack_file_bytes("https://files.slack.com/file.bin")
+ 
+-        result = asyncio.run(run())
+-        assert result == b"raw bytes here"
+-
+-    def test_rejects_html_response(self):
+-        """Slack HTML sign-in pages should not be accepted as file bytes."""
+-        adapter = _make_slack_adapter()
++        assert asyncio.run(run()) == b"raw bytes"
++        mock_download.assert_awaited_once()
+ 
+-        fake_response = MagicMock()
+-        fake_response.content = b"<!DOCTYPE html><html><title>Slack</title></html>"
+-        fake_response.raise_for_status = MagicMock()
+-        fake_response.headers = {"content-type": "text/html; charset=utf-8"}
 -
 -        mock_client = AsyncMock()
 -        mock_client.get = AsyncMock(return_value=fake_response)
 -        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
 -        mock_client.__aexit__ = AsyncMock(return_value=False)
--
--        async def run():
++    def test_download_slack_file_bytes_rejects_html_response(self):
++        adapter = self._adapter()
++        mock_download = AsyncMock(return_value=_result(
++            b"<!DOCTYPE html><html><title>Slack</title></html>",
++            content_type="text/html; charset=utf-8",
++        ))
+ 
+         async def run():
 -            with patch("httpx.AsyncClient", return_value=mock_client):
--                return await adapter._download_slack_file_bytes(
+-                await adapter._download_slack_file_bytes(
 -                    "https://files.slack.com/file.bin"
 -                )
++            with patch("tools.safe_http.safe_download_bytes", mock_download):
++                await adapter._download_slack_file_bytes("https://files.slack.com/file.bin")
  
--        result = asyncio.run(run())
--        assert result == b"raw bytes here"
--
+         with pytest.raises(ValueError, match="HTML instead of file bytes"):
+             asyncio.run(run())
++        mock_download.assert_awaited_once()
+ 
 -    def test_retries_on_429_then_succeeds(self):
 -        """429 on first attempt is retried; raw bytes returned on second."""
 -        adapter = _make_slack_adapter()
@@ -3140,6 +3226,7 @@ index 5b5add26..91b48092 100644
 -        ok_response = MagicMock()
 -        ok_response.content = b"final bytes"
 -        ok_response.raise_for_status = MagicMock()
+-        ok_response.headers = {"content-type": "application/pdf"}
 -
 -        mock_client = AsyncMock()
 -        mock_client.get = AsyncMock(
@@ -3147,8 +3234,11 @@ index 5b5add26..91b48092 100644
 -        )
 -        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
 -        mock_client.__aexit__ = AsyncMock(return_value=False)
--
--        async def run():
++    def test_download_slack_file_bytes_raises_after_retries(self):
++        adapter = self._adapter()
++        mock_download = AsyncMock(side_effect=_transport_error())
+ 
+         async def run():
 -            with patch("httpx.AsyncClient", return_value=mock_client), \
 -                 patch("asyncio.sleep", new_callable=AsyncMock):
 -                return await adapter._download_slack_file_bytes(
@@ -3158,7 +3248,9 @@ index 5b5add26..91b48092 100644
 -        result = asyncio.run(run())
 -        assert result == b"final bytes"
 -        assert mock_client.get.call_count == 2
--
++            with patch("tools.safe_http.safe_download_bytes", mock_download), patch("asyncio.sleep", new_callable=AsyncMock):
++                await adapter._download_slack_file_bytes("https://files.slack.com/file.bin")
+ 
 -    def test_raises_after_max_retries(self):
 -        """Persistent timeouts raise after all 3 attempts are exhausted."""
 -        adapter = _make_slack_adapter()
@@ -3176,10 +3268,12 @@ index 5b5add26..91b48092 100644
 -                )
 -
 -        with pytest.raises(httpx.TimeoutException):
--            asyncio.run(run())
--
++        with pytest.raises(SafeHTTPError, match="HTTP download failed"):
+             asyncio.run(run())
++        assert mock_download.await_count == 3
+ 
 -        assert mock_client.get.call_count == 3
--
+ 
 -
 -# ---------------------------------------------------------------------------
 -# MattermostAdapter._send_url_as_file
@@ -3232,16 +3326,12 @@ index 5b5add26..91b48092 100644
 -        assert result.success
 -        adapter._upload_file.assert_called_once()
 -        adapter._api_post.assert_called_once()
--
--    def test_retries_on_429_then_succeeds(self, _mock_safe):
--        """429 on first attempt is retried; 200 on second attempt succeeds."""
--        adapter = _make_mm_adapter()
 +    def _adapter(self):
 +        from gateway.platforms.mattermost import MattermostAdapter
  
--        resp_429 = _make_aiohttp_resp(429)
--        resp_200 = _make_aiohttp_resp(200)
--        adapter._session.get = MagicMock(side_effect=[resp_429, resp_200])
+-    def test_retries_on_429_then_succeeds(self, _mock_safe):
+-        """429 on first attempt is retried; 200 on second attempt succeeds."""
+-        adapter = _make_mm_adapter()
 +        adapter = MattermostAdapter.__new__(MattermostAdapter)
 +        adapter._base_url = "https://mattermost.example"
 +        adapter._token = "token"
@@ -3250,6 +3340,10 @@ index 5b5add26..91b48092 100644
 +        adapter.send = AsyncMock()
 +        return adapter
  
+-        resp_429 = _make_aiohttp_resp(429)
+-        resp_200 = _make_aiohttp_resp(200)
+-        adapter._session.get = MagicMock(side_effect=[resp_429, resp_200])
+-
 -        mock_sleep = AsyncMock()
 +    def test_success_uploads_downloaded_url(self):
 +        adapter = self._adapter()
@@ -3267,13 +3361,13 @@ index 5b5add26..91b48092 100644
          assert result.success
 -        assert adapter._session.get.call_count == 2
 -        mock_sleep.assert_called_once()
--
--    def test_retries_on_500_then_succeeds(self, _mock_safe):
--        """5xx on first attempt is retried; 200 on second attempt succeeds."""
--        adapter = _make_mm_adapter()
 +        adapter._upload_file.assert_awaited_once()
 +        adapter._api_post.assert_awaited_once()
  
+-    def test_retries_on_500_then_succeeds(self, _mock_safe):
+-        """5xx on first attempt is retried; 200 on second attempt succeeds."""
+-        adapter = _make_mm_adapter()
+-
 -        resp_500 = _make_aiohttp_resp(500)
 -        resp_200 = _make_aiohttp_resp(200)
 -        adapter._session.get = MagicMock(side_effect=[resp_500, resp_200])
@@ -3479,10 +3573,10 @@ index a5aeb625..c26fdebc 100644
  # _strip_at_mention
  # ---------------------------------------------------------------------------
 diff --git a/tests/gateway/test_slack.py b/tests/gateway/test_slack.py
-index cdd27364..daaae19f 100644
+index ef9897bd..7f3e7ba5 100644
 --- a/tests/gateway/test_slack.py
 +++ b/tests/gateway/test_slack.py
-@@ -62,6 +62,20 @@ _slack_mod.SLACK_AVAILABLE = True
+@@ -63,6 +63,20 @@ _slack_mod.SLACK_AVAILABLE = True
  from gateway.platforms.slack import SlackAdapter  # noqa: E402
  
  
@@ -3503,7 +3597,7 @@ index cdd27364..daaae19f 100644
  # ---------------------------------------------------------------------------
  # Fixtures
  # ---------------------------------------------------------------------------
-@@ -175,6 +189,82 @@ class TestSlackConnectCleanup:
+@@ -189,6 +203,82 @@ class TestSlackConnectCleanup:
          assert adapter._platform_lock_identity is None
  
  
@@ -3584,7 +3678,7 @@ index cdd27364..daaae19f 100644
 +
 +
  # ---------------------------------------------------------------------------
- # TestSendDocument
+ # TestSlackProxyBehavior
  # ---------------------------------------------------------------------------
 diff --git a/tests/gateway/test_telegram_safe_image_download.py b/tests/gateway/test_telegram_safe_image_download.py
 new file mode 100644

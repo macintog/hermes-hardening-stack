@@ -27,6 +27,9 @@ required_phases:
   - name: gm_authority_target_and_content_sniffing
     patch: 0006-gm-authority-target-and-content-sniffing.patch
     mandatory: true
+  - name: gm_active_intent_and_media_sniffing_closure
+    patch: 0007-gm-active-intent-and-media-sniffing-closure.patch
+    mandatory: true
 
 patches:
   - file: 0001-context-safety-core.patch
@@ -186,6 +189,35 @@ patches:
     required_tests:
       - tests/security/test_action_authority.py
       - tests/agent/test_context_safety.py
+      - tests/tools/test_safe_http.py
+
+
+  - file: 0007-gm-active-intent-and-media-sniffing-closure.patch
+    owns:
+      - agent/action_authority.py
+      - agent/context_safety.py
+      - gateway/run.py
+      - run_agent.py
+      - tools/safe_http.py
+      - tests/agent/test_context_safety.py
+      - tests/gateway/test_base_media_cache_safe_http.py
+      - tests/gateway/test_reply_to_injection.py
+      - tests/gateway/test_stt_config.py
+      - tests/security/test_action_authority.py
+      - tests/tools/test_safe_http.py
+    surfaces:
+      - active_user_intent_segmentation
+      - gateway_evidence_fencing
+      - gateway_native_stt_ocr_document_evidence
+      - browser_action_authority_targets
+      - encoded_derived_target_detection
+      - audio_container_magic_sniffing
+    required_tests:
+      - tests/security/test_action_authority.py
+      - tests/agent/test_context_safety.py
+      - tests/gateway/test_reply_to_injection.py
+      - tests/gateway/test_stt_config.py
+      - tests/gateway/test_base_media_cache_safe_http.py
       - tests/tools/test_safe_http.py
 required_smoke_checks:
   py_compile:

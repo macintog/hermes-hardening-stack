@@ -4,3 +4,4 @@
 0004-provenance-action-authority-hardening.patch
 0005-tool-result-promotion-action-registry.patch
 0006-gm-authority-target-and-content-sniffing.patch
+0007-gm-active-intent-and-media-sniffing-closure.patch

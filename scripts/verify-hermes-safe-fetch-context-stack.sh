@@ -238,6 +238,8 @@ echo "Running targeted tests"
   tests/gateway/test_feishu.py \
   tests/gateway/test_mattermost.py \
   tests/gateway/test_media_download_retry.py \
+  tests/gateway/test_reply_to_injection.py \
+  tests/gateway/test_stt_config.py \
   tests/gateway/test_qqbot.py \
   tests/gateway/test_slack.py \
   tests/gateway/test_telegram_safe_image_download.py \
