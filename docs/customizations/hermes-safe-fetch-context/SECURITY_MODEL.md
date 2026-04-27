@@ -160,6 +160,10 @@ Authority for side effects must come from the active user turn or an explicit pe
 
 Tool/terminal/gateway outputs may be accurate observations, but if their text is placed into later model context it is `evidence_only` unless a trusted component generated it as policy. Tool output cannot bootstrap authority for the next tool call.
 
+### Plugin/MCP provenance contract
+
+Plugin and MCP supplied context, tool descriptions, server metadata, hook output, and transformed tool results are `evidence_only` by default. Transformations must preserve the original provenance or downgrade it; they must not convert downloaded, tool-result, plugin, MCP, memory, gateway, skill, cron, or @-reference text into trusted user intent. Plugin pre-tool hooks may block or annotate a call, but they cannot authorize side effects or widen a user request. Any plugin/MCP-provided recipients, paths, selectors, commands, package names, schedules, URLs, memory content, or outbound message content must be treated as untrusted parameters unless a tested trusted-local policy names the exact action, target, and scope.
+
 ## Risk classification and enforcement layers
 
 ### 1. Network ingress risk

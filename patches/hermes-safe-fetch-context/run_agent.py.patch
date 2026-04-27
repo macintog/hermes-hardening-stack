@@ -253,7 +253,7 @@ index e5f070f9..19ae9722 100644
          messages.append(user_msg)
          current_turn_user_idx = len(messages) - 1
          self._persist_user_message_idx = current_turn_user_idx
-@@ -9515,7 +9661,24 @@ class AIAgent:
+@@ -9515,7 +9661,28 @@ class AIAgent:
                  elif isinstance(r, str) and r.strip():
                      _ctx_parts.append(r)
              if _ctx_parts:
@@ -270,10 +270,14 @@ index e5f070f9..19ae9722 100644
 +                    ).rendered_text or ""
 +                except Exception:
 +                    # Fail closed on provenance: keep plugin context visibly fenced
-+                    # even if the scanner/fencer import path is unavailable.
++                    # even if the scanner/fencer import path is unavailable. Fully
++                    # HTML-escape raw plugin text so spoofed role/fence tags remain
++                    # data instead of prompt-like controls.
++                    import html as _html
++
 +                    _plugin_user_context = (
 +                        '<untrusted-context source="plugin_pre_llm_call">\n'
-+                        + _raw_plugin_context.replace("</untrusted-context>", "&lt;/untrusted-context&gt;")
++                        + _html.escape(_raw_plugin_context, quote=False)
 +                        + "\n</untrusted-context>"
 +                    )
          except Exception as exc:

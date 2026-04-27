@@ -322,7 +322,8 @@ Current files:
 
 Current intent:
 - fence model-visible string tool results by default unless an explicit trusted-internal control-tool exemption applies
-- preserve specific provenance labels for browser/web extraction, PDF/OCR/document/YouTube/STT/transcript-like outputs, skill content, session-search/recalled content, and gateway attachment-like text
+- apply model-visible fencing at the tool-message append boundary in `run_agent.py`, using idempotent helpers in `agent/context_safety.py` so an already complete `<untrusted-context>` block is not recursively double-fenced
+- preserve specific provenance labels for browser/web extraction, PDF/OCR/document/YouTube/STT/transcript-like outputs, skill content, session-search/recalled content, plugin/MCP transformed results, and gateway attachment-like text
 - propagate prior model-visible tool/evidence text into the action-authority gate before later side-effecting tools run, so clean-looking args derived from hostile evidence are still gated
 - block concrete side-effect targets/args that appear only in evidence-only content, even when trusted user text contains a broad action verb
 - keep `tests/security/test_tool_result_promotion.py` and taint-loss dispatch tests mandatory

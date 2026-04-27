@@ -3,7 +3,7 @@ new file mode 100644
 index 00000000..16521269
 --- /dev/null
 +++ b/tools/safe_http.py
-@@ -0,0 +1,281 @@
+@@ -0,0 +1,309 @@
 +"""Safe HTTP download helpers for untrusted remote URLs."""
 +
 +from __future__ import annotations
@@ -13,7 +13,8 @@ index 00000000..16521269
 +from dataclasses import dataclass
 +from pathlib import Path
 +from typing import Mapping, Sequence
-+from urllib.parse import urlsplit, urlunsplit
++from urllib.parse import quote, urlsplit, urlunsplit
++import re
 +
 +import httpx
 +
@@ -62,13 +63,40 @@ index 00000000..16521269
 +        )
 +
 +
++_SENSITIVE_HEADER_NAMES = {
++    "authorization", "proxy-authorization", "cookie", "set-cookie", "x-api-key",
++    "x-auth-token", "x-amz-security-token", "www-authenticate", "authentication-info",
++}
++_TOKEN_PATH_KEYWORDS = re.compile(r"(?i)(token|secret|signature|credential|api[_-]?key|session|password)")
++_LONG_TOKEN_SEGMENT = re.compile(r"(?i)^[a-z0-9._~-]{24,}$")
++
++
++def redact_response_headers(headers: Mapping[str, str]) -> dict[str, str]:
++    redacted: dict[str, str] = {}
++    for key, value in headers.items():
++        low = key.lower()
++        redacted[low] = "<redacted>" if low in _SENSITIVE_HEADER_NAMES else value
++    return redacted
++
++
++def _redact_path(path: str) -> str:
++    safe_segments: list[str] = []
++    for segment in (path or "").split("/"):
++        decoded = segment.lower()
++        if _TOKEN_PATH_KEYWORDS.search(decoded) or _LONG_TOKEN_SEGMENT.fullmatch(decoded):
++            safe_segments.append("<redacted>")
++        else:
++            safe_segments.append(quote(segment, safe=":@!$&'()*+,;="))
++    return "/".join(safe_segments)
++
++
 +def redact_url(url: str) -> str:
 +    try:
 +        parts = urlsplit(url)
 +        netloc = parts.hostname or ""
 +        if parts.port:
 +            netloc = f"{netloc}:{parts.port}"
-+        return urlunsplit((parts.scheme, netloc, parts.path or "", "", ""))
++        return urlunsplit((parts.scheme, netloc, _redact_path(parts.path or ""), "", ""))
 +    except Exception:
 +        return "<redacted-url>"
 +
@@ -269,7 +297,7 @@ index 00000000..16521269
 +                    sha256=digest,
 +                    source_type=source_type,
 +                    policy=dict(policy or {}),
-+                    headers={k.lower(): v for k, v in response.headers.items()},
++                    headers=redact_response_headers(response.headers),
 +                )
 +            finally:
 +                await stream_context.__aexit__(None, None, None)

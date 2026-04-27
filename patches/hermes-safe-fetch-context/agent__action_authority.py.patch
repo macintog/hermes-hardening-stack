@@ -3,7 +3,7 @@ new file mode 100644
 index 00000000..52fb0e3c
 --- /dev/null
 +++ b/agent/action_authority.py
-@@ -0,0 +1,581 @@
+@@ -0,0 +1,703 @@
 +"""Deterministic authority gate for model-proposed actions.
 +
 +This module is intentionally local and dependency-light.  It does not try to
@@ -21,7 +21,7 @@ index 00000000..52fb0e3c
 +from dataclasses import dataclass
 +from enum import StrEnum
 +from typing import Any, Mapping
-+from urllib.parse import unquote
++from urllib.parse import parse_qsl, unquote, urlsplit
 +
 +
 +class AuthorityDecision(StrEnum):
@@ -257,25 +257,25 @@ index 00000000..52fb0e3c
 +    ActionClass.OUTBOUND_MESSAGE: (
 +        "to", "cc", "bcc", "recipient", "recipients", "destination",
 +        "channel", "channel_id", "chat_id", "thread_id", "room", "conversation",
-+        "webhook", "url", "endpoint",
++        "webhook", "url", "endpoint", "body", "text", "message", "content",
 +    ),
-+    ActionClass.FILE_WRITE: ("path", "file", "filename", "filepath", "target", "target_path", "dest", "destination", "directory", "repo_path"),
++    ActionClass.FILE_WRITE: ("path", "file", "filename", "filepath", "target", "target_path", "dest", "destination", "directory", "repo_path", "content", "text", "body"),
 +    ActionClass.FILE_DELETE: ("path", "file", "filename", "filepath", "target", "target_path", "dest", "destination", "directory", "repo_path"),
 +    ActionClass.TERMINAL_EXECUTION: ("command", "cmd", "args", "argv", "script", "code", "program"),
 +    ActionClass.SECRET_READ: ("path", "file", "filename", "filepath", "target", "target_path", "command", "cmd", "args", "argv"),
 +    ActionClass.SECRET_TRANSMISSION: ("url", "endpoint", "webhook", "host", "headers", "command", "cmd", "args", "argv", "body", "payload", "content"),
 +    ActionClass.CREDENTIALED_NETWORK_CALL: (
-+        "url", "endpoint", "uri", "selector", "css", "css_selector", "xpath",
++        "url", "endpoint", "uri", "origin", "host", "domain", "selector", "css", "css_selector", "xpath",
 +        "query", "query_selector", "ref", "target_ref", "target_id", "frame_id",
 +        "href", "target", "testid", "data-testid", "aria-label", "text", "value",
 +        "button", "label", "name", "expression", "action", "service",
 +        "entity_id", "device", "path", "route", "method",
 +    ),
 +    ActionClass.MEMORY_WRITE: ("key", "name", "content", "value", "note", "memory", "profile_field"),
-+    ActionClass.CRON_CREATE_UPDATE_DELETE: ("name", "job_id", "schedule", "prompt", "command", "script", "action"),
-+    ActionClass.SKILL_PLUGIN_INSTALL_UPDATE: ("skill", "plugin", "name", "identifier", "url", "source", "action"),
-+    ActionClass.SKILL_PLUGIN_EXECUTE: ("skill", "plugin", "name", "identifier", "command", "action", "args"),
-+    ActionClass.CONFIGURATION_CHANGE: ("key", "name", "value", "config", "setting", "service", "entity_id", "environment", "run_id", "action"),
++    ActionClass.CRON_CREATE_UPDATE_DELETE: ("name", "job_id", "schedule", "prompt", "command", "script"),
++    ActionClass.SKILL_PLUGIN_INSTALL_UPDATE: ("skill", "plugin", "name", "identifier", "url", "source"),
++    ActionClass.SKILL_PLUGIN_EXECUTE: ("skill", "plugin", "name", "identifier", "command", "args"),
++    ActionClass.CONFIGURATION_CHANGE: ("key", "name", "value", "config", "setting", "service", "entity_id", "environment", "run_id"),
 +    ActionClass.UNKNOWN_SIDE_EFFECT: ("target", "path", "url", "command", "recipient", "action"),
 +}
 +
@@ -355,6 +355,65 @@ index 00000000..52fb0e3c
 +_BASE64_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9+/=_-])([A-Za-z0-9+/_-]{8,}={0,2})(?![A-Za-z0-9+/=_-])")
 +_PERCENT_ENCODED_TOKEN_RE = re.compile(r"(?:[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=-]*%[0-9A-Fa-f]{2}[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]*)")
 +_BROWSER_REF_RE = re.compile(r"@?e\d+", re.IGNORECASE)
++_SECRET_LIKE_RE = re.compile(
++    r"(?i)(api[_-]?key|authorization|bearer\s+[a-z0-9._~+/=-]{12,}|"
++    r"x-amz-signature|token|secret|password|passwd|private[_-]?key|sessionid|cookie)"
++)
++_NETWORK_TARGET_FIELDS = (
++    "url", "endpoint", "uri", "href", "target", "query", "q", "search",
++    "headers", "header", "body", "payload", "data", "referrer", "referer",
++)
++
++
++def _network_arg_strings(args: Mapping[str, Any] | None) -> list[str]:
++    if not args:
++        return []
++    values = _authority_arg_strings_for_fields(args, _NETWORK_TARGET_FIELDS)
++    return values or _flatten_arg_strings(args)
++
++
++def _url_components_for_egress(value: str) -> list[str]:
++    components = [value]
++    try:
++        parsed = urlsplit(value)
++    except Exception:
++        return components
++    if parsed.path:
++        components.append(unquote(parsed.path))
++    if parsed.query:
++        components.append(unquote(parsed.query))
++        components.extend(unquote(k) for k, _ in parse_qsl(parsed.query, keep_blank_values=True))
++        components.extend(unquote(v) for _, v in parse_qsl(parsed.query, keep_blank_values=True))
++    if parsed.fragment:
++        components.append(unquote(parsed.fragment))
++    if parsed.username:
++        components.append(unquote(parsed.username))
++    if parsed.password:
++        components.append(unquote(parsed.password))
++    return components
++
++
++def _network_egress_risk(
++    args: Mapping[str, Any] | None,
++    trusted_text: str,
++    combined_untrusted: list[tuple[str | None, str]],
++) -> tuple[AuthorityDecision, str, str | None] | None:
++    values = _network_arg_strings(args)
++    if not values:
++        return None
++    untrusted_text = "\n".join(body for _, body in combined_untrusted)
++    private_haystacks = [trusted_text or "", untrusted_text]
++    for value in values:
++        candidates = _url_components_for_egress(value)
++        if any(_SECRET_LIKE_RE.search(candidate or "") for candidate in candidates):
++            if not _value_in_text(value, trusted_text or ""):
++                return (AuthorityDecision.BLOCK, "read-only network egress carries secret-like material", "secret_transmission")
++        if combined_untrusted and _value_in_text(value, untrusted_text) and not _value_in_text(value, trusted_text or ""):
++            return (AuthorityDecision.BLOCK, "read-only network target or transmitted data came from evidence-only untrusted context", next((src for src, _ in combined_untrusted if src), "untrusted_context"))
++        for candidate in candidates:
++            if len(candidate) >= 8 and any(candidate in haystack for haystack in private_haystacks if haystack) and not _value_in_text(candidate, trusted_text or ""):
++                return (AuthorityDecision.BLOCK, "read-only network egress carries private context without trusted scope", "private_context")
++    return None
 +
 +
 +def _decoded_text_fragments(text: str) -> list[str]:
@@ -437,6 +496,9 @@ index 00000000..52fb0e3c
 +    if not _BROWSER_REF_RE.fullmatch(raw.lstrip("@")):
 +        return False
 +    ref = raw.lower().lstrip("@")
++    trusted_low = (trusted_text or "").lower()
++    if re.search(rf"(?<![a-z0-9])@?{re.escape(ref)}(?![a-z0-9])", trusted_low):
++        return True
 +    if _value_in_text(ref, trusted_text) or _value_in_text(f"@{ref}", trusted_text):
 +        return True
 +    trusted_norm = _normalize_authority_text(trusted_text or "")
@@ -495,6 +557,60 @@ index 00000000..52fb0e3c
 +    return False
 +
 +
++def _trusted_scopes_action_targets(tool_name: str, action_class: ActionClass, args: Mapping[str, Any] | None, trusted_text: str, combined_untrusted: list[tuple[str | None, str]] | None = None) -> bool:
++    """Return True only when trusted text names the action and its concrete scope.
++
++    Generic trusted requests such as "What time is it?", "What is 1+1?", or
++    "Fix the tests" are not enough to authorize terminal/code execution or other
++    side effects.  The trusted text must contain an action-class signal and each
++    authority-bearing target/scope argument (command, path, recipient, selector,
++    schedule, package, memory content, etc.).
++    """
++    if not _contains_action_signal(trusted_text, action_class):
++        return False
++    targets = _authority_target_strings(tool_name, action_class, args)
++    if not targets:
++        return False
++    untrusted_text = "\n".join(body for _, body in (combined_untrusted or []))
++    for value in targets:
++        if not _value_in_text(value, trusted_text or ""):
++            if tool_name.lower().startswith("browser_") and _trusted_authorizes_browser_ref(value, trusted_text or "", untrusted_text):
++                continue
++            return False
++    return True
++
++
++_HIGH_RISK_BROWSER_ACTIONS = {"browser_click", "browser_type", "browser_press", "browser_dialog", "browser_cdp", "browser_console"}
++
++
++def _browser_action_requires_explicit_scope(tool_name: str, args: Mapping[str, Any] | None, trusted_text: str) -> bool:
++    name = (tool_name or "").lower()
++    if not name.startswith("browser_"):
++        return False
++    if name in {"browser_snapshot", "browser_get_images", "browser_vision", "browser_back", "browser_scroll"}:
++        return False
++    args = args or {}
++    if name == "browser_console" and not str(args.get("expression") or "").strip():
++        return False
++    trusted = trusted_text or ""
++    targets = _authority_target_strings(name, ActionClass.CREDENTIALED_NETWORK_CALL, args)
++    meaningful = [t for t in targets if t and _normalize_authority_text(t) not in _GENERIC_AUTHORITY_VALUES]
++    if not meaningful:
++        return name in _HIGH_RISK_BROWSER_ACTIONS and not _value_in_text(name.replace("browser_", ""), trusted)
++    # Browser refs/selectors/labels/origins are attacker-controlled unless the
++    # exact scope is trusted. Page-derived label-to-ref mapping is not enough:
++    # two controls can share the same visible label, refs can mutate, and hidden
++    # accessible names can deceive the model. Exact trusted scope can be a ref,
++    # URL/origin, selector, or explicit local policy text supplied outside the page.
++    for value in meaningful:
++        if _value_in_text(value, trusted):
++            continue
++        if _trusted_authorizes_browser_ref(value, trusted, ""):
++            continue
++        return True
++    return False
++
++
 +def classify_action(tool_name: str, args: Mapping[str, Any] | None = None) -> ActionClass:
 +    """Classify a tool call by side-effect class using deterministic metadata.
 +
@@ -539,7 +655,14 @@ index 00000000..52fb0e3c
 +        combined_untrusted.append(("prior_untrusted_tool_result", prior_text))
 +    trusted_text = _trusted_text_without_untrusted(user_text)
 +
-+    if action_class in READ_ONLY_CLASSES:
++    if action_class == ActionClass.READ_ONLY_NETWORK_FETCH:
++        risk = _network_egress_risk(args, trusted_text, combined_untrusted)
++        if risk:
++            decision, reason, source = risk
++            return ActionAuthorityResult(decision, action_class, reason=reason, source=source)
++        return ActionAuthorityResult(AuthorityDecision.ALLOW, action_class)
++
++    if action_class == ActionClass.READ_ONLY_LOCAL_INSPECTION:
 +        return ActionAuthorityResult(AuthorityDecision.ALLOW, action_class)
 +
 +    if action_class == ActionClass.AGENT_LOOP_INTERNAL:
@@ -567,21 +690,20 @@ index 00000000..52fb0e3c
 +                source=source,
 +            )
 +
-+    if policy_allows_without_user_intent:
-+        return ActionAuthorityResult(AuthorityDecision.ALLOW, action_class)
++    if name.startswith("browser_") and _browser_action_requires_explicit_scope(name, args, trusted_text):
++        return ActionAuthorityResult(
++            AuthorityDecision.REQUIRE_CONFIRMATION,
++            action_class,
++            reason="high-risk browser action requires exact trusted origin/action/target scope; page labels, refs, selectors, accessible names, and DOM text are evidence-only",
++            source="trusted_confirmation_required",
++        )
 +
-+    if _contains_action_signal(trusted_text, action_class):
-+        return ActionAuthorityResult(AuthorityDecision.ALLOW, action_class)
-+
-+    if trusted_text.strip() and not combined_untrusted:
-+        # Trusted user/system/developer tasks often imply required classified tools
-+        # without spelling out implementation verbs. Unknown tools are handled
-+        # above and require confirmation by default.
-+        return ActionAuthorityResult(AuthorityDecision.ALLOW, action_class)
++    if _trusted_scopes_action_targets(name, action_class, args, trusted_text, combined_untrusted):
++        return ActionAuthorityResult(AuthorityDecision.ALLOW, action_class, source="trusted_scoped_intent")
 +
 +    return ActionAuthorityResult(
 +        AuthorityDecision.REQUIRE_CONFIRMATION,
 +        action_class,
-+        reason="side-effecting action lacks explicit trusted user/system/developer authority",
++        reason="side-effecting action lacks explicit trusted scoped authority for action class and target/scope",
 +        source="trusted_confirmation_required",
 +    )

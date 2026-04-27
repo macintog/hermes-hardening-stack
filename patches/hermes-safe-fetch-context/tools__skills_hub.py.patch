@@ -10,8 +10,33 @@ index 2b521640..83722f9c 100644
  import hashlib
  import json
  import logging
-@@ -918,13 +919,32 @@ class WellKnownSkillSource(SkillSource):
+@@ -918,13 +919,57 @@ class WellKnownSkillSource(SkillSource):
  
++    @staticmethod
++    def _run_safe_fetch(coro):
++        """Run safe-fetch coroutine from sync hub code, including inside active loops."""
++        try:
++            asyncio.get_running_loop()
++        except RuntimeError:
++            return asyncio.run(coro)
++
++        import threading
++
++        holder = {"result": None, "error": None}
++
++        def runner():
++            try:
++                holder["result"] = asyncio.run(coro)
++            except BaseException as exc:  # pragma: no cover - re-raised in caller thread
++                holder["error"] = exc
++
++        thread = threading.Thread(target=runner, name="skills-hub-safe-fetch", daemon=True)
++        thread.start()
++        thread.join()
++        if holder["error"] is not None:
++            raise holder["error"]
++        return holder["result"]
++
      @staticmethod
      def _fetch_text(url: str) -> Optional[str]:
 +        """Fetch text through the safe-fetch policy used for hub/community bytes."""
@@ -22,7 +47,7 @@ index 2b521640..83722f9c 100644
 -        except httpx.HTTPError:
 +            from tools.safe_http import SafeHTTPError, safe_download_bytes
 +
-+            result = asyncio.run(
++            result = WellKnownSkillSource._run_safe_fetch(
 +                safe_download_bytes(
 +                    url,
 +                    max_bytes=2_000_000,

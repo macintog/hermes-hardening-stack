@@ -3,7 +3,7 @@ new file mode 100644
 index 00000000..6944933e
 --- /dev/null
 +++ b/agent/context_safety.py
-@@ -0,0 +1,718 @@
+@@ -0,0 +1,737 @@
 +"""Provenance-aware context promotion safety helpers.
 +
 +This module provides a small, dependency-free policy boundary for text that may
@@ -648,12 +648,31 @@ index 00000000..6944933e
 +    return f"{base_label}.{key_text}" if base_label else key_text
 +
 +
++_COMPLETE_UNTRUSTED_CONTEXT_RE = re.compile(
++    r"^\s*<untrusted-context\b[^>]*>[\s\S]*?</untrusted-context>\s*$",
++    re.IGNORECASE,
++)
++
++
++def is_rendered_untrusted_context(text: str) -> bool:
++    """Return True when text is already exactly one model-visible fence.
++
++    Tool results can pass through compatibility/plugin layers that already call
++    render_untrusted_context(). Re-wrapping those complete fences makes evidence
++    unreadable and can obscure provenance. Partial/spoofed markers are not
++    accepted here; they remain escaped by render_untrusted_context().
++    """
++    return bool(_COMPLETE_UNTRUSTED_CONTEXT_RE.match(text or ""))
++
++
 +def _render_model_visible_tool_string(
 +    tool_name: str,
 +    result: str,
 +    *,
 +    source_label: str | None = None,
 +) -> str:
++    if is_rendered_untrusted_context(result):
++        return result
 +    surface = classify_tool_result_surface(tool_name)
 +    safety = scan_and_render_untrusted_context(
 +        result,

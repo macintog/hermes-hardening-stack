@@ -113,6 +113,7 @@ echo "Checking hardening payload inputs"
 python - "$payload_dir" "$series_file" <<'PY'
 from pathlib import Path
 import sys
+import re
 
 payload_dir = Path(sys.argv[1])
 series_file = Path(sys.argv[2])
@@ -142,7 +143,38 @@ for name in series:
     unique_targets = sorted(set(targets))
     if len(unique_targets) != 1:
         raise SystemExit(f"ERROR: payload fragment must touch exactly one target file: {name} -> {unique_targets}")
-print("hardening payload inputs ok")
+manifest_text = manifest_file.read_text(errors="replace")
+owns = []
+required_tests = []
+section = None
+for raw in manifest_text.splitlines():
+    if re.match(r"^  owns:\s*$", raw):
+        section = "owns"
+        continue
+    if re.match(r"^  required_tests:\s*$", raw):
+        section = "required_tests"
+        continue
+    if re.match(r"^  [A-Za-z_]+:\s*$", raw) or re.match(r"^[A-Za-z_]+:\s*$", raw):
+        section = None
+        continue
+    match = re.match(r"^  - (.+?)\s*$", raw)
+    if match and section == "owns":
+        owns.append(match.group(1))
+    elif match and section == "required_tests":
+        required_tests.append(match.group(1))
+
+expected_series = [path.replace("/", "__") + ".patch" for path in owns]
+missing_from_series = sorted(set(expected_series) - set(series))
+extra_in_series = sorted(set(series) - set(expected_series))
+if missing_from_series or extra_in_series:
+    raise SystemExit(
+        "ERROR: manifest owns/series drift: "
+        f"missing_from_series={missing_from_series} extra_in_series={extra_in_series}"
+    )
+missing_required_tests = sorted(set(required_tests) - set(owns))
+if missing_required_tests:
+    raise SystemExit(f"ERROR: manifest required_tests not listed in owns: {missing_required_tests}")
+print("hardening payload inputs ok; manifest/series consistency ok")
 PY
 
 cd "$worktree"
@@ -232,6 +264,53 @@ for module in (
 ):
     importlib.import_module(module)
 print("imports ok")
+PY
+
+echo "Running static security drift guards"
+"$python_bin" - <<'PY'
+from pathlib import Path
+import ast
+import re
+
+
+def fail(message: str) -> None:
+    raise SystemExit(f"ERROR: {message}")
+
+
+aa = Path("agent/action_authority.py").read_text(errors="replace")
+if re.search(r"if\s+trusted_text\s*:\s*\n\s*return\s+ActionAuthorityResult\(AuthorityDecision\.ALLOW", aa):
+    fail("broad trusted-text allow path reintroduced in agent/action_authority.py")
+if "read-only network target or transmitted data came from evidence-only untrusted context" not in aa:
+    fail("read-only network fetch provenance/egress guard text missing")
+
+tree = ast.parse(aa, filename="agent/action_authority.py")
+classified = set()
+exemptions = set()
+for node in tree.body:
+    names = set()
+    value = None
+    if isinstance(node, ast.Assign):
+        names = {target.id for target in node.targets if isinstance(target, ast.Name)}
+        value = node.value
+    elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+        names = {node.target.id}
+        value = node.value
+    if "_TOOL_ACTION_CLASSES" in names and isinstance(value, ast.Dict):
+        classified = {key.value for key in value.keys if isinstance(key, ast.Constant) and isinstance(key.value, str)}
+    if "EXPLICIT_TOOL_EXEMPTIONS" in names and isinstance(value, ast.Dict):
+        exemptions = {key.value for key in value.keys if isinstance(key, ast.Constant) and isinstance(key.value, str)}
+if not classified:
+    fail("could not statically read _TOOL_ACTION_CLASSES")
+if "unclassified_dynamic_tool" in classified | exemptions:
+    fail("dummy unclassified tool fixture was accidentally classified/exempted")
+
+cs = Path("agent/context_safety.py").read_text(errors="replace")
+if "render_model_visible_tool_result" not in cs or "EXPLICIT_TOOL_EXEMPTIONS" not in cs:
+    fail("tool-result fencing/exemption alignment helper missing")
+mt = Path("model_tools.py").read_text(errors="replace")
+if "render_model_visible_tool_result" not in mt or "evaluate_action_authority" not in mt:
+    fail("model tool dispatch no longer invokes action gate and tool-result fencing")
+print("static security drift guards ok")
 PY
 
 echo "Running targeted tests"

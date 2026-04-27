@@ -3,7 +3,7 @@ new file mode 100644
 index 00000000..143b1e49
 --- /dev/null
 +++ b/tests/tools/test_safe_http.py
-@@ -0,0 +1,334 @@
+@@ -0,0 +1,360 @@
 +import pytest
 +import httpx
 +
@@ -338,3 +338,29 @@ index 00000000..143b1e49
 +            allowed_content_types=("audio/webm", "audio/mp4", "audio/aac", "audio/ogg"),
 +            transport=httpx.MockTransport(handler),
 +        )
++
++
++def test_redact_url_removes_signed_path_segments_and_sensitive_headers():
++    redacted = redact_url("https://files.example/download/secret-token-abc12345678901234567890/report.pdf?X-Amz-Signature=abc#frag")
++    assert redacted == "https://files.example/download/<redacted>/report.pdf"
++
++
++@pytest.mark.asyncio
++async def test_result_response_headers_are_redacted(monkeypatch):
++    monkeypatch.setattr("tools.safe_http.is_safe_url", lambda _url: True)
++
++    async def handler(request):
++        return httpx.Response(
++            200,
++            headers={"Set-Cookie": "session=secret", "X-Trace-Id": "trace-1"},
++            content=b"ok",
++        )
++
++    result = await safe_download_bytes(
++        "https://files.example/public.txt",
++        max_bytes=10,
++        source_type="test",
++        transport=httpx.MockTransport(handler),
++    )
++    assert result.headers["set-cookie"] == "<redacted>"
++    assert result.headers["x-trace-id"] == "trace-1"
