@@ -10,8 +10,6 @@ The payload hardens three connected boundaries:
 
 It is a patch payload for a clean Hermes Agent checkout. It does not vendor, mirror, or fork Hermes Agent source.
 
-Main is the sole source of truth. The repository does not preserve iteration history, compatibility shims, or prior patch shapes. Git history is the only place to inspect older states.
-
 Executable sources:
 
 - `patches/hermes-safe-fetch-context/series` — apply order for final-state payload fragments
@@ -31,6 +29,8 @@ Human docs:
 Basic apply flow from a clean Hermes checkout:
 
 ```bash
+cd "$HOME/.hermes/hermes-agent"
+
 while read -r fragment; do
   [ -z "$fragment" ] && continue
   git apply --3way $HOME/.config/hermes-agent-patches/patches/hermes-safe-fetch-context/$fragment
