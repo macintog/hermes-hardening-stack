@@ -15,7 +15,7 @@ index 25a4daf5..430481b0 100644
  from hermes_constants import get_hermes_home, get_skills_dir, is_wsl
  from typing import Optional
  
-@@ -33,44 +33,27 @@ logger = logging.getLogger(__name__)
+@@ -33,44 +33,30 @@ logger = logging.getLogger(__name__)
  # SOUL.md before they get injected into the system prompt.
  # ---------------------------------------------------------------------------
  
@@ -53,6 +53,9 @@ index 25a4daf5..430481b0 100644
 -            findings.append(pid)
 -
 -    if findings:
++    # The legacy local context-file threat patterns are intentionally handled by
++    # the shared scanner now. Keep tests/agent/test_prompt_builder.py coverage
++    # for those legacy patterns so centralization cannot silently reduce scope.
 +    result = scan_context_text(
 +        content,
 +        surface=ContextSurface.CONTEXT_FILE,
@@ -75,7 +78,7 @@ index 25a4daf5..430481b0 100644
  
  
  def _find_git_root(start: Path) -> Optional[Path]:
-@@ -1115,4 +1098,4 @@ def build_context_files_prompt(cwd: Optional[str] = None, skip_soul: bool = Fals
+@@ -1115,4 +1101,4 @@ def build_context_files_prompt(cwd: Optional[str] = None, skip_soul: bool = Fals
  
      if not sections:
          return ""
