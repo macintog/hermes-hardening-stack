@@ -1,0 +1,70 @@
+diff --git a/tests/security/test_prompt_injection_public_corpus.py b/tests/security/test_prompt_injection_public_corpus.py
+new file mode 100644
+index 00000000..e7c3f983
+--- /dev/null
++++ b/tests/security/test_prompt_injection_public_corpus.py
+@@ -0,0 +1,64 @@
++"""Manifest-driven benign public prompt-injection regression corpus."""
++
++from __future__ import annotations
++
++import json
++from pathlib import Path
++
++from agent.context_safety import (
++    ContextSurface,
++    ContextVerdict,
++    FindingSeverity,
++    scan_context_text,
++)
++
++
++FIXTURE = (
++    Path(__file__).resolve().parents[1]
++    / "fixtures"
++    / "security"
++    / "benign_prompt_injection_public_corpus.jsonl"
++)
++
++_SEVERITY_ORDER = {
++    FindingSeverity.INFO: 0,
++    FindingSeverity.LOW: 1,
++    FindingSeverity.MEDIUM: 2,
++    FindingSeverity.HIGH: 3,
++    FindingSeverity.CRITICAL: 4,
++}
++
++
++def _load_cases() -> list[dict[str, object]]:
++    return [
++        json.loads(line)
++        for line in FIXTURE.read_text(encoding="utf-8").splitlines()
++        if line.strip() and not line.lstrip().startswith("#")
++    ]
++
++
++def _max_severity(result) -> FindingSeverity:
++    return max((finding.severity for finding in result.findings), key=_SEVERITY_ORDER.get)
++
++
++def test_benign_public_prompt_injection_corpus_is_classified_and_contained():
++    cases = _load_cases()
++    assert cases
++
++    for case in cases:
++        result = scan_context_text(
++            str(case["sample_text"]),
++            surface=ContextSurface(str(case["surface"])),
++            source_label=str(case["id"]),
++        )
++
++        categories = {finding.category for finding in result.findings}
++        rule_ids = {finding.rule_id for finding in result.findings}
++
++        assert set(case["expected_categories"]) <= categories, case["id"]
++        assert set(case.get("expected_rule_ids", ())) <= rule_ids, case["id"]
++        assert result.verdict != ContextVerdict.ALLOW, case["id"]
++        assert result.flags["external_surface"] is True, case["id"]
++
++        expected_min = FindingSeverity(str(case["expected_min_severity"]))
++        assert _SEVERITY_ORDER[_max_severity(result)] >= _SEVERITY_ORDER[expected_min], case["id"]

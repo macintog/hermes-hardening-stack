@@ -46,10 +46,12 @@ payload:
   - tests/gateway/test_stt_config.py
   - tests/gateway/test_telegram_safe_image_download.py
   - tests/gateway/test_wecom.py
+  - tests/fixtures/security/benign_prompt_injection_public_corpus.jsonl
   - tests/security/test_action_authority.py
   - tests/security/test_artifact_provenance.py
   - tests/security/test_context_promotion_boundaries.py
   - tests/security/test_prompt_injection_containment.py
+  - tests/security/test_prompt_injection_public_corpus.py
   - tests/security/test_safe_fetch_surfaces.py
   - tests/security/test_skill_plugin_boundaries.py
   - tests/security/test_tool_result_promotion.py
@@ -84,6 +86,7 @@ payload:
   - tests/security/test_artifact_provenance.py
   - tests/security/test_context_promotion_boundaries.py
   - tests/security/test_prompt_injection_containment.py
+  - tests/security/test_prompt_injection_public_corpus.py
   - tests/security/test_safe_fetch_surfaces.py
   - tests/security/test_skill_plugin_boundaries.py
   - tests/security/test_tool_result_promotion.py

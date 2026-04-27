@@ -310,6 +310,8 @@ if "render_model_visible_tool_result" not in cs or "EXPLICIT_TOOL_EXEMPTIONS" no
 dispatch_text = Path("run_agent.py").read_text(errors="replace")
 if "render_model_visible_tool_result" not in dispatch_text or "evaluate_action_authority" not in dispatch_text:
     fail("agent tool dispatch no longer invokes action gate and tool-result fencing")
+if "instruction_override" not in cs or "prompt_disclosure" not in cs or "encoded_instruction_like_text" not in cs:
+    fail("scanner quality regression coverage for public prompt-injection misses is missing")
 print("static security drift guards ok")
 PY
 
@@ -343,6 +345,7 @@ echo "Running targeted tests"
   tests/security/test_artifact_provenance.py \
   tests/security/test_action_authority.py \
   tests/security/test_prompt_injection_containment.py \
+  tests/security/test_prompt_injection_public_corpus.py \
   tests/security/test_tool_result_promotion.py
 
 echo "Hardening payload verification passed"

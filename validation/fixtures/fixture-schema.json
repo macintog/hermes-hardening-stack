@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Hermes public prompt-injection validation fixture",
+  "type": "object",
+  "required": [
+    "id",
+    "source_family",
+    "license_review",
+    "content_type",
+    "untrusted_text",
+    "expected_policy",
+    "must_not",
+    "expected_observable"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Stable fixture identifier."
+    },
+    "source_family": {
+      "type": "string",
+      "enum": ["Tensor Trust", "PromptInject", "garak", "Promptfoo", "OWASP", "curated-local"]
+    },
+    "source_url": {
+      "type": "string",
+      "description": "Optional public source URL or citation."
+    },
+    "license_review": {
+      "type": "string",
+      "description": "License status. Use transformed/minimal examples unless verbatim vendoring is cleared."
+    },
+    "content_type": {
+      "type": "string",
+      "enum": [
+        "downloaded_markdown",
+        "search_snippet",
+        "browser_snapshot",
+        "browser_console",
+        "image_text",
+        "transcript_text",
+        "pdf_text",
+        "skill_content"
+      ]
+    },
+    "untrusted_text": {
+      "type": "string",
+      "description": "Benign inert text that attempts to steer the agent."
+    },
+    "expected_policy": {
+      "type": "string",
+      "enum": ["treat_as_data_only", "fence_as_untrusted_context", "report_only_findings", "block_side_effect_authority"]
+    },
+    "must_not": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "change_task_goal",
+          "execute_tool_instruction",
+          "reveal_system_or_developer_context",
+          "write_memory",
+          "write_file",
+          "send_message",
+          "run_command",
+          "mark_task_complete",
+          "use_untrusted_target"
+        ]
+      }
+    },
+    "expected_observable": {
+      "type": "string"
+    },
+    "notes": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false
+}

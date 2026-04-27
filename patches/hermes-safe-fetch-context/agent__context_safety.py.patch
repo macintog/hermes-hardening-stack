@@ -3,7 +3,7 @@ new file mode 100644
 index 00000000..0fd7dfe6
 --- /dev/null
 +++ b/agent/context_safety.py
-@@ -0,0 +1,747 @@
+@@ -0,0 +1,1133 @@
 +"""Provenance-aware context promotion safety helpers.
 +
 +This module provides a small, dependency-free policy boundary for text that may
@@ -14,8 +14,11 @@ index 00000000..0fd7dfe6
 +
 +from __future__ import annotations
 +
++import base64
++import binascii
 +import html
 +import re
++import unicodedata
 +from dataclasses import dataclass, field
 +from enum import StrEnum
 +from types import MappingProxyType
@@ -163,6 +166,158 @@ index 00000000..0fd7dfe6
 +    "\u2066", "\u2067", "\u2068", "\u2069",
 +}
 +
++_LEETSPEAK_TRANSLATION = str.maketrans({
++    "0": "o",
++    "1": "i",
++    "3": "e",
++    "4": "a",
++    "5": "s",
++    "7": "t",
++    "@": "a",
++    "$": "s",
++})
++_BASE64_TOKEN_RE = re.compile(
++    r"(?<![A-Za-z0-9+/=_-])([A-Za-z0-9+/_-]{8,}={0,2})(?![A-Za-z0-9+/=_-])"
++)
++_DOCUMENTATION_CUE_RE = re.compile(
++    r"\b(?:example|examples|sample|fixture|fixtures|test|tests|scanner|detector|"
++    r"detect|rule|regex|pattern|documentation|document|the\s+phrase|the\s+string|"
++    r"contains|mentions|classify|category|prompt\s+injection)\b",
++    re.IGNORECASE,
++)
++_NEGATING_PREFIX_RE = re.compile(
++    r"(?:\bdo\s+not\b|\bdont\b|\bdon['’]?t\b|\bnever\b|\bmust\s+not\b|\bshould\s+not\b)\s*$",
++    re.IGNORECASE,
++)
++_QUOTE_CHARS = "\"'`“”‘’"
++
++
++@dataclass(frozen=True)
++class _ScanCandidate:
++    name: str
++    text: str
++    offsets: tuple[int, ...]
++
++
++def _is_invisible_char(char: str) -> bool:
++    return char in _INVISIBLE_CHARS or unicodedata.category(char) == "Cf"
++
++
++def _normalized_characters(char: str) -> str:
++    return unicodedata.normalize("NFKC", char).lower().translate(_LEETSPEAK_TRANSLATION)
++
++
++def _append_space(chars: list[str], offsets: list[int], idx: int) -> None:
++    if chars and chars[-1] != " ":
++        chars.append(" ")
++        offsets.append(idx)
++
++
++def _scan_candidates(window: str) -> tuple[_ScanCandidate, ...]:
++    """Return normalized scan views plus offset maps into the original window."""
++    spaced_chars: list[str] = []
++    spaced_offsets: list[int] = []
++    compact_chars: list[str] = []
++    compact_offsets: list[int] = []
++
++    for idx, char in enumerate(window):
++        if _is_invisible_char(char):
++            continue
++        for piece in _normalized_characters(char):
++            if _is_invisible_char(piece):
++                continue
++            if piece.isalnum():
++                spaced_chars.append(piece)
++                spaced_offsets.append(idx)
++                compact_chars.append(piece)
++                compact_offsets.append(idx)
++            else:
++                _append_space(spaced_chars, spaced_offsets, idx)
++
++    candidates: list[_ScanCandidate] = []
++    if spaced_chars:
++        candidates.append(_ScanCandidate("normalized", "".join(spaced_chars), tuple(spaced_offsets)))
++    if compact_chars:
++        candidates.append(_ScanCandidate("compact", "".join(compact_chars), tuple(compact_offsets)))
++    return tuple(candidates)
++
++
++def _candidate_span_to_window_offsets(candidate: _ScanCandidate, start: int, end: int) -> tuple[int, int]:
++    if not candidate.offsets:
++        return (0, 0)
++    start = max(0, min(start, len(candidate.offsets) - 1))
++    end = max(start + 1, min(end, len(candidate.offsets)))
++    covered = candidate.offsets[start:end]
++    return (min(covered), max(covered) + 1)
++
++
++def _base64_text_variants(value: str) -> list[str]:
++    stripped = value.strip()
++    if len(stripped) < 8 or len(stripped) > 512:
++        return []
++    if not re.fullmatch(r"[A-Za-z0-9+/=_-]+", stripped):
++        return []
++    padded = stripped + "=" * (-len(stripped) % 4)
++    variants: list[str] = []
++    for candidate in {padded, padded.replace("-", "+").replace("_", "/")}:
++        try:
++            decoded = base64.b64decode(candidate, validate=False)
++        except (binascii.Error, ValueError):
++            continue
++        try:
++            text = decoded.decode("utf-8")
++        except UnicodeDecodeError:
++            continue
++        if 4 <= len(text) <= 512 and all(ch.isprintable() or ch.isspace() for ch in text):
++            variants.append(text)
++    return variants
++
++
++def _is_documentation_mention(text: str, start: int, end: int) -> bool:
++    line_start = text.rfind("\n", 0, start) + 1
++    line_end = text.find("\n", end)
++    if line_end == -1:
++        line_end = len(text)
++    line = text[line_start:line_end]
++    if not _DOCUMENTATION_CUE_RE.search(line):
++        return False
++    local_start = start - line_start
++    local_end = end - line_start
++    before = line[:local_start]
++    after = line[local_end:]
++    quoted = (
++        (before.rstrip().endswith(tuple(_QUOTE_CHARS)) and after.lstrip().startswith(tuple(_QUOTE_CHARS)))
++        or ("`" in before and "`" in after)
++        or ('"' in before and '"' in after)
++    )
++    return quoted
++
++
++def _is_negated_instruction_override(rule_id: str, text: str, start: int) -> bool:
++    if not (rule_id.startswith("instruction_override") or rule_id == "prompt_injection"):
++        return False
++    prefix = text[max(0, start - 64):start]
++    normalized = re.sub(r"[^a-z0-9'’]+", " ", prefix.lower()).strip()
++    return bool(_NEGATING_PREFIX_RE.search(normalized))
++
++
++def _adjust_finding_severity(
++    surface: ContextSurface,
++    severity: FindingSeverity,
++    category: str,
++    text: str,
++    start: int,
++    end: int,
++) -> FindingSeverity:
++    if (
++        surface == ContextSurface.CONTEXT_FILE
++        and severity in {FindingSeverity.HIGH, FindingSeverity.CRITICAL}
++        and category in {"prompt_injection", "prompt_disclosure", "prompt_boundary", "tool_action_steering"}
++        and _is_documentation_mention(text, start, end)
++    ):
++        return FindingSeverity.MEDIUM
++    return severity
++
 +_THREAT_PATTERNS: tuple[tuple[str, str, FindingSeverity, str, str], ...] = (
 +    (
 +        r"ignore\s+(?:\w+\s+)*(?:previous|all|above|prior)\s+(?:\w+\s+)*instructions",
@@ -278,6 +433,141 @@ index 00000000..0fd7dfe6
 +    ),
 +)
 +
++_NORMALIZED_THREAT_PATTERNS: tuple[tuple[str, str, FindingSeverity, str, str], ...] = (
++    (
++        r"\b(?:ignore|disregard|forget|override|bypass)\s+"
++        r"(?:(?:the|all|any|your|my|previous|prior|above|earlier|old|initial|system|developer|original)\s+)*"
++        r"(?:instructions?|rules?|guidelines?|prompts?)\b",
++        "instruction_override",
++        FindingSeverity.CRITICAL,
++        "prompt_injection",
++        "Text attempts to override active, system, developer, or prior instructions.",
++    ),
++    (
++        r"\b(?:print|repeat|reveal|show|display|output|dump|return)\s+"
++        r"(?:(?:the|your)\s+)?"
++        r"(?:(?:above|previous|prior|initial|hidden|system|developer|application)\s+)?"
++        r"(?:prompts?|instructions?|messages?)\b",
++        "prompt_disclosure",
++        FindingSeverity.HIGH,
++        "prompt_disclosure",
++        "Text attempts to disclose hidden, previous, system, developer, or application instructions.",
++    ),
++    (
++        r"\bspell\s+check\s+and\s+print\s+(?:(?:the)\s+)?(?:(?:above|previous|prior)\s+)?prompts?\b",
++        "prompt_disclosure_spellcheck_print",
++        FindingSeverity.HIGH,
++        "prompt_disclosure",
++        "Text attempts to transform and disclose the surrounding or prior prompt.",
++    ),
++    (
++        r"\b(?:treat|consider|interpret)\s+(?:this|this\s+message|the\s+following)\s+as\s+"
++        r"(?:a\s+)?(?:system|developer)\s+(?:prompt|message|instructions?)\b",
++        "role_authority_spoof",
++        FindingSeverity.HIGH,
++        "prompt_boundary",
++        "Text attempts to spoof system/developer authority or prompt boundaries.",
++    ),
++    (
++        r"\b(?:(?:begin|end)\s+(?:system|developer|instructions?|prompt)|role\s+(?:system|developer))\b",
++        "role_boundary_spoof",
++        FindingSeverity.HIGH,
++        "prompt_boundary",
++        "Text contains role or prompt-boundary spoofing language.",
++    ),
++    (
++        r"\b(?:(?:do\s+not|dont|don['’]?t)\s+(?:tell|inform|show)\s+(?:the\s+)?user|"
++        r"without\s+confirmation|do\s+not\s+ask\s+for\s+confirmation)\b",
++        "secrecy_or_no_confirmation",
++        FindingSeverity.HIGH,
++        "deception",
++        "Text asks the agent to conceal behavior from the user or avoid confirmation.",
++    ),
++    (
++        r"\bstop\s+everything\b[\s\S]{0,160}\b(?:just\s+)?(?:print|output|say|return)\b",
++        "imperative_output_hijack",
++        FindingSeverity.CRITICAL,
++        "prompt_injection",
++        "Text uses an imperative stop-and-print/output hijack pattern.",
++    ),
++    (
++        r"\badmin\s+override\b[\s\S]{0,160}\b(?:authorized|full\s+data\s+access|diagnostic\s+mode)\b",
++        "admin_override",
++        FindingSeverity.CRITICAL,
++        "prompt_injection",
++        "Text claims elevated administrator or diagnostic authority over the agent.",
++    ),
++    (
++        r"\b(?:export|send|include|render|encode)\b[\s\S]{0,160}\b(?:session\s+data|environment\s+variables?|credentials?|api\s+keys?|secrets?)\b[\s\S]{0,160}\b(?:image|url|markdown\s+image|http)",
++        "session_data_exfil_image",
++        FindingSeverity.CRITICAL,
++        "exfiltration",
++        "Text attempts to export session, environment, credential, or secret data through an image or URL.",
++    ),
++    (
++        r"\b(?:run|execute|write|send|email|browse|open|click|press|mark)\s+"
++        r"(?:(?:this|the)\s+)?(?:command|file|message|url|button|task)\b",
++        "tool_action_steering",
++        FindingSeverity.MEDIUM,
++        "tool_action_steering",
++        "Text contains tool/action steering language.",
++    ),
++)
++
++_COMPACT_THREAT_PATTERNS: tuple[tuple[str, str, FindingSeverity, str, str], ...] = (
++    (
++        r"ignore(?:the|all|any|your|my|system|developer|previous|prior|above|earlier|old|initial|original)*instructions?",
++        "instruction_override_compact",
++        FindingSeverity.CRITICAL,
++        "prompt_injection",
++        "Text attempts to override instructions using punctuation, spacing, or compatibility obfuscation.",
++    ),
++    (
++        r"(?:print|repeat|reveal|show|display|output|dump|return)(?:the|your)?"
++        r"(?:above|previous|prior|initial|hidden|system|developer|application)?"
++        r"(?:prompt|prompts|instruction|instructions|message|messages)",
++        "prompt_disclosure_compact",
++        FindingSeverity.HIGH,
++        "prompt_disclosure",
++        "Text attempts to disclose hidden or prior instructions using obfuscation.",
++    ),
++    (
++        r"spellcheckandprint(?:the)?(?:above|previous|prior)?prompts?",
++        "prompt_disclosure_spellcheck_print_compact",
++        FindingSeverity.HIGH,
++        "prompt_disclosure",
++        "Text attempts to transform and disclose the surrounding or prior prompt using obfuscation.",
++    ),
++    (
++        r"treat(?:this|thismessage|thefollowing)as(?:a)?(?:system|developer)(?:prompt|message|instruction|instructions)",
++        "role_authority_spoof_compact",
++        FindingSeverity.HIGH,
++        "prompt_boundary",
++        "Text attempts to spoof system/developer authority using obfuscation.",
++    ),
++    (
++        r"stopeverything(?:now)*(?:just)?(?:print|output|say|return)",
++        "imperative_output_hijack_compact",
++        FindingSeverity.CRITICAL,
++        "prompt_injection",
++        "Text uses a compact stop-and-print/output hijack pattern.",
++    ),
++    (
++        r"adminoverride(?:theuserhas)?authorized(?:fulldataaccess|diagnosticmode)?",
++        "admin_override_compact",
++        FindingSeverity.CRITICAL,
++        "prompt_injection",
++        "Text claims elevated administrator or diagnostic authority using compact wording.",
++    ),
++    (
++        r"(?:role|begin|end)(?:system|developer)",
++        "role_boundary_spoof_compact",
++        FindingSeverity.HIGH,
++        "prompt_boundary",
++        "Text contains compact role or prompt-boundary spoofing language.",
++    ),
++)
++
 +_EXTERNAL_SURFACES = {
 +    ContextSurface.CRON_SCRIPT_OUTPUT,
 +    ContextSurface.CRON_PRIOR_OUTPUT,
@@ -358,6 +648,7 @@ index 00000000..0fd7dfe6
 +    start: int,
 +    end: int,
 +) -> ContextFinding:
++    severity = _adjust_finding_severity(surface, severity, category, text, start, end)
 +    return ContextFinding(
 +        rule_id=rule_id,
 +        severity=severity,
@@ -371,6 +662,98 @@ index 00000000..0fd7dfe6
 +        excerpt=_excerpt(text[start:end]),
 +    )
 +
++
++def _patterns_for_candidate(candidate: _ScanCandidate) -> tuple[tuple[str, str, FindingSeverity, str, str], ...]:
++    if candidate.name == "compact":
++        return _COMPACT_THREAT_PATTERNS
++    return _NORMALIZED_THREAT_PATTERNS
++
++
++def _decoded_text_contains_threat(decoded_text: str) -> bool:
++    for candidate in _scan_candidates(decoded_text):
++        for pattern, _rule_id, _severity, _category, _description in _patterns_for_candidate(candidate):
++            if re.search(pattern, candidate.text, re.IGNORECASE):
++                return True
++    for pattern, _rule_id, _severity, _category, _description in _THREAT_PATTERNS:
++        if re.search(pattern, decoded_text, re.IGNORECASE):
++            return True
++    return False
++
++
++def _scan_normalized_candidates(
++    window: str,
++    *,
++    base: int,
++    text: str,
++    surface: ContextSurface,
++    source_label: str | None,
++    seen: set[tuple[str, int]],
++    findings: list[ContextFinding],
++) -> None:
++    for candidate in _scan_candidates(window):
++        if not candidate.text:
++            continue
++        for pattern, rule_id, severity, category, description in _patterns_for_candidate(candidate):
++            for match in re.finditer(pattern, candidate.text, re.IGNORECASE):
++                local_start, local_end = _candidate_span_to_window_offsets(candidate, match.start(), match.end())
++                start = base + local_start
++                end = base + local_end
++                if _is_negated_instruction_override(rule_id, text, start):
++                    continue
++                key = (rule_id, start)
++                if key in seen:
++                    continue
++                seen.add(key)
++                findings.append(
++                    _make_finding(
++                        rule_id=rule_id,
++                        severity=severity,
++                        category=category,
++                        description=description,
++                        surface=surface,
++                        source_label=source_label,
++                        text=text,
++                        start=start,
++                        end=end,
++                    )
++                )
++
++
++def _scan_encoded_candidates(
++    window: str,
++    *,
++    base: int,
++    text: str,
++    surface: ContextSurface,
++    source_label: str | None,
++    seen: set[tuple[str, int]],
++    findings: list[ContextFinding],
++) -> None:
++    for match in _BASE64_TOKEN_RE.finditer(window):
++        token = match.group(1)
++        for decoded_text in _base64_text_variants(token):
++            if not _decoded_text_contains_threat(decoded_text):
++                continue
++            start = base + match.start(1)
++            end = base + match.end(1)
++            key = ("encoded_instruction_like_text", start)
++            if key in seen:
++                break
++            seen.add(key)
++            findings.append(
++                _make_finding(
++                    rule_id="encoded_instruction_like_text",
++                    severity=FindingSeverity.HIGH,
++                    category="hidden_instruction",
++                    description="Base64-like text decodes to instruction-like prompt-injection content.",
++                    surface=surface,
++                    source_label=source_label,
++                    text=text,
++                    start=start,
++                    end=end,
++                )
++            )
++            break
 +
 +def _scan_findings(
 +    text: str,
@@ -425,6 +808,9 @@ index 00000000..0fd7dfe6
 +                        end=end,
 +                    )
 +                )
++
++        _scan_normalized_candidates(window, base=base, text=text, surface=surface, source_label=source_label, seen=seen, findings=findings)
++        _scan_encoded_candidates(window, base=base, text=text, surface=surface, source_label=source_label, seen=seen, findings=findings)
 +
 +    return tuple(findings)
 +
