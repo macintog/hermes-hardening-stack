@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This document is the security model and definition of done for Hermes hostile-download and hostile-context containment. It is based on the current hardening-payload docs and live Hermes surfaces inspected in:
+This document is the intended security model and definition of done for Hermes hostile-download and hostile-context containment. Current implementation coverage is enumerated in `SURFACE_MAP.md` and `HARDENING_SURFACE_INVENTORY.md`; those files remain authoritative for whether a specific surface is covered, partially covered, or still needs a policy decision. It is based on the current hardening-payload docs and live Hermes surfaces inspected in:
 
 - `tools/safe_http.py`
 - `agent/context_safety.py`

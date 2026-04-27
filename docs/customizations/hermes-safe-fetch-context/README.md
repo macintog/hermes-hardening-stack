@@ -43,7 +43,7 @@ Required behavior:
 Side effects require trusted scoped authority.
 
 Required behavior:
-- preserve evidence-only taint across fetch, extraction, cache/temp artifacts, summaries, prompt promotion, and tool decisions
+- preserve or re-establish evidence-only provenance across fetch, extraction, cache/temp artifacts, summaries, prompt promotion, and tool decisions
 - block evidence-only attempts to authorize file writes, terminal execution, secret reads/transmission, outbound messages, memory/cron writes, skill/plugin execution, browser credentialed actions, config changes, and unknown side effects
 - treat missing provenance as evidence-only for side-effect decisions
 

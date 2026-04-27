@@ -2,7 +2,7 @@
 
 This maps the implementation to the Hermes files it changes.
 
-## Patch 0001: context safety core
+## Context safety core
 
 ### Core module
 
@@ -65,12 +65,12 @@ Current intent:
 - scan skill content served into the conversation
 - expose `context_safety` and `context_safety_findings` fields in tool output
 - distinguish provenance where possible: builtin/local/plugin/hub/external
-- ensure external/community/plugin skill content is evidence-only for action decisions; it cannot authorize installs, memory writes, cron changes, outbound messages, file writes, or execution without trusted user/system/developer intent through patch 0004's action-authority gate
+- ensure external/community/plugin skill content is evidence-only for action decisions; it cannot authorize installs, memory writes, cron changes, outbound messages, file writes, or execution without trusted user/system/developer intent through the action-authority gate
 
 Search hints:
 - search for `skill_view`, `_serve_plugin_skill`, skill content serialization, hub install/audit logic
 
-## Patch 0002: safe HTTP and gateway download hardening
+## Safe HTTP and gateway download hardening
 
 ### Core module
 
@@ -198,7 +198,7 @@ Current file:
 Current intent/status:
 - use `safe_download_bytes` for WeCom media downloads
 - preserve required access-token behavior
-- include `tests/gateway/test_wecom.py` coverage in patch 0002
+- include `tests/gateway/test_wecom.py` coverage
 
 Search hints:
 - search for `gateway/platforms/wecom.py`, `_download_remote_bytes`, and `tests/gateway/test_wecom.py::TestMediaUpload`
@@ -251,7 +251,7 @@ Security boundary tests:
 - `tests/security/test_prompt_injection_containment.py`
 - `tests/security/test_tool_result_promotion.py`
 
-## Patch 0003: customization maintenance tool
+## Customization maintenance tool
 
 ### Tool implementation
 
@@ -271,7 +271,7 @@ Search hints:
 - search for `hermes_customizations`, `customizations.hermes_agent_patches`, or hardening-payload maintenance helpers
 - preserve the repo-separation and PII-audit behavior even if the toolset name changes
 
-## Patch 0004: provenance/action-authority hardening
+## Provenance/action-authority hardening
 
 ### Artifact provenance
 
@@ -298,7 +298,7 @@ Search hints:
 - search for tool-call authorization gates, side-effecting tool metadata, provenance/taint envelopes, or confirmation policy helpers
 - preserve fail-closed behavior for missing provenance before side effects
 
-## Patch 0005: tool-result promotion and action-registry hardening
+## Tool-result promotion and action-registry hardening
 
 ### Action registry classification
 
