@@ -312,6 +312,12 @@ if "render_model_visible_tool_result" not in dispatch_text or "evaluate_action_a
     fail("agent tool dispatch no longer invokes action gate and tool-result fencing")
 if "instruction_override" not in cs or "prompt_disclosure" not in cs or "encoded_instruction_like_text" not in cs:
     fail("scanner quality regression coverage for public prompt-injection misses is missing")
+cron_tests = Path("tests/tools/test_cronjob_tools.py").read_text(errors="replace")
+prompt_builder_tests = Path("tests/agent/test_prompt_builder.py").read_text(errors="replace")
+if "test_legacy_cron_threat_patterns_remain_blocked_via_context_safety" not in cron_tests:
+    fail("legacy cron threat-pattern no-degradation regression is missing")
+if "test_legacy_context_threat_patterns_remain_blocked_via_context_safety" not in prompt_builder_tests:
+    fail("legacy prompt-builder threat-pattern no-degradation regression is missing")
 print("static security drift guards ok")
 PY
 

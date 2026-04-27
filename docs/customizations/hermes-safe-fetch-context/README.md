@@ -6,13 +6,13 @@ This directory documents the current hardening payload in:
 - `patches/hermes-safe-fetch-context/*.patch`
 - `scripts/verify-hermes-safe-fetch-context-payload.sh`
 
-## Durable project rule
+## Public review rule
 
-Main is the sole source of truth.
-
-This payload does not preserve implementation history, compatibility with older packaging, or prior iteration structure. Earlier iterations are assumed wrong for current design purposes. If historical context is needed, use git history, not live payload artifacts.
+This payload is public-facing hardening evidence, not a development journal. Live docs should explain current behavior, current verification, and how to review the security boundary.
 
 Payload fragments represent final-state deltas by target file. A fragment may cover an atomic target group only when splitting it would make the payload incoherent; otherwise use one target file per patch.
+
+No file-level change should weaken an existing guard. When a local guard is centralized, the shared module must retain equivalent or stronger coverage, and a caller-specific regression must prove that the original surface still blocks the legacy cases.
 
 ## Current invariants
 
@@ -37,6 +37,7 @@ Required behavior:
 - preserve structured findings and provenance labels
 - escape spoofed fences/markup
 - default model-visible string tool results to untrusted evidence unless explicitly exempted as trusted internal control output
+- preserve no-degradation coverage when old per-surface scanner rules move into the shared scanner
 
 ### 3. Artifact provenance and action authority boundary
 

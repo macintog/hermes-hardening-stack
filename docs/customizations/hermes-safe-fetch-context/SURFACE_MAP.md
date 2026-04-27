@@ -14,6 +14,11 @@ Purpose:
 - scan untrusted text for prompt-injection, hidden text, path/script injection, and secret-exfil patterns
 - return structured findings
 - render untrusted context blocks with metadata
+- centralize former per-surface scanner rules without reducing coverage
+
+Public review notes:
+- `agent/context_safety.py` is the shared scanner used by prompt/context files and cron prompts.
+- Centralization must be behavior-preserving or stronger. Legacy per-surface rules removed from callers must remain covered by surface-specific regression tests.
 
 Search hints:
 - search for prompt/context safety helpers
@@ -25,8 +30,14 @@ Current file:
 - `agent/prompt_builder.py`
 
 Current intent:
-- use `scan_context_text(...)` for context files promoted into system prompt context
+- use `scan_context_text(...)` for context files promoted into prompt context
+- render allowed context files as untrusted evidence-only context rather than higher-priority instructions
 - convert structured scanner result into caller-visible blocking/error behavior where required
+- preserve legacy context-file threat coverage through `tests/agent/test_prompt_builder.py`, including prompt override, deception, hidden HTML, translate-and-execute, secret read, and exfiltration patterns
+
+Public review notes:
+- The local `_CONTEXT_THREAT_PATTERNS` list was removed from `agent/prompt_builder.py` because the shared scanner owns those rules now.
+- This is not intended as a weakening. If a reviewer sees a deleted local pattern here, confirm the same family exists in `agent/context_safety.py` and the legacy-pattern regression in `tests/agent/test_prompt_builder.py` still passes.
 
 Search hints:
 - search for `SOUL.md`, `AGENTS.md`, `CLAUDE.md`, `.cursorrules`, `_scan_context_content`, or prompt context file loading
@@ -50,8 +61,13 @@ Current files:
 - `tools/cronjob_tools.py`
 
 Current intent:
-- scan cron prompts before saving/scheduling
+- scan cron prompts before saving/scheduling with the shared context scanner
+- preserve legacy cron threat coverage through `tests/tools/test_cronjob_tools.py`, including prompt override, deception, secret exfiltration, secret reads, SSH persistence, sudoers edits, destructive root removal, and invisible Unicode
 - render cron pre-run script output and upstream job context as untrusted data when building job prompts
+
+Public review notes:
+- The local `_CRON_THREAT_PATTERNS` list was removed from `tools/cronjob_tools.py` because the shared scanner owns those rules now.
+- This is not intended as a weakening. If a reviewer sees a deleted cron-local pattern, confirm the same family exists in `agent/context_safety.py` and the legacy cron regression in `tests/tools/test_cronjob_tools.py` still passes.
 
 Search hints:
 - search for `_build_job_prompt`, `context_from`, `prerun_script`, `cronjob`, or cron prompt validation
@@ -225,10 +241,10 @@ Central tests:
 
 Context integration tests:
 - `tests/agent/test_memory_provider.py`
-- `tests/agent/test_prompt_builder.py`
+- `tests/agent/test_prompt_builder.py` — includes legacy prompt-builder threat-pattern no-degradation coverage
 - `tests/cron/test_cron_context_from.py`
 - `tests/cron/test_cron_script.py`
-- `tests/tools/test_cronjob_tools.py`
+- `tests/tools/test_cronjob_tools.py` — includes legacy cron threat-pattern no-degradation coverage
 - `tests/tools/test_skills_tool.py`
 
 Gateway integration tests:
@@ -249,6 +265,7 @@ Security boundary tests:
 - `tests/security/test_artifact_provenance.py`
 - `tests/security/test_action_authority.py`
 - `tests/security/test_prompt_injection_containment.py`
+- `tests/security/test_prompt_injection_public_corpus.py` — public/benign scanner-quality corpus
 - `tests/security/test_tool_result_promotion.py`
 
 ## Customization maintenance tool
