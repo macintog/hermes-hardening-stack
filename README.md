@@ -1,10 +1,16 @@
-# Hermes Agent downstream hardening payload
+# Hermes Agent hostile-content hardening payload
 
-This repository contains the downstream Hermes Agent hardening payload applied on top of a clean Hermes Agent install.
+This repository packages downstream Hermes Agent changes that prevent prompt-injection text in external content from authorizing tool calls or changing what the agent is allowed to do.
+
+The payload hardens three connected boundaries:
+
+- safe fetch: validate user/platform-provided URLs, redirects, byte caps, credential redirects, and URL redaction
+- context promotion: render downloaded, recalled, cron, skill, gateway, browser, and tool-result text as evidence with provenance
+- action authority: require trusted scoped user/system/developer intent before side-effecting tools can write files, run commands, send messages, persist memory/cron state, use credentials, or act in a browser
+
+It is a patch payload for a clean Hermes Agent checkout. It does not vendor, mirror, or fork Hermes Agent source.
 
 Main is the sole source of truth. The repository does not preserve iteration history, compatibility shims, or prior patch shapes. Git history is the only place to inspect older states.
-
-It does not vendor, mirror, or fork Hermes Agent source.
 
 Executable sources:
 
