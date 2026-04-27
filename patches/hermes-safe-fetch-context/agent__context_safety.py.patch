@@ -1,9 +1,9 @@
 diff --git a/agent/context_safety.py b/agent/context_safety.py
 new file mode 100644
-index 00000000..6944933e
+index 00000000..0fd7dfe6
 --- /dev/null
 +++ b/agent/context_safety.py
-@@ -0,0 +1,737 @@
+@@ -0,0 +1,747 @@
 +"""Provenance-aware context promotion safety helpers.
 +
 +This module provides a small, dependency-free policy boundary for text that may
@@ -490,7 +490,7 @@ index 00000000..6944933e
 +    # available for callers that need removal instead of evidence-preserving
 +    # escaping.
 +    escaped = html.escape(text, quote=False)
-+    attrs = f'source="{html.escape(surface_value.value, quote=True)}" verdict="{html.escape(verdict_value.value, quote=True)}"'
++    attrs = f'source="{html.escape(surface_value.value, quote=True)}" verdict="{html.escape(verdict_value.value, quote=True)}" rendered_by="hermes_context_safety_v1"'
 +    if source_label:
 +        attrs += f' source_label="{html.escape(source_label, quote=True)}"'
 +    attrs += _provenance_attrs(provenance)
@@ -649,20 +649,30 @@ index 00000000..6944933e
 +
 +
 +_COMPLETE_UNTRUSTED_CONTEXT_RE = re.compile(
-+    r"^\s*<untrusted-context\b[^>]*>[\s\S]*?</untrusted-context>\s*$",
++    r"^\s*<untrusted-context\b(?P<attrs>[^>]*)>(?P<body>[\s\S]*?)</untrusted-context>\s*$",
 +    re.IGNORECASE,
 +)
++_RENDERED_BY_MARKER = "hermes_context_safety_v1"
 +
 +
 +def is_rendered_untrusted_context(text: str) -> bool:
-+    """Return True when text is already exactly one model-visible fence.
++    """Return True only for internally rendered, structurally safe fences.
 +
-+    Tool results can pass through compatibility/plugin layers that already call
-+    render_untrusted_context(). Re-wrapping those complete fences makes evidence
-+    unreadable and can obscure provenance. Partial/spoofed markers are not
-+    accepted here; they remain escaped by render_untrusted_context().
++    Arbitrary web/tool/plugin output can spoof a complete <untrusted-context>
++    block.  Idempotence must therefore be conservative: skip re-wrapping only
++    when the fence carries the renderer marker and the body contains no raw angle
++    brackets.  Internally rendered bodies are HTML-escaped, so raw '<' or '>' is
++    evidence that the block was spoofed or structurally unsafe and must be
++    escaped by an outer fence.
 +    """
-+    return bool(_COMPLETE_UNTRUSTED_CONTEXT_RE.match(text or ""))
++    match = _COMPLETE_UNTRUSTED_CONTEXT_RE.match(text or "")
++    if not match:
++        return False
++    attrs = match.group("attrs") or ""
++    if f'rendered_by="{_RENDERED_BY_MARKER}"' not in attrs and f"rendered_by='{_RENDERED_BY_MARKER}'" not in attrs:
++        return False
++    body = match.group("body") or ""
++    return "<" not in body and ">" not in body
 +
 +
 +def _render_model_visible_tool_string(

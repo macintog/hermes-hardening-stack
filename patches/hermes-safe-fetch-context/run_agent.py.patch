@@ -1,8 +1,8 @@
 diff --git a/run_agent.py b/run_agent.py
-index e5f070f9..19ae9722 100644
+index 85321628..a383d798 100644
 --- a/run_agent.py
 +++ b/run_agent.py
-@@ -8236,6 +8236,101 @@ class AIAgent:
+@@ -8551,6 +8551,101 @@ class AIAgent:
              parent_agent=self,
          )
  
@@ -104,7 +104,7 @@ index e5f070f9..19ae9722 100644
      def _invoke_tool(self, function_name: str, function_args: dict, effective_task_id: str,
                       tool_call_id: Optional[str] = None, messages: list = None) -> str:
          """Invoke a single tool and return the result string. No display logic.
-@@ -8244,6 +8339,26 @@ class AIAgent:
+@@ -8559,6 +8654,26 @@ class AIAgent:
          tools. Used by the concurrent execution path; the sequential path retains
          its own inline invocation for backward-compatible display handling.
          """
@@ -131,7 +131,7 @@ index e5f070f9..19ae9722 100644
          # Check plugin hooks for a block directive before executing anything.
          block_message: Optional[str] = None
          try:
-@@ -8317,6 +8432,8 @@ class AIAgent:
+@@ -8632,6 +8747,8 @@ class AIAgent:
                  session_id=self.session_id or "",
                  enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,
                  skip_pre_tool_call_hook=True,
@@ -140,7 +140,7 @@ index e5f070f9..19ae9722 100644
              )
  
      @staticmethod
-@@ -8622,6 +8739,7 @@ class AIAgent:
+@@ -8964,6 +9081,7 @@ class AIAgent:
              if subdir_hints:
                  function_result += subdir_hints
  
@@ -148,7 +148,7 @@ index e5f070f9..19ae9722 100644
              tool_msg = {
                  "role": "tool",
                  "content": function_result,
-@@ -8677,15 +8795,35 @@ class AIAgent:
+@@ -9019,15 +9137,35 @@ class AIAgent:
              if not isinstance(function_args, dict):
                  function_args = {}
  
@@ -190,7 +190,7 @@ index e5f070f9..19ae9722 100644
  
              if _block_msg is not None:
                  # Tool blocked by plugin policy — skip counter resets.
-@@ -8914,6 +9052,8 @@ class AIAgent:
+@@ -9256,6 +9394,8 @@ class AIAgent:
                          session_id=self.session_id or "",
                          enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,
                          skip_pre_tool_call_hook=True,
@@ -199,7 +199,7 @@ index e5f070f9..19ae9722 100644
                      )
                      _spinner_result = function_result
                  except Exception as tool_error:
-@@ -8934,6 +9074,8 @@ class AIAgent:
+@@ -9276,6 +9416,8 @@ class AIAgent:
                          session_id=self.session_id or "",
                          enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,
                          skip_pre_tool_call_hook=True,
@@ -208,7 +208,7 @@ index e5f070f9..19ae9722 100644
                      )
                  except Exception as tool_error:
                      function_result = f"Error executing tool '{function_name}': {tool_error}"
-@@ -8986,6 +9128,7 @@ class AIAgent:
+@@ -9328,6 +9470,7 @@ class AIAgent:
              if subdir_hints:
                  function_result += subdir_hints
  
@@ -216,7 +216,7 @@ index e5f070f9..19ae9722 100644
              tool_msg = {
                  "role": "tool",
                  "content": function_result,
-@@ -9055,8 +9198,7 @@ class AIAgent:
+@@ -9397,8 +9540,7 @@ class AIAgent:
              for msg in messages:
                  api_msg = msg.copy()
                  self._copy_reasoning_content_for_api(msg, api_msg)
@@ -226,7 +226,7 @@ index e5f070f9..19ae9722 100644
                  if _needs_sanitize:
                      self._sanitize_tool_calls_for_strict_api(api_msg)
                  api_messages.append(api_msg)
-@@ -9208,6 +9350,7 @@ class AIAgent:
+@@ -9550,6 +9692,7 @@ class AIAgent:
          task_id: str = None,
          stream_callback: Optional[callable] = None,
          persist_user_message: Optional[str] = None,
@@ -234,7 +234,7 @@ index e5f070f9..19ae9722 100644
      ) -> Dict[str, Any]:
          """
          Run a complete conversation with tool calling until completion.
-@@ -9223,7 +9366,8 @@ class AIAgent:
+@@ -9565,7 +9708,8 @@ class AIAgent:
              persist_user_message: Optional clean user message to store in
                  transcripts/history when user_message contains API-only
                  synthetic prefixes.
@@ -244,7 +244,7 @@ index e5f070f9..19ae9722 100644
  
          Returns:
              Dict: Complete conversation result with final response and message history
-@@ -9355,6 +9499,8 @@ class AIAgent:
+@@ -9697,6 +9841,8 @@ class AIAgent:
  
          # Add user message
          user_msg = {"role": "user", "content": user_message}
@@ -253,7 +253,7 @@ index e5f070f9..19ae9722 100644
          messages.append(user_msg)
          current_turn_user_idx = len(messages) - 1
          self._persist_user_message_idx = current_turn_user_idx
-@@ -9515,7 +9661,28 @@ class AIAgent:
+@@ -9857,7 +10003,28 @@ class AIAgent:
                  elif isinstance(r, str) and r.strip():
                      _ctx_parts.append(r)
              if _ctx_parts:
@@ -283,7 +283,7 @@ index e5f070f9..19ae9722 100644
          except Exception as exc:
              logger.warning("pre_llm_call hook failed: %s", exc)
  
-@@ -9726,13 +9889,7 @@ class AIAgent:
+@@ -10068,13 +10235,7 @@ class AIAgent:
  
                  # Remove 'reasoning' field - it's for trajectory storage only
                  # We've copied it to 'reasoning_content' for the API above

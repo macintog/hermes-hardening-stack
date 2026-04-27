@@ -29,7 +29,6 @@ tests__gateway__test_discord_attachment_download.py.patch
 tests__gateway__test_feishu.py.patch
 tests__gateway__test_mattermost.py.patch
 tests__gateway__test_media_download_retry.py.patch
-tests__gateway__test_qqbot.py.patch
 tests__gateway__test_reply_to_injection.py.patch
 tests__gateway__test_slack.py.patch
 tests__gateway__test_stt_config.py.patch

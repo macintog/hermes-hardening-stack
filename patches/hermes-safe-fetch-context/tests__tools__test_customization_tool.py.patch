@@ -1,6 +1,6 @@
 diff --git a/tests/tools/test_customization_tool.py b/tests/tools/test_customization_tool.py
 new file mode 100644
-index 00000000..e39870fd
+index 00000000..1713ec42
 --- /dev/null
 +++ b/tests/tools/test_customization_tool.py
 @@ -0,0 +1,103 @@

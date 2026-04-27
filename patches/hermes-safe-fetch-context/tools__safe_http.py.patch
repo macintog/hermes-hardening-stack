@@ -1,22 +1,26 @@
 diff --git a/tools/safe_http.py b/tools/safe_http.py
 new file mode 100644
-index 00000000..16521269
+index 00000000..53846775
 --- /dev/null
 +++ b/tools/safe_http.py
-@@ -0,0 +1,309 @@
+@@ -0,0 +1,449 @@
 +"""Safe HTTP download helpers for untrusted remote URLs."""
 +
 +from __future__ import annotations
 +
 +import hashlib
++import ipaddress
++import socket
 +import tempfile
 +from dataclasses import dataclass
 +from pathlib import Path
 +from typing import Mapping, Sequence
-+from urllib.parse import quote, urlsplit, urlunsplit
++from urllib.parse import quote, unquote, urlsplit, urlunsplit
 +import re
 +
 +import httpx
++
++_ORIGINAL_ASYNC_CLIENT = httpx.AsyncClient
 +
 +from agent.artifact_provenance import ArtifactProvenance
 +from tools.url_safety import is_safe_url
@@ -66,7 +70,9 @@ index 00000000..16521269
 +_SENSITIVE_HEADER_NAMES = {
 +    "authorization", "proxy-authorization", "cookie", "set-cookie", "x-api-key",
 +    "x-auth-token", "x-amz-security-token", "www-authenticate", "authentication-info",
++    "location", "refresh", "referer", "referrer",
 +}
++_SENSITIVE_HEADER_PREFIXES = ("x-amz-", "x-goog-", "x-ms-")
 +_TOKEN_PATH_KEYWORDS = re.compile(r"(?i)(token|secret|signature|credential|api[_-]?key|session|password)")
 +_LONG_TOKEN_SEGMENT = re.compile(r"(?i)^[a-z0-9._~-]{24,}$")
 +
@@ -75,7 +81,7 @@ index 00000000..16521269
 +    redacted: dict[str, str] = {}
 +    for key, value in headers.items():
 +        low = key.lower()
-+        redacted[low] = "<redacted>" if low in _SENSITIVE_HEADER_NAMES else value
++        redacted[low] = "<redacted>" if low in _SENSITIVE_HEADER_NAMES or low.startswith(_SENSITIVE_HEADER_PREFIXES) else value
 +    return redacted
 +
 +
@@ -101,11 +107,149 @@ index 00000000..16521269
 +        return "<redacted-url>"
 +
 +
++_BLOCKED_EXACT_HOSTNAMES = {
++    "localhost",
++    "metadata",
++    "metadata.google.internal",
++    "metadata.cloud.google.com",
++    "169.254.169.254",
++}
++_BLOCKED_HOST_SUFFIXES = (".localhost", ".local", ".internal")
++_LEGACY_IPV4_RE = re.compile(
++    r"^(?:0[xX][0-9A-Fa-f]+|0[0-7]*|[0-9]+)(?:\.(?:0[xX][0-9A-Fa-f]+|0[0-7]*|[0-9]+)){0,3}$"
++)
++
++
++def _canonical_host(host: str) -> str:
++    normalized = unquote(host or "").strip().rstrip(".").lower()
++    # urlsplit().hostname preserves IPv6 zone IDs as %25zone; strip them before
++    # ipaddress parsing so link-local addresses cannot hide behind interface IDs.
++    if "%" in normalized:
++        normalized = normalized.split("%", 1)[0]
++    try:
++        normalized = normalized.encode("idna").decode("ascii").lower()
++    except UnicodeError:
++        pass
++    return normalized
++
++
++def _default_port(scheme: str) -> int:
++    return 443 if scheme.lower() == "https" else 80
++
++
++def _port_for_parts(parts) -> int:
++    try:
++        return parts.port or _default_port(parts.scheme)
++    except ValueError as exc:
++        raise SafeHTTPError(f"Blocked URL with malformed port: {redact_url(urlunsplit((parts.scheme, parts.netloc, parts.path, '', '')))}") from exc
++
++
++def _origin_tuple(url: str) -> tuple[str, str, int]:
++    parts = urlsplit(url)
++    if not parts.hostname:
++        raise SafeHTTPError("Blocked URL with missing host")
++    return (parts.scheme.lower(), _canonical_host(parts.hostname), _port_for_parts(parts))
++
++
++def _same_origin(left: str, right: str) -> bool:
++    return _origin_tuple(left) == _origin_tuple(right)
++
++
++def _parse_legacy_int(component: str) -> int:
++    if component.lower().startswith("0x"):
++        return int(component[2:], 16)
++    if len(component) > 1 and component.startswith("0"):
++        return int(component, 8)
++    return int(component, 10)
++
++
++def _parse_legacy_ipv4(host: str) -> ipaddress.IPv4Address | None:
++    if not _LEGACY_IPV4_RE.fullmatch(host or ""):
++        return None
++    try:
++        parts = [_parse_legacy_int(part) for part in host.split(".")]
++    except ValueError:
++        return None
++    if len(parts) == 1:
++        if parts[0] > 0xFFFFFFFF:
++            return None
++        value = parts[0]
++    elif len(parts) == 2:
++        if parts[0] > 0xFF or parts[1] > 0xFFFFFF:
++            return None
++        value = (parts[0] << 24) | parts[1]
++    elif len(parts) == 3:
++        if parts[0] > 0xFF or parts[1] > 0xFF or parts[2] > 0xFFFF:
++            return None
++        value = (parts[0] << 24) | (parts[1] << 16) | parts[2]
++    elif len(parts) == 4:
++        if any(part > 0xFF for part in parts):
++            return None
++        value = (parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]
++    else:
++        return None
++    return ipaddress.IPv4Address(value)
++
++
++def _literal_ips_for_host(host: str) -> list[ipaddress._BaseAddress]:
++    canonical = _canonical_host(host)
++    ips: list[ipaddress._BaseAddress] = []
++    try:
++        ips.append(ipaddress.ip_address(canonical))
++    except ValueError:
++        legacy = _parse_legacy_ipv4(canonical)
++        if legacy is not None:
++            ips.append(legacy)
++    return ips
++
++
++def _is_unsafe_ip(ip: ipaddress._BaseAddress) -> bool:
++    mapped = getattr(ip, "ipv4_mapped", None)
++    if mapped is not None:
++        return _is_unsafe_ip(mapped)
++    return not ip.is_global
++
++
++def _resolve_host_ips(host: str, port: int) -> list[ipaddress._BaseAddress]:
++    try:
++        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
++    except OSError as exc:
++        raise SafeHTTPError(f"DNS resolution failed for host: {host}") from exc
++    resolved: list[ipaddress._BaseAddress] = []
++    for info in infos:
++        sockaddr = info[4]
++        if not sockaddr:
++            continue
++        ip_text = str(sockaddr[0]).split("%", 1)[0]
++        try:
++            resolved.append(ipaddress.ip_address(ip_text))
++        except ValueError:
++            raise SafeHTTPError(f"DNS returned malformed address for host: {host}")
++    if not resolved:
++        raise SafeHTTPError(f"DNS returned no usable addresses for host: {host}")
++    return resolved
++
++
++def _assert_host_target_safe(host: str, port: int, *, resolve_dns: bool) -> None:
++    canonical = _canonical_host(host)
++    if canonical in _BLOCKED_EXACT_HOSTNAMES or any(canonical.endswith(suffix) for suffix in _BLOCKED_HOST_SUFFIXES):
++        raise SafeHTTPError(f"Blocked internal hostname: {canonical}")
++    literal_ips = _literal_ips_for_host(canonical)
++    for ip in literal_ips:
++        if _is_unsafe_ip(ip):
++            raise SafeHTTPError(f"Blocked unsafe URL target IP: {ip}")
++    if resolve_dns and not literal_ips:
++        for ip in _resolve_host_ips(canonical, port):
++            if _is_unsafe_ip(ip):
++                raise SafeHTTPError(f"Blocked unsafe DNS target for {canonical}: {ip}")
++
++
 +def _validate_url(
 +    url: str,
 +    *,
 +    allow_userinfo: bool,
 +    allowed_private_origins: Sequence[str] | None = None,
++    resolve_dns: bool = True,
 +) -> None:
 +    parts = urlsplit(url)
 +    if parts.scheme not in {"http", "https"}:
@@ -114,18 +258,12 @@ index 00000000..16521269
 +        raise SafeHTTPError("Blocked URL with missing host")
 +    if not allow_userinfo and (parts.username or parts.password):
 +        raise SafeHTTPError(f"Blocked URL with embedded credentials: {redact_url(url)}")
-+    if not is_safe_url(url) and not any(
-+        _same_origin(url, origin) for origin in (allowed_private_origins or ())
-+    ):
++    allowed_private = any(_same_origin(url, origin) for origin in (allowed_private_origins or ()))
++    if allowed_private:
++        return
++    _assert_host_target_safe(parts.hostname, _port_for_parts(parts), resolve_dns=resolve_dns)
++    if not is_safe_url(url):
 +        raise SafeHTTPError(f"Blocked unsafe URL target: {redact_url(url)}")
-+
-+
-+def _same_origin(left: str, right: str) -> bool:
-+    a = urlsplit(left)
-+    b = urlsplit(right)
-+    def port(p):
-+        return p.port or (443 if p.scheme == "https" else 80)
-+    return (a.scheme, a.hostname, port(a)) == (b.scheme, b.hostname, port(b))
 +
 +
 +_MAGIC_BYTES_BY_TYPE: dict[str, tuple[bytes, ...]] = {
@@ -216,6 +354,7 @@ index 00000000..16521269
 +        url,
 +        allow_userinfo=allow_userinfo,
 +        allowed_private_origins=allowed_private_origins,
++        resolve_dns=transport is None and httpx.AsyncClient is _ORIGINAL_ASYNC_CLIENT,
 +    )
 +    request_headers = dict(headers or {})
 +    has_credentials = any(k.lower() in {"authorization", "cookie"} for k in request_headers)
@@ -240,6 +379,7 @@ index 00000000..16521269
 +                        next_url,
 +                        allow_userinfo=allow_userinfo,
 +                        allowed_private_origins=allowed_private_origins,
++                        resolve_dns=transport is None and httpx.AsyncClient is _ORIGINAL_ASYNC_CLIENT,
 +                    )
 +                    if has_credentials and not _same_origin(url, next_url):
 +                        raise SafeHTTPError(f"Blocked credential-bearing cross-origin redirect from {redact_url(url)} to {redact_url(next_url)}")

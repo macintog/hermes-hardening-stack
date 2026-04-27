@@ -1,13 +1,15 @@
 diff --git a/tests/tools/test_safe_http.py b/tests/tools/test_safe_http.py
 new file mode 100644
-index 00000000..143b1e49
+index 00000000..ac02f6cc
 --- /dev/null
 +++ b/tests/tools/test_safe_http.py
-@@ -0,0 +1,360 @@
+@@ -0,0 +1,415 @@
++import ipaddress
++
 +import pytest
 +import httpx
 +
-+from tools.safe_http import SafeHTTPError, safe_download_bytes, redact_url
++from tools.safe_http import SafeHTTPError, safe_download_bytes, redact_url, _validate_url
 +
 +
 +@pytest.mark.asyncio
@@ -70,7 +72,8 @@ index 00000000..143b1e49
 +            transport=httpx.MockTransport(handler),
 +        )
 +
-+    assert calls == ["https://files.example/report.pdf?token=secret", "http://127.0.0.1/admin"]
++    assert calls == ["https://files.example/report.pdf?token=secret"]
++    assert "Blocked unsafe URL target IP" in str(exc.value)
 +    assert "token=secret" not in str(exc.value)
 +
 +
@@ -352,7 +355,7 @@ index 00000000..143b1e49
 +    async def handler(request):
 +        return httpx.Response(
 +            200,
-+            headers={"Set-Cookie": "session=secret", "X-Trace-Id": "trace-1"},
++            headers={"Set-Cookie": "session=secret", "Location": "https://evil.example/?token=secret", "X-Amz-Signature": "abc", "X-Trace-Id": "trace-1"},
 +            content=b"ok",
 +        )
 +
@@ -363,4 +366,56 @@ index 00000000..143b1e49
 +        transport=httpx.MockTransport(handler),
 +    )
 +    assert result.headers["set-cookie"] == "<redacted>"
++    assert result.headers["location"] == "<redacted>"
++    assert result.headers["x-amz-signature"] == "<redacted>"
 +    assert result.headers["x-trace-id"] == "trace-1"
++
++
++@pytest.mark.parametrize(
++    "url",
++    [
++        "http://127.1/admin",
++        "http://0177.0.0.1/admin",
++        "http://0x7f000001/admin",
++        "http://2130706433/admin",
++        "http://[::1]/admin",
++        "http://[::ffff:127.0.0.1]/admin",
++        "http://[fe80::1%25eth0]/admin",
++        "http://localhost/admin",
++        "http://metadata.google.internal/latest/meta-data/",
++    ],
++)
++def test_local_url_guard_blocks_canonical_private_and_metadata_targets(monkeypatch, url):
++    monkeypatch.setattr("tools.safe_http.is_safe_url", lambda _url: True)
++    with pytest.raises(SafeHTTPError):
++        _validate_url(url, allow_userinfo=False, resolve_dns=False)
++
++
++def test_private_origin_allowlist_is_exact_origin_only(monkeypatch):
++    monkeypatch.setattr("tools.safe_http.is_safe_url", lambda _url: True)
++    with pytest.raises(SafeHTTPError):
++        _validate_url(
++            "http://127.0.0.1:8066/api/v4/files/file_private",
++            allow_userinfo=False,
++            allowed_private_origins=("http://127.0.0.1:8065",),
++            resolve_dns=False,
++        )
++    _validate_url(
++        "http://127.0.0.1:8065/api/v4/files/file_private",
++        allow_userinfo=False,
++        allowed_private_origins=("http://127.0.0.1:8065",),
++        resolve_dns=False,
++    )
++
++
++def test_dns_resolution_to_private_or_cname_target_is_blocked(monkeypatch):
++    monkeypatch.setattr("tools.safe_http.is_safe_url", lambda _url: True)
++    monkeypatch.setattr("tools.safe_http._resolve_host_ips", lambda _host, _port: [ipaddress.ip_address("10.0.0.7")])
++    with pytest.raises(SafeHTTPError, match="unsafe DNS target"):
++        _validate_url("https://public-name.example/file", allow_userinfo=False, resolve_dns=True)
++
++
++def test_dns_resolution_to_public_target_is_allowed(monkeypatch):
++    monkeypatch.setattr("tools.safe_http.is_safe_url", lambda _url: True)
++    monkeypatch.setattr("tools.safe_http._resolve_host_ips", lambda _host, _port: [ipaddress.ip_address("93.184.216.34")])
++    _validate_url("https://example.com/file", allow_userinfo=False, resolve_dns=True)

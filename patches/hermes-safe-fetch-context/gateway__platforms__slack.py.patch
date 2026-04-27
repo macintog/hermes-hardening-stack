@@ -1,21 +1,21 @@
 diff --git a/gateway/platforms/slack.py b/gateway/platforms/slack.py
-index 191689a5..f402ea07 100644
+index ea75130a..ebfaa015 100644
 --- a/gateway/platforms/slack.py
 +++ b/gateway/platforms/slack.py
-@@ -79,6 +79,9 @@ class SlackAdapter(BasePlatformAdapter):
+@@ -270,6 +270,9 @@ class SlackAdapter(BasePlatformAdapter):
      """
-
+ 
      MAX_MESSAGE_LENGTH = 39000  # Slack API allows 40,000 chars; leave margin
 +    # Slack file downloads can include images, audio, and supported documents.
 +    # Keep the helper-local cap aligned with the existing bot document limit.
 +    MAX_FILE_DOWNLOAD_BYTES = 20 * 1024 * 1024
-
+ 
      def __init__(self, config: PlatformConfig):
          super().__init__(config, Platform.SLACK)
-@@ -1648,8 +1651,73 @@ class SlackAdapter(BasePlatformAdapter):
+@@ -2310,8 +2313,73 @@ class SlackAdapter(BasePlatformAdapter):
          except Exception:
              return False
-
+ 
 +    def _slack_file_download_headers(self, team_id: str = "") -> Dict[str, str]:
 +        bot_token = self._team_clients[team_id].token if team_id and team_id in self._team_clients else self.config.token
 +        return {"Authorization": f"Bearer {bot_token}"}
@@ -84,10 +84,10 @@ index 191689a5..f402ea07 100644
 +            return cache_image_from_bytes(result.content, ext)
 +
          import httpx
-
+ 
          bot_token = self._team_clients[team_id].token if team_id and team_id in self._team_clients else self.config.token
-@@ -1693,6 +1761,20 @@ class SlackAdapter(BasePlatformAdapter):
-
+@@ -2355,6 +2423,20 @@ class SlackAdapter(BasePlatformAdapter):
+ 
      async def _download_slack_file_bytes(self, url: str, team_id: str = "") -> bytes:
          """Download a Slack file and return raw bytes, with retry."""
 +        result = await self._safe_download_slack_file_bytes(url, team_id=team_id, media_kind="document")
@@ -105,5 +105,5 @@ index 191689a5..f402ea07 100644
 +        return result.content
 +
          import httpx
-
+ 
          bot_token = self._team_clients[team_id].token if team_id and team_id in self._team_clients else self.config.token

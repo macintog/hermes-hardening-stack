@@ -1,8 +1,8 @@
 diff --git a/tests/gateway/test_media_download_retry.py b/tests/gateway/test_media_download_retry.py
-index 5b5add26..91b48092 100644
+index c43ad092..91b48092 100644
 --- a/tests/gateway/test_media_download_retry.py
 +++ b/tests/gateway/test_media_download_retry.py
-@@ -1,923 +1,285 @@
+@@ -1,981 +1,285 @@
 -"""
 -Tests for media download retry logic added in PR #2982.
 -
@@ -16,14 +16,14 @@ index 5b5add26..91b48092 100644
 -in this environment.
 -"""
 +"""Retry tests for gateway media downloads using the safe_http path."""
-
+ 
  import asyncio
 -import sys
  from unittest.mock import AsyncMock, MagicMock, patch
-
+ 
  import pytest
 -import httpx
-
+ 
 -# ---------------------------------------------------------------------------
 -# Helpers for building httpx exceptions
 -# ---------------------------------------------------------------------------
@@ -50,21 +50,21 @@ index 5b5add26..91b48092 100644
 +        policy={},
 +        headers={"content-type": content_type},
      )
-
-
+ 
+ 
 -def _make_timeout_error() -> httpx.TimeoutException:
 -    return httpx.TimeoutException("timed out")
 +def _transport_error() -> SafeHTTPError:
 +    return SafeHTTPError("HTTP download failed for https://cdn.example.com/media: ReadTimeout")
-
-
+ 
+ 
 -# ---------------------------------------------------------------------------
 -# cache_image_from_bytes (base.py)
 -# ---------------------------------------------------------------------------
 +def _status_error(status: int) -> SafeHTTPError:
 +    return SafeHTTPError(f"HTTP status {status} downloading https://cdn.example.com/media")
-
-
+ 
+ 
  class TestCacheImageFromBytes:
 -    """Tests for gateway.platforms.base.cache_image_from_bytes"""
 -
@@ -74,36 +74,36 @@ index 5b5add26..91b48092 100644
 +
          path = cache_image_from_bytes(b"\xff\xd8\xff fake jpeg data", ".jpg")
          assert path.endswith(".jpg")
-
+ 
      def test_caches_valid_png(self, tmp_path, monkeypatch):
          monkeypatch.setattr("gateway.platforms.base.IMAGE_CACHE_DIR", tmp_path / "img")
          from gateway.platforms.base import cache_image_from_bytes
 +
          path = cache_image_from_bytes(b"\x89PNG\r\n\x1a\n fake png data", ".png")
          assert path.endswith(".png")
-
+ 
      def test_rejects_html_content(self, tmp_path, monkeypatch):
          monkeypatch.setattr("gateway.platforms.base.IMAGE_CACHE_DIR", tmp_path / "img")
          from gateway.platforms.base import cache_image_from_bytes
 +
          with pytest.raises(ValueError, match="non-image data"):
              cache_image_from_bytes(b"<!DOCTYPE html><html><title>Slack</title></html>", ".png")
-
+ 
      def test_rejects_empty_data(self, tmp_path, monkeypatch):
          monkeypatch.setattr("gateway.platforms.base.IMAGE_CACHE_DIR", tmp_path / "img")
          from gateway.platforms.base import cache_image_from_bytes
 +
          with pytest.raises(ValueError, match="non-image data"):
              cache_image_from_bytes(b"", ".jpg")
-
+ 
      def test_rejects_plain_text(self, tmp_path, monkeypatch):
          monkeypatch.setattr("gateway.platforms.base.IMAGE_CACHE_DIR", tmp_path / "img")
          from gateway.platforms.base import cache_image_from_bytes
 +
          with pytest.raises(ValueError, match="non-image data"):
              cache_image_from_bytes(b"just some text, not an image", ".jpg")
-
-
+ 
+ 
 -# ---------------------------------------------------------------------------
 -# cache_image_from_url (base.py)
 -# ---------------------------------------------------------------------------
@@ -126,7 +126,7 @@ index 5b5add26..91b48092 100644
 -        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
 -        mock_client.__aexit__ = AsyncMock(return_value=False)
 +        mock_download = AsyncMock(return_value=_result())
-
+ 
          async def run():
 -            with patch("httpx.AsyncClient", return_value=mock_client):
 +            with patch("tools.safe_http.safe_download_bytes", mock_download):
@@ -136,12 +136,12 @@ index 5b5add26..91b48092 100644
 -                )
 +
 +                return await cache_image_from_url("https://cdn.example.com/img.jpg", ext=".jpg")
-
+ 
          path = asyncio.run(run())
          assert path.endswith(".jpg")
 -        mock_client.get.assert_called_once()
 +        mock_download.assert_awaited_once()
-
+ 
 -    def test_retries_on_timeout_then_succeeds(self, _mock_safe, tmp_path, monkeypatch):
 -        """A timeout on the first attempt is retried; second attempt succeeds."""
 +    def test_retries_on_transport_error_then_succeeds(self, tmp_path, monkeypatch):
@@ -160,7 +160,7 @@ index 5b5add26..91b48092 100644
 -
 +        mock_download = AsyncMock(side_effect=[_transport_error(), _result()])
          mock_sleep = AsyncMock()
-
+ 
          async def run():
 -            with patch("httpx.AsyncClient", return_value=mock_client), \
 -                 patch("asyncio.sleep", mock_sleep):
@@ -171,14 +171,14 @@ index 5b5add26..91b48092 100644
 -                )
 +
 +                return await cache_image_from_url("https://cdn.example.com/img.jpg", ext=".jpg", retries=2)
-
+ 
          path = asyncio.run(run())
          assert path.endswith(".jpg")
 -        assert mock_client.get.call_count == 2
 -        mock_sleep.assert_called_once()
 +        assert mock_download.await_count == 2
 +        mock_sleep.assert_awaited_once()
-
+ 
 -    def test_retries_on_429_then_succeeds(self, _mock_safe, tmp_path, monkeypatch):
 -        """A 429 response on the first attempt is retried; second attempt succeeds."""
 +    def test_retries_on_429_then_succeeds(self, tmp_path, monkeypatch):
@@ -195,7 +195,7 @@ index 5b5add26..91b48092 100644
 -        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
 -        mock_client.__aexit__ = AsyncMock(return_value=False)
 +        mock_download = AsyncMock(side_effect=[_status_error(429), _result()])
-
+ 
          async def run():
 -            with patch("httpx.AsyncClient", return_value=mock_client), \
 -                 patch("asyncio.sleep", new_callable=AsyncMock):
@@ -204,18 +204,18 @@ index 5b5add26..91b48092 100644
 -                return await cache_image_from_url(
 -                    "http://example.com/img.jpg", ext=".jpg", retries=2
 -                )
-
+ 
 -        path = asyncio.run(run())
 -        assert path.endswith(".jpg")
 -        assert mock_client.get.call_count == 2
 +                return await cache_image_from_url("https://cdn.example.com/img.jpg", ext=".jpg", retries=2)
-
+ 
 -    def test_raises_after_max_retries_exhausted(self, _mock_safe, tmp_path, monkeypatch):
 -        """Timeout on every attempt raises after all retries are consumed."""
 -        monkeypatch.setattr("gateway.platforms.base.IMAGE_CACHE_DIR", tmp_path / "img")
 +        assert asyncio.run(run()).endswith(".jpg")
 +        assert mock_download.await_count == 2
-
+ 
 -        mock_client = AsyncMock()
 -        mock_client.get = AsyncMock(side_effect=_make_timeout_error())
 -        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -223,7 +223,7 @@ index 5b5add26..91b48092 100644
 +    def test_raises_after_max_retries_exhausted(self, tmp_path, monkeypatch):
 +        monkeypatch.setattr("gateway.platforms.base.IMAGE_CACHE_DIR", tmp_path / "img")
 +        mock_download = AsyncMock(side_effect=_transport_error())
-
+ 
          async def run():
 -            with patch("httpx.AsyncClient", return_value=mock_client), \
 -                 patch("asyncio.sleep", new_callable=AsyncMock):
@@ -232,17 +232,17 @@ index 5b5add26..91b48092 100644
 -                await cache_image_from_url(
 -                    "http://example.com/img.jpg", ext=".jpg", retries=2
 -                )
-
+ 
 -        with pytest.raises(httpx.TimeoutException):
 -            asyncio.run(run())
 +                await cache_image_from_url("https://cdn.example.com/img.jpg", ext=".jpg", retries=2)
-
+ 
 -        # 3 total calls: initial + 2 retries
 -        assert mock_client.get.call_count == 3
 +        with pytest.raises(SafeHTTPError, match="HTTP download failed"):
 +            asyncio.run(run())
 +        assert mock_download.await_count == 3
-
+ 
 -    def test_non_retryable_4xx_raises_immediately(self, _mock_safe, tmp_path, monkeypatch):
 -        """A 404 (non-retryable) is raised immediately without any retry."""
 +    def test_non_retryable_4xx_raises_immediately(self, tmp_path, monkeypatch):
@@ -254,7 +254,7 @@ index 5b5add26..91b48092 100644
 -        mock_client.get = AsyncMock(side_effect=_make_http_status_error(404))
 -        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
 -        mock_client.__aexit__ = AsyncMock(return_value=False)
-
+ 
          async def run():
 -            with patch("httpx.AsyncClient", return_value=mock_client), \
 -                 patch("asyncio.sleep", mock_sleep):
@@ -266,21 +266,21 @@ index 5b5add26..91b48092 100644
 -
 -        with pytest.raises(httpx.HTTPStatusError):
 -            asyncio.run(run())
-
+ 
 -        # Only 1 attempt, no sleep
 -        assert mock_client.get.call_count == 1
 -        mock_sleep.assert_not_called()
 +                await cache_image_from_url("https://cdn.example.com/img.jpg", ext=".jpg", retries=2)
-
+ 
 +        with pytest.raises(SafeHTTPError, match="HTTP status 404"):
 +            asyncio.run(run())
 +        assert mock_download.await_count == 1
 +        mock_sleep.assert_not_awaited()
-
+ 
 -# ---------------------------------------------------------------------------
 -# cache_audio_from_url (base.py)
 -# ---------------------------------------------------------------------------
-
+ 
 -@patch("tools.url_safety.is_safe_url", return_value=True)
  class TestCacheAudioFromUrl:
 -    """Tests for gateway.platforms.base.cache_audio_from_url"""
@@ -403,7 +403,7 @@ index 5b5add26..91b48092 100644
 -        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
 -        mock_client.__aexit__ = AsyncMock(return_value=False)
 +        mock_download = AsyncMock(return_value=_result(b"OggS audio", content_type="audio/ogg"))
-
+ 
          async def run():
 -            with patch("httpx.AsyncClient", return_value=mock_client), \
 -                 patch("asyncio.sleep", new_callable=AsyncMock):
@@ -412,16 +412,16 @@ index 5b5add26..91b48092 100644
 -                await cache_audio_from_url(
 -                    "http://example.com/voice.ogg", ext=".ogg", retries=2
 -                )
-
+ 
 -        with pytest.raises(httpx.TimeoutException):
 -            asyncio.run(run())
 +                return await cache_audio_from_url("https://cdn.example.com/voice.ogg", ext=".ogg")
-
+ 
 -        # 3 total calls: initial + 2 retries
 -        assert mock_client.get.call_count == 3
 +        assert asyncio.run(run()).endswith(".ogg")
 +        mock_download.assert_awaited_once()
-
+ 
 -    def test_non_retryable_4xx_raises_immediately(self, _mock_safe, tmp_path, monkeypatch):
 -        """A 404 (non-retryable) is raised immediately without any retry."""
 +    def test_retries_on_500_then_succeeds(self, tmp_path, monkeypatch):
@@ -433,7 +433,7 @@ index 5b5add26..91b48092 100644
 -        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
 -        mock_client.__aexit__ = AsyncMock(return_value=False)
 +        mock_download = AsyncMock(side_effect=[_status_error(500), _result(b"OggS audio", content_type="audio/ogg")])
-
+ 
          async def run():
 -            with patch("httpx.AsyncClient", return_value=mock_client), \
 -                 patch("asyncio.sleep", mock_sleep):
@@ -449,16 +449,16 @@ index 5b5add26..91b48092 100644
 -        # Only 1 attempt, no sleep
 -        assert mock_client.get.call_count == 1
 -        mock_sleep.assert_not_called()
--
-
+ 
++                return await cache_audio_from_url("https://cdn.example.com/voice.ogg", ext=".ogg", retries=2)
+ 
 -# ---------------------------------------------------------------------------
 -# SSRF redirect guard tests (base.py)
 -# ---------------------------------------------------------------------------
-+                return await cache_audio_from_url("https://cdn.example.com/voice.ogg", ext=".ogg", retries=2)
-
 +        assert asyncio.run(run()).endswith(".ogg")
 +        assert mock_download.await_count == 2
-
+ 
+-
 -class TestSSRFRedirectGuard:
 -    """cache_image_from_url / cache_audio_from_url must reject redirects
 -    that land on private/internal hosts (e.g. cloud metadata endpoint)."""
@@ -533,7 +533,7 @@ index 5b5add26..91b48092 100644
 -        def fake_safe(url):
 -            return url == "https://public.example.com/voice.ogg"
 +        mock_download = AsyncMock(side_effect=_status_error(404))
-
+ 
          async def run():
 -            with patch("tools.url_safety.is_safe_url", side_effect=fake_safe), \
 -                 patch("httpx.AsyncClient", side_effect=factory):
@@ -553,17 +553,17 @@ index 5b5add26..91b48092 100644
 -        redirect_resp = self._make_redirect_response(
 -            "https://cdn.example.com/real-image.png"
 -        )
--
+ 
 -        ok_response = MagicMock()
 -        ok_response.content = b"\xff\xd8\xff fake jpeg"
 -        ok_response.raise_for_status = MagicMock()
 -        ok_response.is_redirect = False
-
--        mock_client, captured, factory = self._make_client_capturing_hooks()
 +                with pytest.raises(SafeHTTPError, match="HTTP status 404"):
 +                    await cache_audio_from_url("https://cdn.example.com/voice.ogg", ext=".ogg", retries=2)
 +                sleep.assert_not_awaited()
-
+ 
+-        mock_client, captured, factory = self._make_client_capturing_hooks()
+-
 -        call_count = 0
 -
 -        async def fake_get(_url, **kwargs):
@@ -624,67 +624,93 @@ index 5b5add26..91b48092 100644
 -
 -
 -def _make_slack_adapter():
--    config = PlatformConfig(enabled=True, token="xoxb-fake-token")
+-    config = PlatformConfig(enabled=True, token="***")
 -    adapter = SlackAdapter(config)
 -    adapter._app = MagicMock()
 -    adapter._app.client = AsyncMock()
 -    adapter._bot_user_id = "U_BOT"
 -    adapter._running = True
 -    return adapter
-+        asyncio.run(run())
-+        assert mock_download.await_count == 1
-
-
+-
+-
+-# ---------------------------------------------------------------------------
+-# SlackAdapter diagnostics helpers
+-# ---------------------------------------------------------------------------
+-
+-class TestSlackAttachmentDiagnostics:
+-    def test_missing_scope_error_returns_actionable_notice(self):
+-        """_describe_slack_api_error translates a missing_scope response into
+-        a user-facing notice mentioning the needed scope and the reinstall
+-        step. This is the helper used by every files.info call site (Slack
+-        Connect stubs + post-download failures) to surface scope problems
+-        without making an extra probe call per attachment.
+-        """
+-        adapter = _make_slack_adapter()
+-
+-        response = {
+-            "error": "missing_scope",
+-            "needed": "files:read",
+-            "provided": "chat:write,files:write",
+-        }
+-        detail = adapter._describe_slack_api_error(response, file_obj={"id": "F123", "name": "photo.jpg"})
+-        assert detail is not None
+-        assert "files:read" in detail
+-        assert "reinstall" in detail.lower()
+-        assert "chat:write,files:write" in detail
+-
+-    def test_download_failure_403_returns_permission_notice(self):
+-        adapter = _make_slack_adapter()
+-        exc = _make_http_status_error(403)
+-        detail = adapter._describe_slack_download_failure(exc, file_obj={"name": "report.pdf"})
+-        assert "403" in detail
+-        assert "permission or scope" in detail
+-
+-
 -# ---------------------------------------------------------------------------
 -# SlackAdapter._download_slack_file
 -# ---------------------------------------------------------------------------
+-
+-class TestSlackDownloadSlackFile:
+-    """Tests for SlackAdapter._download_slack_file"""
+-
+-    def test_success_on_first_attempt(self, tmp_path, monkeypatch):
+-        """Successful download on first try returns a cached file path."""
+-        monkeypatch.setattr("gateway.platforms.base.IMAGE_CACHE_DIR", tmp_path / "img")
+-        adapter = _make_slack_adapter()
++        asyncio.run(run())
++        assert mock_download.await_count == 1
+ 
+-        fake_response = MagicMock()
+-        fake_response.content = b"\x89PNG\r\n\x1a\n fake png"
+-        fake_response.raise_for_status = MagicMock()
+-        fake_response.headers = {"content-type": "image/png"}
+ 
+-        mock_client = AsyncMock()
+-        mock_client.get = AsyncMock(return_value=fake_response)
+-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+-        mock_client.__aexit__ = AsyncMock(return_value=False)
 +class TestSlackDownloads:
 +    def _adapter(self):
 +        from gateway.platforms.slack import SlackAdapter
-
--class TestSlackDownloadSlackFile:
--    """Tests for SlackAdapter._download_slack_file"""
+ 
+-        async def run():
+-            with patch("httpx.AsyncClient", return_value=mock_client):
+-                return await adapter._download_slack_file(
+-                    "https://files.slack.com/img.jpg", ext=".jpg"
+-                )
 +        adapter = SlackAdapter.__new__(SlackAdapter)
 +        adapter.config = MagicMock(token="xoxb-test")
 +        adapter._team_clients = {}
 +        adapter.MAX_FILE_DOWNLOAD_BYTES = 10 * 1024 * 1024
 +        return adapter
-
--    def test_success_on_first_attempt(self, tmp_path, monkeypatch):
--        """Successful download on first try returns a cached file path."""
-+    def test_download_slack_file_caches_image(self, tmp_path, monkeypatch):
-         monkeypatch.setattr("gateway.platforms.base.IMAGE_CACHE_DIR", tmp_path / "img")
--        adapter = _make_slack_adapter()
--
--        fake_response = MagicMock()
--        fake_response.content = b"\x89PNG\r\n\x1a\n fake png"
--        fake_response.raise_for_status = MagicMock()
--        fake_response.headers = {"content-type": "image/png"}
--
--        mock_client = AsyncMock()
--        mock_client.get = AsyncMock(return_value=fake_response)
--        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
--        mock_client.__aexit__ = AsyncMock(return_value=False)
-+        adapter = self._adapter()
-+        mock_download = AsyncMock(return_value=_result(b"\x89PNG\r\n\x1a\n image", content_type="image/png"))
-
-         async def run():
--            with patch("httpx.AsyncClient", return_value=mock_client):
--                return await adapter._download_slack_file(
--                    "https://files.slack.com/img.jpg", ext=".jpg"
--                )
-+            with patch("tools.safe_http.safe_download_bytes", mock_download):
-+                return await adapter._download_slack_file("https://files.slack.com/img.png", ext=".png")
-
+ 
 -        path = asyncio.run(run())
 -        assert path.endswith(".jpg")
 -        mock_client.get.assert_called_once()
-+        assert asyncio.run(run()).endswith(".png")
-+        mock_download.assert_awaited_once()
-
+-
 -    def test_rejects_html_response(self, tmp_path, monkeypatch):
 -        """An HTML sign-in page from Slack is rejected, not cached as image."""
-+    def test_download_slack_file_retries_transport_error(self, tmp_path, monkeypatch):
++    def test_download_slack_file_caches_image(self, tmp_path, monkeypatch):
          monkeypatch.setattr("gateway.platforms.base.IMAGE_CACHE_DIR", tmp_path / "img")
 -        adapter = _make_slack_adapter()
 -
@@ -698,29 +724,30 @@ index 5b5add26..91b48092 100644
 -        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
 -        mock_client.__aexit__ = AsyncMock(return_value=False)
 +        adapter = self._adapter()
-+        mock_download = AsyncMock(side_effect=[_transport_error(), _result()])
-
++        mock_download = AsyncMock(return_value=_result(b"\x89PNG\r\n\x1a\n image", content_type="image/png"))
+ 
          async def run():
 -            with patch("httpx.AsyncClient", return_value=mock_client):
 -                await adapter._download_slack_file(
 -                    "https://files.slack.com/img.jpg", ext=".jpg"
 -                )
-+            with patch("tools.safe_http.safe_download_bytes", mock_download), patch("asyncio.sleep", new_callable=AsyncMock):
-+                return await adapter._download_slack_file("https://files.slack.com/img.jpg", ext=".jpg")
-
+-
 -        with pytest.raises(ValueError, match="HTML instead of media"):
 -            asyncio.run(run())
-+        assert asyncio.run(run()).endswith(".jpg")
-+        assert mock_download.await_count == 2
-
++            with patch("tools.safe_http.safe_download_bytes", mock_download):
++                return await adapter._download_slack_file("https://files.slack.com/img.png", ext=".png")
+ 
 -        # Verify nothing was cached
 -        img_dir = tmp_path / "img"
 -        if img_dir.exists():
 -            assert list(img_dir.iterdir()) == []
--
++        assert asyncio.run(run()).endswith(".png")
++        mock_download.assert_awaited_once()
+ 
 -    def test_retries_on_timeout_then_succeeds(self, tmp_path, monkeypatch):
 -        """Timeout on first attempt triggers retry; success on second."""
--        monkeypatch.setattr("gateway.platforms.base.IMAGE_CACHE_DIR", tmp_path / "img")
++    def test_download_slack_file_retries_transport_error(self, tmp_path, monkeypatch):
+         monkeypatch.setattr("gateway.platforms.base.IMAGE_CACHE_DIR", tmp_path / "img")
 -        adapter = _make_slack_adapter()
 -
 -        fake_response = MagicMock()
@@ -736,19 +763,25 @@ index 5b5add26..91b48092 100644
 -        mock_client.__aexit__ = AsyncMock(return_value=False)
 -
 -        mock_sleep = AsyncMock()
--
--        async def run():
++        adapter = self._adapter()
++        mock_download = AsyncMock(side_effect=[_transport_error(), _result()])
+ 
+         async def run():
 -            with patch("httpx.AsyncClient", return_value=mock_client), \
 -                 patch("asyncio.sleep", mock_sleep):
 -                return await adapter._download_slack_file(
 -                    "https://files.slack.com/img.jpg", ext=".jpg"
 -                )
--
++            with patch("tools.safe_http.safe_download_bytes", mock_download), patch("asyncio.sleep", new_callable=AsyncMock):
++                return await adapter._download_slack_file("https://files.slack.com/img.jpg", ext=".jpg")
+ 
 -        path = asyncio.run(run())
 -        assert path.endswith(".jpg")
 -        assert mock_client.get.call_count == 2
 -        mock_sleep.assert_called_once()
--
++        assert asyncio.run(run()).endswith(".jpg")
++        assert mock_download.await_count == 2
+ 
 -    def test_raises_after_max_retries(self, tmp_path, monkeypatch):
 -        """Timeout on every attempt eventually raises after 3 total tries."""
 -        monkeypatch.setattr("gateway.platforms.base.IMAGE_CACHE_DIR", tmp_path / "img")
@@ -761,7 +794,7 @@ index 5b5add26..91b48092 100644
 +    def test_download_slack_file_bytes_returns_bytes(self):
 +        adapter = self._adapter()
 +        mock_download = AsyncMock(return_value=_result(b"raw bytes", content_type="application/octet-stream"))
-
+ 
          async def run():
 -            with patch("httpx.AsyncClient", return_value=mock_client), \
 -                 patch("asyncio.sleep", new_callable=AsyncMock):
@@ -770,14 +803,14 @@ index 5b5add26..91b48092 100644
 -                )
 +            with patch("tools.safe_http.safe_download_bytes", mock_download):
 +                return await adapter._download_slack_file_bytes("https://files.slack.com/file.bin")
-
+ 
 -        with pytest.raises(httpx.TimeoutException):
 -            asyncio.run(run())
--
--        assert mock_client.get.call_count == 3
 +        assert asyncio.run(run()) == b"raw bytes"
 +        mock_download.assert_awaited_once()
-
+ 
+-        assert mock_client.get.call_count == 3
+-
 -    def test_non_retryable_403_raises_immediately(self, tmp_path, monkeypatch):
 -        """A 403 is not retried; it raises immediately."""
 -        monkeypatch.setattr("gateway.platforms.base.IMAGE_CACHE_DIR", tmp_path / "img")
@@ -791,7 +824,7 @@ index 5b5add26..91b48092 100644
 +    def test_download_slack_file_bytes_raises_after_retries(self):
 +        adapter = self._adapter()
 +        mock_download = AsyncMock(side_effect=_transport_error())
-
+ 
          async def run():
 -            with patch("httpx.AsyncClient", return_value=mock_client), \
 -                 patch("asyncio.sleep", mock_sleep):
@@ -800,12 +833,12 @@ index 5b5add26..91b48092 100644
 -                )
 +            with patch("tools.safe_http.safe_download_bytes", mock_download), patch("asyncio.sleep", new_callable=AsyncMock):
 +                await adapter._download_slack_file_bytes("https://files.slack.com/file.bin")
-
+ 
 -        with pytest.raises(httpx.HTTPStatusError):
 +        with pytest.raises(SafeHTTPError, match="HTTP download failed"):
              asyncio.run(run())
 +        assert mock_download.await_count == 3
-
+ 
 -        assert mock_client.get.call_count == 1
 -        mock_sleep.assert_not_called()
 -
@@ -816,7 +849,7 @@ index 5b5add26..91b48092 100644
 -
 -class TestSlackDownloadSlackFileBytes:
 -    """Tests for SlackAdapter._download_slack_file_bytes"""
--
+ 
 -    def test_success_returns_bytes(self):
 -        """Successful download returns raw bytes."""
 -        adapter = _make_slack_adapter()
@@ -824,6 +857,7 @@ index 5b5add26..91b48092 100644
 -        fake_response = MagicMock()
 -        fake_response.content = b"raw bytes here"
 -        fake_response.raise_for_status = MagicMock()
+-        fake_response.headers = {"content-type": "application/pdf"}
 -
 -        mock_client = AsyncMock()
 -        mock_client.get = AsyncMock(return_value=fake_response)
@@ -835,9 +869,32 @@ index 5b5add26..91b48092 100644
 -                return await adapter._download_slack_file_bytes(
 -                    "https://files.slack.com/file.bin"
 -                )
-
+-
 -        result = asyncio.run(run())
 -        assert result == b"raw bytes here"
+-
+-    def test_rejects_html_response(self):
+-        """Slack HTML sign-in pages should not be accepted as file bytes."""
+-        adapter = _make_slack_adapter()
+-
+-        fake_response = MagicMock()
+-        fake_response.content = b"<!DOCTYPE html><html><title>Slack</title></html>"
+-        fake_response.raise_for_status = MagicMock()
+-        fake_response.headers = {"content-type": "text/html; charset=utf-8"}
+-
+-        mock_client = AsyncMock()
+-        mock_client.get = AsyncMock(return_value=fake_response)
+-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+-        mock_client.__aexit__ = AsyncMock(return_value=False)
+-
+-        async def run():
+-            with patch("httpx.AsyncClient", return_value=mock_client):
+-                await adapter._download_slack_file_bytes(
+-                    "https://files.slack.com/file.bin"
+-                )
+-
+-        with pytest.raises(ValueError, match="HTML instead of file bytes"):
+-            asyncio.run(run())
 -
 -    def test_retries_on_429_then_succeeds(self):
 -        """429 on first attempt is retried; raw bytes returned on second."""
@@ -846,6 +903,7 @@ index 5b5add26..91b48092 100644
 -        ok_response = MagicMock()
 -        ok_response.content = b"final bytes"
 -        ok_response.raise_for_status = MagicMock()
+-        ok_response.headers = {"content-type": "application/pdf"}
 -
 -        mock_client = AsyncMock()
 -        mock_client.get = AsyncMock(
@@ -927,13 +985,22 @@ index 5b5add26..91b48092 100644
 -        adapter = _make_mm_adapter()
 -        resp = _make_aiohttp_resp(200)
 -        adapter._session.get = MagicMock(return_value=resp)
--
++    def _adapter(self):
++        from gateway.platforms.mattermost import MattermostAdapter
+ 
 -        async def run():
 -            with patch("asyncio.sleep", new_callable=AsyncMock):
 -                return await adapter._send_url_as_file(
 -                    "C123", "http://cdn.example.com/img.png", "caption", None
 -                )
--
++        adapter = MattermostAdapter.__new__(MattermostAdapter)
++        adapter._base_url = "https://mattermost.example"
++        adapter._token = "token"
++        adapter._upload_file = AsyncMock(return_value={"file_infos": [{"id": "file-id"}]})
++        adapter._api_post = AsyncMock(return_value={"id": "post-id"})
++        adapter.send = AsyncMock()
++        return adapter
+ 
 -        result = asyncio.run(run())
 -        assert result.success
 -        adapter._upload_file.assert_called_once()
@@ -942,25 +1009,16 @@ index 5b5add26..91b48092 100644
 -    def test_retries_on_429_then_succeeds(self, _mock_safe):
 -        """429 on first attempt is retried; 200 on second attempt succeeds."""
 -        adapter = _make_mm_adapter()
-+    def _adapter(self):
-+        from gateway.platforms.mattermost import MattermostAdapter
-
+-
 -        resp_429 = _make_aiohttp_resp(429)
 -        resp_200 = _make_aiohttp_resp(200)
 -        adapter._session.get = MagicMock(side_effect=[resp_429, resp_200])
-+        adapter = MattermostAdapter.__new__(MattermostAdapter)
-+        adapter._base_url = "https://mattermost.example"
-+        adapter._token = "token"
-+        adapter._upload_file = AsyncMock(return_value={"file_infos": [{"id": "file-id"}]})
-+        adapter._api_post = AsyncMock(return_value={"id": "post-id"})
-+        adapter.send = AsyncMock()
-+        return adapter
-
+-
 -        mock_sleep = AsyncMock()
 +    def test_success_uploads_downloaded_url(self):
 +        adapter = self._adapter()
 +        mock_download = AsyncMock(return_value=_result(b"\x89PNG\r\n\x1a\n image", content_type="image/png"))
-
+ 
          async def run():
 -            with patch("asyncio.sleep", mock_sleep):
 -                return await adapter._send_url_as_file(
@@ -968,25 +1026,25 @@ index 5b5add26..91b48092 100644
 -                )
 +            with patch("gateway.platforms.mattermost.safe_download_bytes", mock_download):
 +                return await adapter._send_url_as_file("C123", "https://cdn.example.com/img.png", "caption", None)
-
+ 
          result = asyncio.run(run())
          assert result.success
 -        assert adapter._session.get.call_count == 2
 -        mock_sleep.assert_called_once()
--
++        adapter._upload_file.assert_awaited_once()
++        adapter._api_post.assert_awaited_once()
+ 
 -    def test_retries_on_500_then_succeeds(self, _mock_safe):
 -        """5xx on first attempt is retried; 200 on second attempt succeeds."""
 -        adapter = _make_mm_adapter()
-+        adapter._upload_file.assert_awaited_once()
-+        adapter._api_post.assert_awaited_once()
-
+-
 -        resp_500 = _make_aiohttp_resp(500)
 -        resp_200 = _make_aiohttp_resp(200)
 -        adapter._session.get = MagicMock(side_effect=[resp_500, resp_200])
 +    def test_safe_download_failure_falls_back_to_send(self):
 +        adapter = self._adapter()
 +        mock_download = AsyncMock(side_effect=_status_error(404))
-
+ 
          async def run():
 -            with patch("asyncio.sleep", new_callable=AsyncMock):
 -                return await adapter._send_url_as_file(
@@ -994,7 +1052,7 @@ index 5b5add26..91b48092 100644
 -                )
 +            with patch("gateway.platforms.mattermost.safe_download_bytes", mock_download):
 +                return await adapter._send_url_as_file("C123", "https://cdn.example.com/img.png", None, None)
-
+ 
          result = asyncio.run(run())
          assert result.success
 -        assert adapter._session.get.call_count == 2

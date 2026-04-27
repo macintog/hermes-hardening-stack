@@ -1,6 +1,6 @@
 diff --git a/tests/gateway/test_base_media_cache_safe_http.py b/tests/gateway/test_base_media_cache_safe_http.py
 new file mode 100644
-index 00000000..838a644e
+index 00000000..500318e6
 --- /dev/null
 +++ b/tests/gateway/test_base_media_cache_safe_http.py
 @@ -0,0 +1,187 @@
@@ -121,7 +121,7 @@ index 00000000..838a644e
 +    )
 +    monkeypatch.setattr("tools.safe_http.httpx.AsyncClient", _safe_http_client(handler))
 +
-+    with pytest.raises(SafeHTTPError, match="Blocked unsafe URL target"):
++    with pytest.raises(SafeHTTPError, match="Blocked (unsafe URL target|internal hostname)"):
 +        asyncio.run(cache_image_from_url("https://public.example.test/image.png", ext=".png", retries=0))
 +
 +

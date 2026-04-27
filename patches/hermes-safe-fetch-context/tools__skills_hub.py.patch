@@ -1,5 +1,5 @@
 diff --git a/tools/skills_hub.py b/tools/skills_hub.py
-index 2b521640..83722f9c 100644
+index 0ce1d9b3..38cda8a8 100644
 --- a/tools/skills_hub.py
 +++ b/tools/skills_hub.py
 @@ -13,6 +13,7 @@ This is a library module (not an agent tool). It provides:
@@ -10,7 +10,9 @@ index 2b521640..83722f9c 100644
  import hashlib
  import json
  import logging
-@@ -918,13 +919,57 @@ class WellKnownSkillSource(SkillSource):
+@@ -916,15 +917,59 @@ class WellKnownSkillSource(SkillSource):
+                 return entry
+         return None
  
 +    @staticmethod
 +    def _run_safe_fetch(coro):

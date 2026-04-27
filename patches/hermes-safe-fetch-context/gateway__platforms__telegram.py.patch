@@ -1,5 +1,5 @@
 diff --git a/gateway/platforms/telegram.py b/gateway/platforms/telegram.py
-index 6c7658b3..6fc77c8f 100644
+index c5643cf3..e290e03d 100644
 --- a/gateway/platforms/telegram.py
 +++ b/gateway/platforms/telegram.py
 @@ -84,6 +84,7 @@ from gateway.platforms.telegram_network import (

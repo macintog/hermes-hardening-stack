@@ -1,6 +1,6 @@
 diff --git a/tests/security/test_skill_plugin_boundaries.py b/tests/security/test_skill_plugin_boundaries.py
 new file mode 100644
-index 00000000..26542e36
+index 00000000..88a537f9
 --- /dev/null
 +++ b/tests/security/test_skill_plugin_boundaries.py
 @@ -0,0 +1,251 @@

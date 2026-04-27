@@ -307,9 +307,9 @@ if "unclassified_dynamic_tool" in classified | exemptions:
 cs = Path("agent/context_safety.py").read_text(errors="replace")
 if "render_model_visible_tool_result" not in cs or "EXPLICIT_TOOL_EXEMPTIONS" not in cs:
     fail("tool-result fencing/exemption alignment helper missing")
-mt = Path("model_tools.py").read_text(errors="replace")
-if "render_model_visible_tool_result" not in mt or "evaluate_action_authority" not in mt:
-    fail("model tool dispatch no longer invokes action gate and tool-result fencing")
+dispatch_text = Path("run_agent.py").read_text(errors="replace")
+if "render_model_visible_tool_result" not in dispatch_text or "evaluate_action_authority" not in dispatch_text:
+    fail("agent tool dispatch no longer invokes action gate and tool-result fencing")
 print("static security drift guards ok")
 PY
 
