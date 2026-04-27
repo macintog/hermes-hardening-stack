@@ -1,0 +1,193 @@
+diff --git a/tests/gateway/test_base_media_cache_safe_http.py b/tests/gateway/test_base_media_cache_safe_http.py
+new file mode 100644
+index 00000000..838a644e
+--- /dev/null
++++ b/tests/gateway/test_base_media_cache_safe_http.py
+@@ -0,0 +1,187 @@
++import asyncio
++
++import httpx
++import pytest
++
++
++def _safe_http_client(handler):
++    real_async_client = httpx.AsyncClient
++
++    def factory(*args, **kwargs):
++        kwargs["transport"] = httpx.MockTransport(handler)
++        return real_async_client(*args, **kwargs)
++
++    return factory
++
++
++def test_cache_image_from_url_uses_safe_http_and_caches_bytes(tmp_path, monkeypatch):
++    from gateway.platforms.base import cache_image_from_url
++
++    monkeypatch.setattr("gateway.platforms.base.IMAGE_CACHE_DIR", tmp_path / "img")
++    captured = {}
++
++    async def handler(request):
++        captured["accept"] = request.headers.get("accept")
++        return httpx.Response(
++            200,
++            headers={"Content-Type": "image/png"},
++            content=b"\x89PNG\r\n\x1a\n fake png",
++        )
++
++    monkeypatch.setattr("tools.safe_http.is_safe_url", lambda _url: True)
++    monkeypatch.setattr("tools.safe_http.httpx.AsyncClient", _safe_http_client(handler))
++
++    path = asyncio.run(cache_image_from_url("https://cdn.example.test/image.png", ext=".png", retries=0))
++
++    assert path.endswith(".png")
++    assert (tmp_path / "img").exists()
++    assert captured["accept"].startswith("image/")
++
++
++def test_cache_audio_from_url_uses_safe_http_and_caches_bytes(tmp_path, monkeypatch):
++    from gateway.platforms.base import cache_audio_from_url
++
++    monkeypatch.setattr("gateway.platforms.base.AUDIO_CACHE_DIR", tmp_path / "audio")
++    captured = {}
++
++    async def handler(request):
++        captured["accept"] = request.headers.get("accept")
++        return httpx.Response(
++            200,
++            headers={"Content-Type": "audio/ogg"},
++            content=b"OggS fake audio",
++        )
++
++    monkeypatch.setattr("tools.safe_http.is_safe_url", lambda _url: True)
++    monkeypatch.setattr("tools.safe_http.httpx.AsyncClient", _safe_http_client(handler))
++
++    path = asyncio.run(cache_audio_from_url("https://cdn.example.test/voice.ogg", ext=".ogg", retries=0))
++
++    assert path.endswith(".ogg")
++    assert (tmp_path / "audio").exists()
++    assert captured["accept"].startswith("audio/")
++
++
++@pytest.mark.parametrize("headers", [{"Content-Type": "application/octet-stream"}, {}])
++def test_cache_image_from_url_accepts_generic_or_missing_content_type(tmp_path, monkeypatch, headers):
++    from gateway.platforms.base import cache_image_from_url
++
++    monkeypatch.setattr("gateway.platforms.base.IMAGE_CACHE_DIR", tmp_path / "img")
++
++    async def handler(request):
++        return httpx.Response(200, headers=headers, content=b"\x89PNG\r\n\x1a\n valid png")
++
++    monkeypatch.setattr("tools.safe_http.is_safe_url", lambda _url: True)
++    monkeypatch.setattr("tools.safe_http.httpx.AsyncClient", _safe_http_client(handler))
++
++    path = asyncio.run(cache_image_from_url("https://cdn.example.test/image", ext=".png", retries=0))
++
++    assert path.endswith(".png")
++    assert (tmp_path / "img").exists()
++
++
++@pytest.mark.parametrize("headers", [{"Content-Type": "application/octet-stream"}, {}])
++def test_cache_audio_from_url_accepts_generic_or_missing_content_type(tmp_path, monkeypatch, headers):
++    from gateway.platforms.base import cache_audio_from_url
++
++    monkeypatch.setattr("gateway.platforms.base.AUDIO_CACHE_DIR", tmp_path / "audio")
++
++    async def handler(request):
++        return httpx.Response(200, headers=headers, content=b"OggS valid audio")
++
++    monkeypatch.setattr("tools.safe_http.is_safe_url", lambda _url: True)
++    monkeypatch.setattr("tools.safe_http.httpx.AsyncClient", _safe_http_client(handler))
++
++    path = asyncio.run(cache_audio_from_url("https://cdn.example.test/voice", ext=".ogg", retries=0))
++
++    assert path.endswith(".ogg")
++    assert (tmp_path / "audio").exists()
++
++
++def test_cache_image_from_url_blocks_redirect_to_private_target(tmp_path, monkeypatch):
++    from gateway.platforms.base import cache_image_from_url
++    from tools.safe_http import SafeHTTPError
++
++    monkeypatch.setattr("gateway.platforms.base.IMAGE_CACHE_DIR", tmp_path / "img")
++
++    async def handler(request):
++        if str(request.url) == "https://public.example.test/image.png":
++            return httpx.Response(302, headers={"Location": "http://169.254.169.254/latest/meta-data"})
++        return httpx.Response(200, headers={"Content-Type": "image/png"}, content=b"\x89PNG\r\n\x1a\n")
++
++    monkeypatch.setattr(
++        "tools.safe_http.is_safe_url",
++        lambda url: not str(url).startswith("http://169.254.169.254"),
++    )
++    monkeypatch.setattr("tools.safe_http.httpx.AsyncClient", _safe_http_client(handler))
++
++    with pytest.raises(SafeHTTPError, match="Blocked unsafe URL target"):
++        asyncio.run(cache_image_from_url("https://public.example.test/image.png", ext=".png", retries=0))
++
++
++def test_cache_audio_from_url_blocks_oversized_stream(tmp_path, monkeypatch):
++    from gateway.platforms.base import MEDIA_CACHE_MAX_BYTES, cache_audio_from_url
++    from tools.safe_http import SafeHTTPError
++
++    monkeypatch.setattr("gateway.platforms.base.AUDIO_CACHE_DIR", tmp_path / "audio")
++
++    async def handler(request):
++        return httpx.Response(
++            200,
++            headers={"Content-Type": "audio/ogg"},
++            content=b"x" * (MEDIA_CACHE_MAX_BYTES + 1),
++        )
++
++    monkeypatch.setattr("tools.safe_http.is_safe_url", lambda _url: True)
++    monkeypatch.setattr("tools.safe_http.httpx.AsyncClient", _safe_http_client(handler))
++
++    with pytest.raises(SafeHTTPError, match="Response too large"):
++        asyncio.run(cache_audio_from_url("https://cdn.example.test/voice.ogg", ext=".ogg", retries=0))
++
++
++def test_cache_image_from_url_error_redacts_credentials_and_query(tmp_path, monkeypatch):
++    from gateway.platforms.base import cache_image_from_url
++    from tools.safe_http import SafeHTTPError
++
++    monkeypatch.setattr("gateway.platforms.base.IMAGE_CACHE_DIR", tmp_path / "img")
++
++    with pytest.raises(SafeHTTPError) as excinfo:
++        asyncio.run(cache_image_from_url("https://user:secret@cdn.example.test/image.png?sig=abc", ext=".png", retries=0))
++
++    message = str(excinfo.value)
++    assert "user:secret" not in message
++    assert "sig=abc" not in message
++
++
++
++def test_cache_audio_from_url_blocks_declared_webm_with_html(tmp_path, monkeypatch):
++    from gateway.platforms.base import cache_audio_from_url
++    from tools.safe_http import SafeHTTPError
++
++    monkeypatch.setattr("gateway.platforms.base.AUDIO_CACHE_DIR", tmp_path / "audio")
++
++    async def handler(request):
++        return httpx.Response(200, headers={"Content-Type": "audio/webm"}, content=b"<html>not audio</html>")
++
++    monkeypatch.setattr("tools.safe_http.is_safe_url", lambda _url: True)
++    monkeypatch.setattr("tools.safe_http.httpx.AsyncClient", _safe_http_client(handler))
++
++    with pytest.raises(SafeHTTPError, match="bytes do not match declared type"):
++        asyncio.run(cache_audio_from_url("https://cdn.example.test/voice.webm", ext=".webm", retries=0))
++
++
++@pytest.mark.parametrize("headers", [{"Content-Type": "application/octet-stream"}, {}])
++def test_cache_audio_from_url_blocks_generic_non_audio_bytes(tmp_path, monkeypatch, headers):
++    from gateway.platforms.base import cache_audio_from_url
++    from tools.safe_http import SafeHTTPError
++
++    monkeypatch.setattr("gateway.platforms.base.AUDIO_CACHE_DIR", tmp_path / "audio")
++
++    async def handler(request):
++        return httpx.Response(200, headers=headers, content=b"<html>login page</html>")
++
++    monkeypatch.setattr("tools.safe_http.is_safe_url", lambda _url: True)
++    monkeypatch.setattr("tools.safe_http.httpx.AsyncClient", _safe_http_client(handler))
++
++    with pytest.raises(SafeHTTPError, match="bytes do not match allowed types"):
++        asyncio.run(cache_audio_from_url("https://cdn.example.test/voice", ext=".ogg", retries=0))

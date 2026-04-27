@@ -1,0 +1,29 @@
+diff --git a/HARDENING_SURFACE_INVENTORY.md b/HARDENING_SURFACE_INVENTORY.md
+new file mode 100644
+index 00000000..88e9b1b6
+--- /dev/null
++++ b/HARDENING_SURFACE_INVENTORY.md
+@@ -0,0 +1,23 @@
++# Hardening Surface Inventory
++
++## Safe-fetch completeness notes
++
++Remote-byte ingress paths verified in this workstream:
++
++- tools.safe_http.safe_download_bytes / safe_download_to_file: central untrusted HTTP download helper. Enforces http/https-only URLs, host presence, userinfo blocking by default, initial and redirect URL safety, max redirects, Content-Length and streaming byte caps, optional content-type allowlists, metadata capture, URL redaction, and same-origin binding for Authorization/Cookie-bearing requests.
++- gateway media/document fallback downloads:
++  - Discord fallback attachment/image/animation paths route through safe_download_bytes. Native discord.py attachment APIs remain platform SDK-controlled; fallback arbitrary URLs are safe-fetch protected.
++  - Telegram outbound image URL fallback routes through safe_download_bytes; inbound Telegram file downloads use Telegram Bot API file objects rather than user-supplied arbitrary URLs.
++  - Slack private file/document downloads route through safe_download_bytes with bearer-token headers; safe_http blocks credential-bearing cross-origin redirects.
++  - Mattermost URL-as-file and private file paths route through safe_download_bytes with explicit byte caps and allowed private origin for configured Mattermost server URLs.
++  - WeCom outbound media URL downloads now route through safe_download_bytes with explicit caps and redacted error logging. Inbound encrypted WeCom callback media is decrypted from platform payload bytes, not fetched from arbitrary user URLs.
++  - BlueBubbles inbound attachment downloads now route through safe_download_bytes with an explicit 50 MiB cap and allowed_private_origins restricted to the configured BlueBubbles server origin, preserving local-server compatibility while validating redirects.
++- Web extraction/crawl tools: hosted browser/search/extraction API client calls are service API calls rather than direct user URL byte downloads in-process. Returned page content must still be treated as untrusted and is not prompt-injection safe merely because a service fetched it.
++- Skill/community/GitHub/plugin paths: skill_view now attaches context-safety/provenance/authority metadata to main and linked file reads; external and plugin skill content is evidence-only by default. Well-known/community hub text fetches route through tools.safe_http.safe_download_bytes with URL validation, redirect limits, and byte caps. Plugin pre_llm_call context is fenced as untrusted plugin_context before model visibility.
++- Development/release scripts using requests/httpx are out of live agent/gateway remote-byte ingestion scope unless exposed to user-provided URLs at runtime.
++
++Residual gaps / notes:
++
++- safe_fetch is an ingress control for SSRF, redirects, credentials, caps, and redaction. It does not make fetched content trusted and does not solve prompt injection.
++- Some platform SDK methods perform provider-controlled downloads (for example Telegram and Discord native attachment APIs). They are documented here as equivalent platform-mediated controls, not safe_http call sites.
++- The broad repository still contains many HTTP API client calls for model providers, platform REST APIs, OAuth/websocket flows, and scripts. These are not all remote-byte ingestion of user-supplied URLs; direct download paths should continue to be audited as new platforms/plugins are added.

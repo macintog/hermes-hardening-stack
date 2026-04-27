@@ -1,6 +1,6 @@
 # Intent: hostile-content containment, safe fetch, and action authority
 
-Hermes accepts external data and can perform high-impact local and network actions. This stack prevents attacker-controlled content from becoming action authority.
+Hermes accepts external data and can perform high-impact local and network actions. This hardening payload prevents attacker-controlled content from becoming action authority.
 
 ## Risks addressed
 

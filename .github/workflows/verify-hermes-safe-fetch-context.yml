@@ -1,4 +1,4 @@
-name: Verify Hermes safe-fetch/context patch stack
+name: Verify Hermes safe-fetch/context hardening payload
 
 on:
   push:
@@ -13,7 +13,7 @@ jobs:
     name: Verify recorded base
     runs-on: ubuntu-latest
     steps:
-      - name: Check out patch stack
+      - name: Check out hardening payload repo
         uses: actions/checkout@v4
 
       - name: Check out Hermes upstream
@@ -32,15 +32,15 @@ jobs:
         working-directory: hermes-agent
         run: python -m pip install -e ".[dev,messaging,cron,feishu]"
 
-      - name: Run stack verifier at recorded base
-        run: scripts/verify-hermes-safe-fetch-context-stack.sh hermes-agent
+      - name: Run hardening payload verifier at recorded base
+        run: scripts/verify-hermes-safe-fetch-context-payload.sh hermes-agent
 
   verify-current-upstream:
     name: Verify current upstream main
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     steps:
-      - name: Check out patch stack
+      - name: Check out hardening payload repo
         uses: actions/checkout@v4
 
       - name: Check out Hermes upstream
@@ -59,7 +59,7 @@ jobs:
         working-directory: hermes-agent
         run: python -m pip install -e ".[dev,messaging,cron,feishu]"
 
-      - name: Run stack verifier at origin/main
+      - name: Run hardening payload verifier at origin/main
         env:
           HERMES_BASE_REF: origin/main
-        run: scripts/verify-hermes-safe-fetch-context-stack.sh hermes-agent
+        run: scripts/verify-hermes-safe-fetch-context-payload.sh hermes-agent

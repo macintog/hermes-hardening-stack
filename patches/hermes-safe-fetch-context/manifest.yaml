@@ -1,288 +1,100 @@
-# Machine-readable manifest for the hermes-safe-fetch-context patch stack.
+# Machine-readable manifest for the hermes-safe-fetch-context hardening payload.
+# Main is the sole source of truth. Payload fragments are final-state deltas by
+# target file/atomic group, never chronological iteration layers.
 name: hermes-safe-fetch-context
 series: patches/hermes-safe-fetch-context/series
-verification_script: scripts/verify-hermes-safe-fetch-context-stack.sh
-required_phases:
-  - name: context_promotion_scanning_and_fencing
-    patch: 0001-context-safety-core.patch
-    mandatory: true
-  - name: safe_fetch_remote_byte_ingress
-    patch: 0002-safe-http-gateway-download-hardening.patch
-    mandatory: true
-  - name: patch_stack_integrity_tooling
-    patch: 0003-customization-maintenance-tool.patch
-    mandatory: true
-  - name: artifact_quarantine_provenance_and_taint
-    patch: 0004-provenance-action-authority-hardening.patch
-    mandatory: true
-  - name: action_authority_regression_tests
-    patch: 0004-provenance-action-authority-hardening.patch
-    mandatory: true
-  - name: registry_action_classification
-    patch: 0005-tool-result-promotion-action-registry.patch
-    mandatory: true
-  - name: tool_result_promotion_policy
-    patch: 0005-tool-result-promotion-action-registry.patch
-    mandatory: true
-  - name: gm_authority_target_and_content_sniffing
-    patch: 0006-gm-authority-target-and-content-sniffing.patch
-    mandatory: true
-  - name: gm_active_intent_and_media_sniffing_closure
-    patch: 0007-gm-active-intent-and-media-sniffing-closure.patch
-    mandatory: true
+verification_script: scripts/verify-hermes-safe-fetch-context-payload.sh
+packaging_rule: final_state_by_target_file
+base_ref: patches/hermes-safe-fetch-context/base.ref
 
-patches:
-  - file: 0001-context-safety-core.patch
-    owns:
-      - agent/context_references.py
-      - agent/context_safety.py
-      - agent/memory_manager.py
-      - agent/prompt_builder.py
-      - cron/scheduler.py
-      - tools/cronjob_tools.py
-      - tools/skills_tool.py
-      - tests/agent/test_context_safety.py
-      - tests/agent/test_memory_provider.py
-      - tests/agent/test_prompt_builder.py
-      - tests/cron/test_cron_context_from.py
-      - tests/cron/test_cron_script.py
-      - tests/security/test_context_promotion_boundaries.py
-      - tests/tools/test_cronjob_tools.py
-      - tests/tools/test_skills_tool.py
-    surfaces:
-      - context_safety_core
-      - prompt_context_file_ingestion
-      - memory_provider_context
-      - cron_prompt_validation
-      - cron_output_context_rendering
-      - skill_view_context_findings
-      - context_promotion_boundaries
-    required_tests:
-      - tests/agent/test_context_safety.py
-      - tests/agent/test_memory_provider.py
-      - tests/agent/test_prompt_builder.py
-      - tests/cron/test_cron_context_from.py
-      - tests/cron/test_cron_script.py
-      - tests/security/test_context_promotion_boundaries.py
-      - tests/tools/test_cronjob_tools.py
-      - tests/tools/test_skills_tool.py
+payload:
+  owns:
+  - HARDENING_SURFACE_INVENTORY.md
+  - agent/action_authority.py
+  - agent/artifact_provenance.py
+  - agent/context_references.py
+  - agent/context_safety.py
+  - agent/memory_manager.py
+  - agent/prompt_builder.py
+  - agent/skill_commands.py
+  - cron/scheduler.py
+  - gateway/platforms/base.py
+  - gateway/platforms/bluebubbles.py
+  - gateway/platforms/discord.py
+  - gateway/platforms/feishu.py
+  - gateway/platforms/mattermost.py
+  - gateway/platforms/qqbot/adapter.py
+  - gateway/platforms/slack.py
+  - gateway/platforms/telegram.py
+  - gateway/platforms/wecom.py
+  - gateway/run.py
+  - model_tools.py
+  - run_agent.py
+  - tests/agent/test_context_safety.py
+  - tests/agent/test_memory_provider.py
+  - tests/agent/test_prompt_builder.py
+  - tests/cron/test_cron_context_from.py
+  - tests/cron/test_cron_script.py
+  - tests/gateway/test_base_media_cache_safe_http.py
+  - tests/gateway/test_discord_attachment_download.py
+  - tests/gateway/test_feishu.py
+  - tests/gateway/test_mattermost.py
+  - tests/gateway/test_media_download_retry.py
+  - tests/gateway/test_qqbot.py
+  - tests/gateway/test_reply_to_injection.py
+  - tests/gateway/test_slack.py
+  - tests/gateway/test_stt_config.py
+  - tests/gateway/test_telegram_safe_image_download.py
+  - tests/gateway/test_wecom.py
+  - tests/security/test_action_authority.py
+  - tests/security/test_artifact_provenance.py
+  - tests/security/test_context_promotion_boundaries.py
+  - tests/security/test_prompt_injection_containment.py
+  - tests/security/test_safe_fetch_surfaces.py
+  - tests/security/test_skill_plugin_boundaries.py
+  - tests/security/test_tool_result_promotion.py
+  - tests/tools/test_cronjob_tools.py
+  - tests/tools/test_customization_tool.py
+  - tests/tools/test_safe_http.py
+  - tests/tools/test_skills_tool.py
+  - tools/cronjob_tools.py
+  - tools/customization_tool.py
+  - tools/safe_http.py
+  - tools/skills_hub.py
+  - tools/skills_tool.py
+  - toolsets.py
+  required_tests:
+  - tests/agent/test_context_safety.py
+  - tests/agent/test_memory_provider.py
+  - tests/agent/test_prompt_builder.py
+  - tests/cron/test_cron_context_from.py
+  - tests/cron/test_cron_script.py
+  - tests/gateway/test_base_media_cache_safe_http.py
+  - tests/gateway/test_discord_attachment_download.py
+  - tests/gateway/test_feishu.py
+  - tests/gateway/test_mattermost.py
+  - tests/gateway/test_media_download_retry.py
+  - tests/gateway/test_qqbot.py
+  - tests/gateway/test_reply_to_injection.py
+  - tests/gateway/test_slack.py
+  - tests/gateway/test_stt_config.py
+  - tests/gateway/test_telegram_safe_image_download.py
+  - tests/gateway/test_wecom.py
+  - tests/security/test_action_authority.py
+  - tests/security/test_artifact_provenance.py
+  - tests/security/test_context_promotion_boundaries.py
+  - tests/security/test_prompt_injection_containment.py
+  - tests/security/test_safe_fetch_surfaces.py
+  - tests/security/test_skill_plugin_boundaries.py
+  - tests/security/test_tool_result_promotion.py
+  - tests/tools/test_cronjob_tools.py
+  - tests/tools/test_customization_tool.py
+  - tests/tools/test_safe_http.py
+  - tests/tools/test_skills_tool.py
 
-  - file: 0002-safe-http-gateway-download-hardening.patch
-    owns:
-      - tools/safe_http.py
-      - gateway/platforms/base.py
-      - gateway/platforms/bluebubbles.py
-      - gateway/platforms/discord.py
-      - gateway/platforms/feishu.py
-      - gateway/platforms/mattermost.py
-      - gateway/platforms/qqbot/adapter.py
-      - gateway/platforms/slack.py
-      - gateway/platforms/telegram.py
-      - gateway/platforms/wecom.py
-      - tools/skills_hub.py
-      - tests/tools/test_safe_http.py
-      - tests/gateway/test_base_media_cache_safe_http.py
-      - tests/gateway/test_discord_attachment_download.py
-      - tests/gateway/test_feishu.py
-      - tests/gateway/test_mattermost.py
-      - tests/gateway/test_media_download_retry.py
-      - tests/gateway/test_qqbot.py
-      - tests/gateway/test_slack.py
-      - tests/gateway/test_telegram_safe_image_download.py
-      - tests/gateway/test_wecom.py
-      - tests/security/test_safe_fetch_surfaces.py
-      - tests/security/test_skill_plugin_boundaries.py
-    surfaces:
-      - safe_http_core
-      - base_gateway_media_cache
-      - bluebubbles_media_downloads
-      - discord_attachment_downloads
-      - feishu_media_downloads
-      - mattermost_file_downloads
-      - qqbot_media_and_stt_downloads
-      - slack_file_downloads
-      - telegram_fallback_image_downloads
-      - wecom_media_downloads
-      - skill_hub_remote_fetches
-    required_tests:
-      - tests/tools/test_safe_http.py
-      - tests/gateway/test_base_media_cache_safe_http.py
-      - tests/gateway/test_discord_attachment_download.py
-      - tests/gateway/test_feishu.py
-      - tests/gateway/test_mattermost.py
-      - tests/gateway/test_media_download_retry.py
-      - tests/gateway/test_qqbot.py
-      - tests/gateway/test_slack.py
-      - tests/gateway/test_telegram_safe_image_download.py
-      - tests/gateway/test_wecom.py
-      - tests/security/test_safe_fetch_surfaces.py
-      - tests/security/test_skill_plugin_boundaries.py
-
-  - file: 0003-customization-maintenance-tool.patch
-    owns:
-      - tools/customization_tool.py
-      - tests/tools/test_customization_tool.py
-      - toolsets.py
-    surfaces:
-      - hermes_customizations_tool
-      - patch_stack_repo_status
-      - patch_stack_series_audit
-      - patch_stack_pii_secret_audit
-    required_tests:
-      - tests/tools/test_customization_tool.py
-
-  - file: 0004-provenance-action-authority-hardening.patch
-    owns:
-      - agent/action_authority.py
-      - agent/artifact_provenance.py
-      - model_tools.py
-      - run_agent.py
-      - HARDENING_SURFACE_INVENTORY.md
-      - tests/security/test_action_authority.py
-      - tests/security/test_artifact_provenance.py
-      - tests/security/test_prompt_injection_containment.py
-    surfaces:
-      - artifact_provenance
-      - action_authority_gate
-      - prompt_injection_containment
-    required_tests:
-      - tests/security/test_action_authority.py
-      - tests/security/test_artifact_provenance.py
-      - tests/security/test_prompt_injection_containment.py
-
-  - file: 0005-tool-result-promotion-action-registry.patch
-    owns:
-      - agent/action_authority.py
-      - agent/context_safety.py
-      - agent/skill_commands.py
-      - model_tools.py
-      - run_agent.py
-      - tests/security/test_action_authority.py
-      - tests/security/test_prompt_injection_containment.py
-      - tests/security/test_tool_result_promotion.py
-    surfaces:
-      - registry_action_classification
-      - unknown_side_effect_confirmation
-      - derived_untrusted_action_taint
-      - generic_tool_result_promotion_policy
-    required_tests:
-      - tests/security/test_action_authority.py
-      - tests/security/test_prompt_injection_containment.py
-      - tests/security/test_tool_result_promotion.py
-
-  - file: 0006-gm-authority-target-and-content-sniffing.patch
-    owns:
-      - agent/action_authority.py
-      - agent/context_safety.py
-      - run_agent.py
-      - tools/safe_http.py
-      - gateway/platforms/base.py
-      - tests/agent/test_context_safety.py
-      - tests/tools/test_safe_http.py
-      - tests/security/test_action_authority.py
-    surfaces:
-      - scoped_action_authority_targets
-      - encoded_untrusted_target_detection
-      - nested_tool_result_promotion_policy
-      - safe_http_content_type_magic_sniffing
-      - gateway_media_cache_content_validation
-    required_tests:
-      - tests/security/test_action_authority.py
-      - tests/agent/test_context_safety.py
-      - tests/tools/test_safe_http.py
-
-
-  - file: 0007-gm-active-intent-and-media-sniffing-closure.patch
-    owns:
-      - agent/action_authority.py
-      - agent/context_safety.py
-      - gateway/run.py
-      - run_agent.py
-      - tools/safe_http.py
-      - tests/agent/test_context_safety.py
-      - tests/gateway/test_base_media_cache_safe_http.py
-      - tests/gateway/test_reply_to_injection.py
-      - tests/gateway/test_stt_config.py
-      - tests/security/test_action_authority.py
-      - tests/tools/test_safe_http.py
-    surfaces:
-      - active_user_intent_segmentation
-      - gateway_evidence_fencing
-      - gateway_native_stt_ocr_document_evidence
-      - browser_action_authority_targets
-      - encoded_derived_target_detection
-      - audio_container_magic_sniffing
-    required_tests:
-      - tests/security/test_action_authority.py
-      - tests/agent/test_context_safety.py
-      - tests/gateway/test_reply_to_injection.py
-      - tests/gateway/test_stt_config.py
-      - tests/gateway/test_base_media_cache_safe_http.py
-      - tests/tools/test_safe_http.py
-required_smoke_checks:
-  py_compile:
-    - agent/context_references.py
-    - agent/context_safety.py
-    - agent/skill_commands.py
-    - agent/memory_manager.py
-    - agent/prompt_builder.py
-    - cron/scheduler.py
-    - tools/cronjob_tools.py
-    - tools/skills_tool.py
-    - tests/agent/test_context_safety.py
-    - tests/agent/test_memory_provider.py
-    - tests/agent/test_prompt_builder.py
-    - tests/cron/test_cron_context_from.py
-    - tests/cron/test_cron_script.py
-    - tests/security/test_context_promotion_boundaries.py
-    - tests/tools/test_cronjob_tools.py
-    - tests/tools/test_skills_tool.py
-    - tools/safe_http.py
-    - gateway/platforms/base.py
-    - gateway/platforms/bluebubbles.py
-    - gateway/platforms/discord.py
-    - gateway/platforms/feishu.py
-    - gateway/platforms/mattermost.py
-    - gateway/platforms/qqbot/adapter.py
-    - gateway/platforms/slack.py
-    - gateway/platforms/telegram.py
-    - gateway/platforms/wecom.py
-    - tools/skills_hub.py
-    - tests/tools/test_safe_http.py
-    - tests/gateway/test_base_media_cache_safe_http.py
-    - tests/gateway/test_discord_attachment_download.py
-    - tests/gateway/test_feishu.py
-    - tests/gateway/test_mattermost.py
-    - tests/gateway/test_media_download_retry.py
-    - tests/gateway/test_qqbot.py
-    - tests/gateway/test_slack.py
-    - tests/gateway/test_telegram_safe_image_download.py
-    - tests/gateway/test_wecom.py
-    - tests/security/test_safe_fetch_surfaces.py
-    - tests/security/test_skill_plugin_boundaries.py
-    - tools/customization_tool.py
-    - tests/tools/test_customization_tool.py
-    - toolsets.py
-    - agent/action_authority.py
-    - agent/artifact_provenance.py
-    - model_tools.py
-    - run_agent.py
-    - tests/security/test_action_authority.py
-    - tests/security/test_artifact_provenance.py
-    - tests/security/test_prompt_injection_containment.py
-    - tests/security/test_tool_result_promotion.py
-  imports:
-    - agent.context_safety
-    - agent.artifact_provenance
-    - agent.action_authority
-    - tools.safe_http
-    - tools.customization_tool
 manifest_consistency:
-  series_must_match_manifest_patch_order: true
-  every_series_patch_must_exist: true
-  every_patch_file_must_be_tracked: true
-  verification_script_must_apply_clean_base: true
-  every_manifest_owned_path_must_have_patch_diff_header: true
-  base_ref_must_have_base: true
-  tip_must_not_equal_base_when_series_nonempty: true
-  tip_must_be_patched_commit_when_present: true
+  - series_must_list_final_state_payload_fragments
+  - every_series_entry_must_exist
+  - every_payload_fragment_must_touch_exactly_one_target_file_unless_documented_as_atomic_group
+  - no_chronological_iteration_layers
+  - verification_script_must_apply_clean_base

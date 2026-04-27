@@ -1,0 +1,108 @@
+diff --git a/tests/gateway/test_slack.py b/tests/gateway/test_slack.py
+index ef9897bd..7f3e7ba5 100644
+--- a/tests/gateway/test_slack.py
++++ b/tests/gateway/test_slack.py
+@@ -63,6 +63,20 @@ _slack_mod.SLACK_AVAILABLE = True
+ from gateway.platforms.slack import SlackAdapter  # noqa: E402
+ 
+ 
++def _mock_safe_http_client(handler):
++    import httpx
++
++    real_async_client = httpx.AsyncClient
++    return patch(
++        "tools.safe_http.httpx.AsyncClient",
++        side_effect=lambda **kwargs: real_async_client(
++            transport=httpx.MockTransport(handler),
++            follow_redirects=False,
++            timeout=kwargs.get("timeout"),
++        ),
++    )
++
++
+ # ---------------------------------------------------------------------------
+ # Fixtures
+ # ---------------------------------------------------------------------------
+@@ -189,6 +203,82 @@ class TestSlackConnectCleanup:
+         assert adapter._platform_lock_identity is None
+ 
+ 
++class TestSlackFileDownloadSafety:
++    @pytest.mark.asyncio
++    async def test_download_slack_file_bytes_blocks_redirect_to_private_target(self, adapter):
++        import httpx
++        from tools.safe_http import SafeHTTPError
++
++        async def handler(request):
++            return httpx.Response(
++                302,
++                headers={"Location": "http://127.0.0.1/admin?token=secret"},
++                request=request,
++            )
++
++        with (
++            patch("tools.safe_http.is_safe_url", side_effect=lambda url: not url.startswith("http://127.0.0.1")),
++            _mock_safe_http_client(handler),
++        ):
++            with pytest.raises(SafeHTTPError) as exc:
++                await adapter._download_slack_file_bytes("https://files.slack.com/files-pri/T/F?pub_secret=secret")
++
++        assert "127.0.0.1" in str(exc.value)
++        assert "pub_secret=secret" not in str(exc.value)
++        assert "token=secret" not in str(exc.value)
++
++    @pytest.mark.asyncio
++    async def test_download_slack_file_bytes_blocks_credentialed_cross_origin_redirect(self, adapter):
++        import httpx
++        from tools.safe_http import SafeHTTPError
++
++        seen_authorization = []
++
++        async def handler(request):
++            seen_authorization.append(request.headers.get("authorization"))
++            return httpx.Response(
++                302,
++                headers={"Location": "https://evil.example/steal?signature=secret"},
++                request=request,
++            )
++
++        with (
++            patch("tools.safe_http.is_safe_url", return_value=True),
++            _mock_safe_http_client(handler),
++        ):
++            with pytest.raises(SafeHTTPError) as exc:
++                await adapter._download_slack_file_bytes("https://files.slack.com/files-pri/T/F?pub_secret=secret")
++
++        assert len(seen_authorization) == 1
++        assert seen_authorization[0].startswith("Bearer ")
++        assert "cross-origin redirect" in str(exc.value)
++        assert "pub_secret=secret" not in str(exc.value)
++        assert "signature=secret" not in str(exc.value)
++
++    @pytest.mark.asyncio
++    async def test_download_slack_file_bytes_rejects_oversized_response(self, adapter):
++        import httpx
++        from tools.safe_http import SafeHTTPError
++
++        async def handler(request):
++            return httpx.Response(
++                200,
++                headers={"Content-Length": str(21 * 1024 * 1024)},
++                content=b"x",
++                request=request,
++            )
++
++        with (
++            patch("tools.safe_http.is_safe_url", return_value=True),
++            _mock_safe_http_client(handler),
++        ):
++            with pytest.raises(SafeHTTPError) as exc:
++                await adapter._download_slack_file_bytes("https://files.slack.com/files-pri/T/F?pub_secret=secret")
++
++        assert "too large" in str(exc.value).lower()
++        assert "pub_secret=secret" not in str(exc.value)
++
++
+ # ---------------------------------------------------------------------------
+ # TestSlackProxyBehavior
+ # ---------------------------------------------------------------------------

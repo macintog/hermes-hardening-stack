@@ -1,0 +1,138 @@
+diff --git a/agent/artifact_provenance.py b/agent/artifact_provenance.py
+new file mode 100644
+index 00000000..3c229c7a
+--- /dev/null
++++ b/agent/artifact_provenance.py
+@@ -0,0 +1,132 @@
++"""First-class provenance and taint metadata for model-visible artifacts."""
++
++from __future__ import annotations
++
++import hashlib
++from dataclasses import dataclass, field, replace
++from enum import StrEnum
++from types import MappingProxyType
++from typing import Any, Mapping
++
++
++class TrustLevel(StrEnum):
++    TRUSTED = "trusted"
++    USER_SUPPLIED = "user_supplied"
++    EXTERNAL = "external"
++    HOSTILE_UNKNOWN = "hostile_unknown"
++
++
++class ArtifactAuthority(StrEnum):
++    NONE = "none"
++    TRUSTED_USER = "trusted_user"
++    SYSTEM = "system"
++    DEVELOPER = "developer"
++    LOCAL_POLICY = "local_policy"
++
++
++@dataclass(frozen=True)
++class ArtifactProvenance:
++    """Security metadata that follows untrusted content across conversions.
++
++    `authority` is intentionally separate from `trust_level`: externally fetched
++    or recalled content may be useful evidence, but it carries no authority to
++    instruct tools or authorize actions unless a non-model policy explicitly
++    grants it.
++    """
++
++    source_type: str
++    source_label: str | None = None
++    source_url_redacted: str | None = None
++    final_url_redacted: str | None = None
++    sha256: str | None = None
++    content_type: str | None = None
++    status_code: int | None = None
++    bytes_read: int | None = None
++    fetch_policy: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
++    extraction_chain: tuple[str, ...] = ()
++    trust_level: TrustLevel | str = TrustLevel.EXTERNAL
++    authority: ArtifactAuthority | str = ArtifactAuthority.NONE
++    context_safety: Mapping[str, Any] | None = None
++
++    def __post_init__(self) -> None:
++        object.__setattr__(self, "fetch_policy", MappingProxyType(dict(self.fetch_policy or {})))
++        object.__setattr__(self, "extraction_chain", tuple(self.extraction_chain or ()))
++        object.__setattr__(self, "trust_level", TrustLevel(str(self.trust_level)))
++        object.__setattr__(self, "authority", ArtifactAuthority(str(self.authority)))
++        if self.context_safety is not None:
++            object.__setattr__(self, "context_safety", MappingProxyType(dict(self.context_safety)))
++
++    def with_extraction(self, step: str, *, sha256: str | None = None, bytes_read: int | None = None, content_type: str | None = None) -> "ArtifactProvenance":
++        return replace(
++            self,
++            extraction_chain=self.extraction_chain + (step,),
++            sha256=sha256 if sha256 is not None else self.sha256,
++            bytes_read=bytes_read if bytes_read is not None else self.bytes_read,
++            content_type=content_type if content_type is not None else self.content_type,
++        )
++
++    def with_context_safety(self, safety: Mapping[str, Any]) -> "ArtifactProvenance":
++        return replace(self, context_safety=safety)
++
++    def to_dict(self) -> dict[str, Any]:
++        return {
++            "source_type": self.source_type,
++            "source_label": self.source_label,
++            "source_url_redacted": self.source_url_redacted,
++            "final_url_redacted": self.final_url_redacted,
++            "sha256": self.sha256,
++            "content_type": self.content_type,
++            "status_code": self.status_code,
++            "bytes_read": self.bytes_read,
++            "fetch_policy": dict(self.fetch_policy),
++            "extraction_chain": list(self.extraction_chain),
++            "trust_level": self.trust_level.value,
++            "authority": self.authority.value,
++            "context_safety": dict(self.context_safety) if self.context_safety is not None else None,
++        }
++
++
++def sha256_bytes(data: bytes) -> str:
++    return hashlib.sha256(data).hexdigest()
++
++
++def sha256_text(text: str) -> str:
++    return sha256_bytes(text.encode("utf-8", errors="replace"))
++
++
++def derive_text_provenance(
++    provenance: ArtifactProvenance,
++    text: str,
++    *,
++    step: str,
++    content_type: str = "text/plain; charset=utf-8",
++) -> ArtifactProvenance:
++    encoded = text.encode("utf-8", errors="replace")
++    return provenance.with_extraction(
++        step,
++        sha256=sha256_bytes(encoded),
++        bytes_read=len(encoded),
++        content_type=content_type,
++    )
++
++
++def is_untrusted(provenance: ArtifactProvenance | Mapping[str, Any] | None) -> bool:
++    """Return True if provenance should not be accepted as action authority."""
++    if provenance is None:
++        return True
++    if isinstance(provenance, ArtifactProvenance):
++        return provenance.authority == ArtifactAuthority.NONE or provenance.trust_level in {
++            TrustLevel.EXTERNAL,
++            TrustLevel.HOSTILE_UNKNOWN,
++        }
++    authority = str(provenance.get("authority", ArtifactAuthority.NONE.value))
++    trust_level = str(provenance.get("trust_level", TrustLevel.EXTERNAL.value))
++    return authority == ArtifactAuthority.NONE.value or trust_level in {
++        TrustLevel.EXTERNAL.value,
++        TrustLevel.HOSTILE_UNKNOWN.value,
++    }
++
++
++def assert_has_action_authority(provenance: ArtifactProvenance | Mapping[str, Any] | None) -> None:
++    if is_untrusted(provenance):
++        raise PermissionError("Artifact provenance is untrusted and carries no action authority")

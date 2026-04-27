@@ -1,0 +1,96 @@
+diff --git a/tests/gateway/test_telegram_safe_image_download.py b/tests/gateway/test_telegram_safe_image_download.py
+new file mode 100644
+index 00000000..65131bf5
+--- /dev/null
++++ b/tests/gateway/test_telegram_safe_image_download.py
+@@ -0,0 +1,90 @@
++from types import SimpleNamespace
++from unittest.mock import AsyncMock, patch
++
++import httpx
++import pytest
++
++from gateway.config import PlatformConfig
++from gateway.platforms.base import SendResult
++from gateway.platforms.telegram import TelegramAdapter
++from tools.safe_http import safe_download_bytes as real_safe_download_bytes
++
++
++class _Bot:
++    def __init__(self):
++        self.calls = []
++
++    async def send_photo(self, **kwargs):
++        self.calls.append(kwargs)
++        if len(self.calls) == 1:
++            raise RuntimeError("direct URL rejected: token=secret")
++        return SimpleNamespace(message_id=123)
++
++
++@pytest.fixture
++def adapter():
++    a = TelegramAdapter(PlatformConfig(enabled=True, token="fake-token"))
++    a._bot = _Bot()
++    return a
++
++
++@pytest.mark.asyncio
++async def test_send_image_fallback_uses_safe_download_with_cap_and_metadata(adapter):
++    calls = []
++
++    async def fake_download(url, **kwargs):
++        calls.append((url, kwargs))
++        return SimpleNamespace(content=b"png-bytes")
++
++    with patch("gateway.platforms.telegram.safe_download_bytes", side_effect=fake_download):
++        result = await adapter.send_image("42", "https://example.com/image.png?sig=secret", "caption", metadata={"thread_id": 7})
++
++    assert result == SendResult(success=True, message_id="123")
++    assert adapter._bot.calls[1]["photo"] == b"png-bytes"
++    assert calls[0][0] == "https://example.com/image.png?sig=secret"
++    kwargs = calls[0][1]
++    assert kwargs["max_bytes"] == 10 * 1024 * 1024
++    assert kwargs["source_type"] == "telegram_fallback_image"
++    assert kwargs["policy"]["platform"] == "telegram"
++    assert kwargs["policy"]["caller"] == "send_image_fallback"
++    assert "image/png" in kwargs["allowed_content_types"]
++
++
++@pytest.mark.asyncio
++async def test_send_image_fallback_blocks_redirect_to_private_target(adapter):
++    def handler(request):
++        if str(request.url) == "https://example.com/image.png?token=secret":
++            return httpx.Response(302, headers={"Location": "http://127.0.0.1/private.png"})
++        raise AssertionError(f"unexpected request to {request.url}")
++
++    async def safe_download_with_mock_transport(url, **kwargs):
++        return await real_safe_download_bytes(url, transport=httpx.MockTransport(handler), **kwargs)
++
++    with patch("gateway.platforms.telegram.safe_download_bytes", side_effect=safe_download_with_mock_transport), \
++         patch.object(TelegramAdapter.__mro__[1], "send_image", AsyncMock(return_value=SendResult(success=True, message_id="fallback-text"))) as base_send:
++        result = await adapter.send_image("42", "https://example.com/image.png?token=secret", "caption")
++
++    assert result == SendResult(success=True, message_id="fallback-text")
++    assert len(adapter._bot.calls) == 1
++    base_send.assert_awaited_once()
++
++
++@pytest.mark.asyncio
++async def test_send_image_fallback_blocks_oversized_response(adapter):
++    def handler(request):
++        return httpx.Response(
++            200,
++            headers={"Content-Type": "image/png", "Content-Length": str(10 * 1024 * 1024 + 1)},
++            content=b"",
++        )
++
++    async def safe_download_with_mock_transport(url, **kwargs):
++        return await real_safe_download_bytes(url, transport=httpx.MockTransport(handler), **kwargs)
++
++    with patch("gateway.platforms.telegram.safe_download_bytes", side_effect=safe_download_with_mock_transport), \
++         patch.object(TelegramAdapter.__mro__[1], "send_image", AsyncMock(return_value=SendResult(success=True, message_id="fallback-text"))) as base_send:
++        result = await adapter.send_image("42", "https://example.com/image.png?token=secret", "caption")
++
++    assert result == SendResult(success=True, message_id="fallback-text")
++    assert len(adapter._bot.calls) == 1
++    base_send.assert_awaited_once()

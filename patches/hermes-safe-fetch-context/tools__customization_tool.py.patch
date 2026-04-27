@@ -1,122 +1,13 @@
-diff --git a/tests/tools/test_customization_tool.py b/tests/tools/test_customization_tool.py
-new file mode 100644
-index 00000000..e39870fd
---- /dev/null
-+++ b/tests/tools/test_customization_tool.py
-@@ -0,0 +1,103 @@
-+import json
-+import subprocess
-+from pathlib import Path
-+
-+from tools.customization_tool import hermes_customizations
-+
-+
-+def _git(repo: Path, *args: str) -> str:
-+    return subprocess.check_output(["git", "-C", str(repo), *args], text=True).strip()
-+
-+
-+def _init_repo(repo: Path) -> None:
-+    repo.mkdir()
-+    _git(repo, "init", "-b", "main")
-+    _git(repo, "config", "user.email", "test.invalid")
-+    _git(repo, "config", "user.name", "Test User")
-+
-+
-+def test_audit_passes_for_patch_docs_only_repo(tmp_path):
-+    repo = tmp_path / "patches"
-+    _init_repo(repo)
-+    (repo / "patches/example").mkdir(parents=True)
-+    (repo / "docs/customizations/example").mkdir(parents=True)
-+    (repo / "patches/example/series").write_text("0001-demo.patch\n")
-+    (repo / "patches/example/0001-demo.patch").write_text("diff --git a/README.md b/README.md\n")
-+    (repo / "docs/customizations/example/README.md").write_text("Intent docs\n")
-+    _git(repo, "add", ".")
-+    _git(repo, "commit", "-m", "init")
-+
-+    result = json.loads(hermes_customizations(action="audit", repo_path=str(repo)))
-+
-+    assert result["ok"] is True
-+    assert result["repo_path"] == str(repo)
-+    assert result["tracked_file_count"] == 3
-+    assert result["forbidden_source_tree_hits"] == []
-+    assert result["pii_hits"] == []
-+    assert result["series"] == {"patches/example/series": ["0001-demo.patch"]}
-+
-+
-+def test_audit_flags_hermes_source_tree_duplication(tmp_path):
-+    repo = tmp_path / "bad"
-+    _init_repo(repo)
-+    (repo / "agent").mkdir()
-+    (repo / "agent/context_safety.py").write_text("# vendored source\n")
-+    _git(repo, "add", ".")
-+    _git(repo, "commit", "-m", "bad")
-+
-+    result = json.loads(hermes_customizations(action="audit", repo_path=str(repo)))
-+
-+    assert result["ok"] is False
-+    assert "agent/context_safety.py" in result["forbidden_source_tree_hits"]
-+
-+
-+def test_audit_flags_user_specific_pii_in_docs(tmp_path):
-+    repo = tmp_path / "pii"
-+    _init_repo(repo)
-+    (repo / "docs/customizations/example").mkdir(parents=True)
-+    pii_path = "/" + "Users" + "/alice/.hermes/hermes-agent"
-+    (repo / "docs/customizations/example/README.md").write_text(f"Repo: {pii_path}\n")
-+    _git(repo, "add", ".")
-+    _git(repo, "commit", "-m", "pii")
-+
-+    result = json.loads(hermes_customizations(action="audit", repo_path=str(repo)))
-+
-+    assert result["ok"] is False
-+    assert result["pii_hits"]
-+    assert result["pii_hits"][0]["pattern"] == "macos_user_path"
-+
-+
-+def test_audit_ignores_redacted_url_userinfo_in_patch_fixtures(tmp_path):
-+    repo = tmp_path / "fixtures"
-+    _init_repo(repo)
-+    (repo / "patches/example").mkdir(parents=True)
-+    (repo / "patches/example/series").write_text("0001-demo.patch\n")
-+    userinfo_url = "https://user:" + "pass" + "@files.example/report.pdf?token=***"
-+    (repo / "patches/example/0001-demo.patch").write_text(
-+        f"+ assert redact_url('{userinfo_url}')\n"
-+    )
-+    _git(repo, "add", ".")
-+    _git(repo, "commit", "-m", "fixtures")
-+
-+    result = json.loads(hermes_customizations(action="audit", repo_path=str(repo)))
-+
-+    assert result["ok"] is True
-+    assert result["pii_hits"] == []
-+
-+
-+def test_status_reads_customization_pointer_from_config(tmp_path):
-+    config = tmp_path / "config.yaml"
-+    repo = tmp_path / "patches"
-+    repo.mkdir()
-+    config.write_text(
-+        "customizations:\n"
-+        f"  hermes_agent_patches: {repo}\n"
-+        "  hermes_agent_patches_remote: https://example.invalid/repo.git\n"
-+    )
-+
-+    result = json.loads(hermes_customizations(action="status", config_path=str(config)))
-+
-+    assert result["ok"] is True
-+    assert result["configured_repo_path"] == str(repo)
-+    assert result["configured_remote"] == "https://example.invalid/repo.git"
-+    assert result["repo_exists"] is True
 diff --git a/tools/customization_tool.py b/tools/customization_tool.py
 new file mode 100644
-index 00000000..438d466f
+index 00000000..73b9d82d
 --- /dev/null
 +++ b/tools/customization_tool.py
 @@ -0,0 +1,254 @@
 +#!/usr/bin/env python3
 +"""Hermes downstream customization maintenance tool.
 +
-+Audits lightweight patch-stack repositories used to preserve local Hermes
++Audits lightweight hardening-payload repositories used to preserve local Hermes
 +customizations without vendoring the Hermes source tree.
 +"""
 +
@@ -296,7 +187,7 @@ index 00000000..438d466f
 +    repo_path: str | None = None,
 +    config_path: str | None = None,
 +) -> str:
-+    """Inspect or audit the downstream Hermes customization patch-stack repo."""
++    """Inspect or audit the downstream Hermes customization payload repo."""
 +    action = (action or "status").strip().lower()
 +    config = Path(config_path).expanduser() if config_path else _default_config_path()
 +    repo = Path(repo_path).expanduser() if repo_path else _default_repo_path(config)
@@ -328,8 +219,8 @@ index 00000000..438d466f
 +HERMES_CUSTOMIZATIONS_SCHEMA = {
 +    "name": "hermes_customizations",
 +    "description": (
-+        "Inspect or audit the downstream Hermes customization patch-stack repo. "
-+        "Use this before or after creating local Hermes patch stacks to verify the "
++        "Inspect or audit the downstream Hermes customization payload repo. "
++        "Use this before or after creating local Hermes hardening payloads to verify the "
 +        "repo is separate from Hermes source, has no obvious PII/secrets, and has "
 +        "valid series files."
 +    ),
@@ -344,7 +235,7 @@ index 00000000..438d466f
 +            },
 +            "repo_path": {
 +                "type": "string",
-+                "description": "Optional patch-stack repo path. Defaults to config pointer or ~/.config/hermes-agent-patches.",
++                "description": "Optional hardening-payload repo path. Defaults to config pointer or ~/.config/hermes-agent-patches.",
 +            },
 +            "config_path": {
 +                "type": "string",
@@ -367,29 +258,3 @@ index 00000000..438d466f
 +    check_fn=check_customization_requirements,
 +    emoji="🧩",
 +)
-diff --git a/toolsets.py b/toolsets.py
-index 1c113afe..2c0d86e9 100644
---- a/toolsets.py
-+++ b/toolsets.py
-@@ -56,6 +56,8 @@ _HERMES_CORE_TOOLS = [
-     "execute_code", "delegate_task",
-     # Cronjob management
-     "cronjob",
-+    # Hermes downstream customization maintenance
-+    "hermes_customizations",
-     # Cross-platform messaging (gated on gateway running via check_fn)
-     "send_message",
-     # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)
-@@ -126,6 +128,12 @@ TOOLSETS = {
-         "tools": ["cronjob"],
-         "includes": []
-     },
-+
-+    "customizations": {
-+        "description": "Hermes downstream customization patch-stack maintenance and audit tools",
-+        "tools": ["hermes_customizations"],
-+        "includes": []
-+    },
-     
-     "messaging": {
-         "description": "Cross-platform messaging: send messages to Telegram, Discord, Slack, SMS, etc.",

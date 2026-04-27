@@ -261,14 +261,14 @@ Current files:
 - `toolsets.py`
 
 Current intent:
-- expose `hermes_customizations` for status/audit of downstream Hermes patch-stack repos
+- expose `hermes_customizations` for status/audit of downstream Hermes hardening payload repos
 - read the informational config pointer at `customizations.hermes_agent_patches`
-- verify patch-stack repos do not vendor Hermes source roots
-- scan tracked patch-stack contents for common user-specific paths, PII, and secret-looking tokens
-- verify `series` entries point to tracked patch files
+- verify hardening payload repos do not vendor Hermes source roots
+- scan tracked hardening payload contents for common user-specific paths, PII, and secret-looking tokens
+- verify `series` entries point to tracked payload fragment files
 
 Search hints:
-- search for `hermes_customizations`, `customizations.hermes_agent_patches`, or patch-stack maintenance helpers
+- search for `hermes_customizations`, `customizations.hermes_agent_patches`, or hardening-payload maintenance helpers
 - preserve the repo-separation and PII-audit behavior even if the toolset name changes
 
 ## Patch 0004: provenance/action-authority hardening

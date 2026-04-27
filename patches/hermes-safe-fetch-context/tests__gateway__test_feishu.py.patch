@@ -1,0 +1,74 @@
+diff --git a/tests/gateway/test_feishu.py b/tests/gateway/test_feishu.py
+index f21b7dce..6b271279 100644
+--- a/tests/gateway/test_feishu.py
++++ b/tests/gateway/test_feishu.py
+@@ -1705,6 +1705,69 @@ class TestAdapterBehavior(unittest.TestCase):
+         adapter.send_image_file.assert_awaited_once()
+         self.assertEqual(adapter.send_image_file.await_args.kwargs["image_path"], "/tmp/cached.png")
+ 
++    @patch.dict(os.environ, {}, clear=True)
++    def test_download_remote_document_blocks_redirect_to_private_target(self):
++        import httpx
++        from gateway.config import PlatformConfig
++        from gateway.platforms.feishu import FeishuAdapter
++        from tools.safe_http import SafeHTTPError
++
++        adapter = FeishuAdapter(PlatformConfig())
++
++        async def handler(request):
++            return httpx.Response(302, headers={"Location": "http://127.0.0.1/admin?token=secret"})
++
++        real_async_client = httpx.AsyncClient
++
++        async def _run():
++            with (
++                patch("tools.safe_http.is_safe_url", side_effect=lambda url: not url.startswith("http://127.0.0.1")),
++                patch("tools.safe_http.httpx.AsyncClient", side_effect=lambda **kwargs: real_async_client(transport=httpx.MockTransport(handler), follow_redirects=False, timeout=kwargs.get("timeout"))),
++            ):
++                return await adapter._download_remote_document(
++                    "https://files.example/report.pdf?token=secret",
++                    default_ext=".pdf",
++                    preferred_name="report.pdf",
++                )
++
++        with self.assertRaises(SafeHTTPError) as ctx:
++            asyncio.run(_run())
++        self.assertNotIn("token=secret", str(ctx.exception))
++
++    @patch.dict(os.environ, {}, clear=True)
++    def test_download_remote_document_rejects_oversized_response(self):
++        import httpx
++        from gateway.config import PlatformConfig
++        from gateway.platforms.feishu import FeishuAdapter
++        from tools.safe_http import SafeHTTPError
++
++        adapter = FeishuAdapter(PlatformConfig())
++
++        async def handler(request):
++            return httpx.Response(
++                200,
++                headers={"Content-Type": "application/pdf", "Content-Length": str(26 * 1024 * 1024)},
++                content=b"x",
++            )
++
++        real_async_client = httpx.AsyncClient
++
++        async def _run():
++            with (
++                patch("tools.safe_http.is_safe_url", return_value=True),
++                patch("tools.safe_http.httpx.AsyncClient", side_effect=lambda **kwargs: real_async_client(transport=httpx.MockTransport(handler), follow_redirects=False, timeout=kwargs.get("timeout"))),
++            ):
++                return await adapter._download_remote_document(
++                    "https://files.example/big.pdf?signature=secret",
++                    default_ext=".pdf",
++                    preferred_name="big.pdf",
++                )
++
++        with self.assertRaises(SafeHTTPError) as ctx:
++            asyncio.run(_run())
++        self.assertIn("too large", str(ctx.exception).lower())
++        self.assertNotIn("signature=secret", str(ctx.exception))
++
+     @patch.dict(os.environ, {}, clear=True)
+     def test_send_animation_degrades_to_document_send(self):
+         from gateway.config import PlatformConfig

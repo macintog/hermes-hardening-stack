@@ -1,0 +1,42 @@
+diff --git a/agent/skill_commands.py b/agent/skill_commands.py
+index 19c9b06c..1e723e62 100644
+--- a/agent/skill_commands.py
++++ b/agent/skill_commands.py
+@@ -119,20 +119,33 @@ def _build_skill_message(
+ ) -> str:
+     """Format a loaded skill into a user/system message payload."""
+     from tools.skills_tool import SKILLS_DIR
++    from agent.context_safety import ContextSurface, scan_and_render_untrusted_context
+ 
+     content = str(loaded_skill.get("content") or "")
++    # Missing authority is evidence-only by default. Inline shell expansion is
++    # executable preprocessing and must require explicit local trust.
++    authority = str(loaded_skill.get("authority") or "evidence_only")
+ 
+     # ── Template substitution and inline-shell expansion ──
+-    # Done before anything else so downstream blocks (setup notes,
+-    # supporting-file hints) see the expanded content.
++    # Template substitution is local rendering. Inline shell executes commands,
++    # so it is allowed only for locally trusted skills. External/plugin/community
++    # skill text is fenced as evidence before it can trigger shell expansion.
+     skills_cfg = _load_skills_config()
+     if skills_cfg.get("template_vars", True):
+         content = _substitute_template_vars(content, skill_dir, session_id)
+-    if skills_cfg.get("inline_shell", False):
++    if skills_cfg.get("inline_shell", False) and authority == "trusted_by_local_policy":
+         timeout = int(skills_cfg.get("inline_shell_timeout", 10) or 10)
+         content = _expand_inline_shell(content, skill_dir, timeout)
+ 
+-    parts = [activation_note, "", content.strip()]
++    safety = scan_and_render_untrusted_context(
++        content.strip(),
++        surface=ContextSurface.SKILL_CONTENT,
++        source_label=str(loaded_skill.get("name") or "skill_load"),
++        max_scan_chars=None,
++    )
++    promoted_content = safety.rendered_text or content.strip()
++
++    parts = [activation_note, "", promoted_content]
+ 
+     # ── Inject the absolute skill directory so the agent can reference
+     #    bundled scripts without an extra skill_view() round-trip. ──

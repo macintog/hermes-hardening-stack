@@ -1,0 +1,50 @@
+diff --git a/tools/skills_hub.py b/tools/skills_hub.py
+index 2b521640..83722f9c 100644
+--- a/tools/skills_hub.py
++++ b/tools/skills_hub.py
+@@ -13,6 +13,7 @@ This is a library module (not an agent tool). It provides:
+ Used by hermes_cli/skills_hub.py for CLI commands and the /skills slash command.
+ """
+ 
++import asyncio
+ import hashlib
+ import json
+ import logging
+@@ -918,13 +919,32 @@ class WellKnownSkillSource(SkillSource):
+ 
+     @staticmethod
+     def _fetch_text(url: str) -> Optional[str]:
++        """Fetch text through the safe-fetch policy used for hub/community bytes."""
+         try:
+-            resp = httpx.get(url, timeout=20, follow_redirects=True)
+-            if resp.status_code == 200:
+-                return resp.text
+-        except httpx.HTTPError:
++            from tools.safe_http import SafeHTTPError, safe_download_bytes
++
++            result = asyncio.run(
++                safe_download_bytes(
++                    url,
++                    max_bytes=2_000_000,
++                    source_type="skills_hub",
++                    policy={
++                        "surface": "skills_hub_fetch",
++                        "max_bytes": 2_000_000,
++                        "max_redirects": 5,
++                        "allow_userinfo": False,
++                    },
++                    timeout=20,
++                    max_redirects=5,
++                    allow_userinfo=False,
++                )
++            )
++            return result.content.decode("utf-8", errors="replace")
++        except (SafeHTTPError, UnicodeError, RuntimeError, httpx.HTTPError):
++            return None
++        except Exception:
++            logger.debug("Safe skills hub text fetch failed for %s", url, exc_info=True)
+             return None
+-        return None
+ 
+     @staticmethod
+     def _wrap_identifier(base_url: str, skill_name: str) -> str:

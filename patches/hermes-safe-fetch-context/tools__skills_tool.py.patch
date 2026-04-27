@@ -1,0 +1,197 @@
+diff --git a/tools/skills_tool.py b/tools/skills_tool.py
+index 89fe698a..aab62ac9 100644
+--- a/tools/skills_tool.py
++++ b/tools/skills_tool.py
+@@ -76,6 +76,12 @@ from enum import Enum
+ from pathlib import Path
+ from typing import Dict, Any, List, Optional, Set, Tuple
+ 
++from agent.context_safety import (
++    ContextFinding,
++    ContextSafetyResult,
++    ContextSurface,
++    scan_context_text,
++)
+ from tools.registry import registry, tool_error
+ 
+ logger = logging.getLogger(__name__)
+@@ -140,6 +146,63 @@ _INJECTION_PATTERNS: list = [
+ ]
+ 
+ 
++def _serialize_context_safety_finding(finding: ContextFinding) -> Dict[str, Any]:
++    """Return a stable, JSON-safe representation of a context-safety finding."""
++    rule_id = finding.rule_id
++    if rule_id == "prompt_injection":
++        rule_id = "prompt_injection_ignore"
++    return {
++        "rule_id": rule_id,
++        "severity": getattr(finding.severity, "value", finding.severity),
++        "category": finding.category,
++        "description": finding.description,
++        "surface": getattr(finding.surface, "value", finding.surface),
++        "source_label": finding.source_label,
++        "line": finding.line,
++        "start": finding.start,
++        "end": finding.end,
++        "snippet": finding.excerpt,
++    }
++
++
++def _serialize_context_safety_result(result: ContextSafetyResult) -> Dict[str, Any]:
++    findings = [_serialize_context_safety_finding(f) for f in result.findings]
++    return {
++        "surface": result.surface.value,
++        "source_label": result.source_label,
++        "verdict": result.verdict.value,
++        "finding_count": len(findings),
++        "findings": findings,
++    }
++
++
++def _scan_skill_content_for_view(
++    content: str,
++    source_label: str,
++    provenance: str = "local",
++    plugin_namespace: str | None = None,
++) -> Dict[str, Any]:
++    """Scan skill_view content without rewriting or implying enforcement.
++
++    skill_view is report-only: it surfaces findings for callers, but does not
++    block, fence, or rewrite returned content. Keep scanner verdicts available
++    as raw_verdict while exposing a non-actionable presentation verdict.
++    """
++    result = scan_context_text(
++        content,
++        surface=ContextSurface.SKILL_CONTENT,
++        source_label=source_label,
++    )
++    serialized = _serialize_context_safety_result(result)
++    serialized["raw_verdict"] = result.verdict.value
++    serialized["verdict"] = "warn" if serialized["finding_count"] else "safe"
++    serialized["provenance"] = provenance
++    serialized["enforcement"] = "report_only"
++    if plugin_namespace is not None:
++        serialized["plugin_namespace"] = plugin_namespace
++    return serialized
++
++
+ def set_secret_capture_callback(callback) -> None:
+     global _secret_capture_callback
+     _secret_capture_callback = callback
+@@ -466,6 +529,27 @@ def _get_category_from_path(skill_path: Path) -> Optional[str]:
+     return None
+ 
+ 
++def _is_path_under(candidate: Path, root: Path) -> bool:
++    """Return True if candidate is under root, tolerating missing paths/symlinks."""
++    for cand, base in ((candidate, root), (candidate.resolve(), root.resolve())):
++        try:
++            cand.relative_to(base)
++            return True
++        except (ValueError, OSError):
++            continue
++    return False
++
++
++def _skill_content_provenance(skill_path: Path, external_dirs: List[Path]) -> str:
++    """Classify non-plugin skill content as local or external for context safety."""
++    if _is_path_under(skill_path, SKILLS_DIR):
++        return "local"
++    for external_dir in external_dirs:
++        if _is_path_under(skill_path, external_dir):
++            return "external"
++    return "local"
++
++
+ def _parse_tags(tags_value) -> List[str]:
+     """
+     Parse tags from frontmatter value.
+@@ -830,14 +914,26 @@ def _serve_plugin_skill(
+                 "Could not preprocess plugin skill %s:%s", namespace, bare, exc_info=True
+             )
+ 
++    returned_content = f"{banner}{rendered_content}" if banner else rendered_content
++    context_safety = _scan_skill_content_for_view(
++        returned_content,
++        source_label=f"{namespace}:{bare}",
++        provenance="plugin",
++        plugin_namespace=namespace,
++    )
+     return json.dumps(
+         {
+             "success": True,
+             "name": f"{namespace}:{bare}",
+-            "content": f"{banner}{rendered_content}" if banner else rendered_content,
++            "content": returned_content,
+             "description": description,
+             "linked_files": None,
+             "readiness_status": SkillReadinessStatus.AVAILABLE.value,
++            "context_safety": context_safety,
++            "context_safety_findings": context_safety["findings"],
++            "authority": "evidence_only"
++            if context_safety.get("provenance") in {"external", "plugin"}
++            else "trusted_by_local_policy",
+         },
+         ensure_ascii=False,
+     )
+@@ -932,9 +1028,10 @@ def skill_view(
+ 
+         # Build list of all skill directories to search
+         all_dirs = []
++        external_dirs = get_external_skills_dirs()
+         if SKILLS_DIR.exists():
+             all_dirs.append(SKILLS_DIR)
+-        all_dirs.extend(get_external_skills_dirs())
++        all_dirs.extend(external_dirs)
+ 
+         if not all_dirs:
+             return json.dumps(
+@@ -1156,6 +1253,11 @@ def skill_view(
+                     ensure_ascii=False,
+                 )
+ 
++            context_safety = _scan_skill_content_for_view(
++                content,
++                source_label=f"{resolved_name}:{file_path}",
++                provenance=_skill_content_provenance(target_file, external_dirs),
++            )
+             return json.dumps(
+                 {
+                     "success": True,
+@@ -1163,6 +1265,11 @@ def skill_view(
+                     "file": file_path,
+                     "content": content,
+                     "file_type": target_file.suffix,
++                    "context_safety": context_safety,
++                    "context_safety_findings": context_safety["findings"],
++                    "authority": "evidence_only"
++                    if context_safety.get("provenance") == "external"
++                    else "trusted_by_local_policy",
+                 },
+                 ensure_ascii=False,
+             )
+@@ -1327,6 +1434,11 @@ def skill_view(
+                     "Could not preprocess skill content for %s", skill_name, exc_info=True
+                 )
+ 
++        context_safety = _scan_skill_content_for_view(
++            rendered_content,
++            source_label=str(skill_name),
++            provenance=_skill_content_provenance(skill_md, external_dirs),
++        )
+         result = {
+             "success": True,
+             "name": skill_name,
+@@ -1350,6 +1462,11 @@ def skill_view(
+             "readiness_status": SkillReadinessStatus.SETUP_NEEDED.value
+             if setup_needed
+             else SkillReadinessStatus.AVAILABLE.value,
++            "context_safety": context_safety,
++            "context_safety_findings": context_safety["findings"],
++            "authority": "evidence_only"
++            if context_safety.get("provenance") in {"external", "plugin"}
++            else "trusted_by_local_policy",
+         }
+ 
+         setup_help = next((e["help"] for e in required_env_vars if e.get("help")), None)

@@ -1,0 +1,87 @@
+diff --git a/gateway/platforms/telegram.py b/gateway/platforms/telegram.py
+index 6c7658b3..6fc77c8f 100644
+--- a/gateway/platforms/telegram.py
++++ b/gateway/platforms/telegram.py
+@@ -84,6 +84,7 @@ from gateway.platforms.telegram_network import (
+     discover_fallback_ips,
+     parse_fallback_ip_env,
+ )
++from tools.safe_http import SafeHTTPError, redact_url, safe_download_bytes
+ 
+ 
+ def check_telegram_requirements() -> bool:
+@@ -1929,19 +1930,35 @@ class TelegramAdapter(BasePlatformAdapter):
+             return SendResult(success=True, message_id=str(msg.message_id))
+         except Exception as e:
+             logger.warning(
+-                "[%s] URL-based send_photo failed, trying file upload: %s",
++                "[%s] URL-based send_photo failed for %s, trying file upload: %s",
+                 self.name,
+-                e,
+-                exc_info=True,
++                redact_url(image_url),
++                e.__class__.__name__,
+             )
+-            # Fallback: download and upload as file (supports up to 10MB)
++            # Fallback: download and upload as file. Telegram documents this path as
++            # supporting images up to roughly 10 MB, so enforce that caller-local cap.
+             try:
+-                import httpx
+-                async with httpx.AsyncClient(timeout=30.0) as client:
+-                    resp = await client.get(image_url)
+-                    resp.raise_for_status()
+-                    image_data = resp.content
+-                
++                download = await safe_download_bytes(
++                    image_url,
++                    max_bytes=10 * 1024 * 1024,
++                    source_type="telegram_fallback_image",
++                    policy={
++                        "platform": "telegram",
++                        "caller": "send_image_fallback",
++                        "max_bytes": 10 * 1024 * 1024,
++                    },
++                    allowed_content_types=(
++                        "image/jpeg",
++                        "image/png",
++                        "image/gif",
++                        "image/webp",
++                        "image/bmp",
++                        "image/tiff",
++                    ),
++                    timeout=30.0,
++                )
++                image_data = download.content
++
+                 msg = await self._bot.send_photo(
+                     chat_id=int(chat_id),
+                     photo=image_data,
+@@ -1950,15 +1967,24 @@ class TelegramAdapter(BasePlatformAdapter):
+                     message_thread_id=self._message_thread_id_for_send(_photo_thread),
+                 )
+                 return SendResult(success=True, message_id=str(msg.message_id))
+-            except Exception as e2:
++            except SafeHTTPError as e2:
+                 logger.error(
+-                    "[%s] File upload send_photo also failed: %s",
++                    "[%s] Safe fallback image download blocked for %s: %s",
+                     self.name,
++                    redact_url(image_url),
+                     e2,
+-                    exc_info=True,
+                 )
+                 # Final fallback: send URL as text
+-                return await super().send_image(chat_id, image_url, caption, reply_to)
++                return await super().send_image(chat_id, image_url, caption, reply_to, metadata=metadata)
++            except Exception as e2:
++                logger.error(
++                    "[%s] File upload send_photo also failed for %s: %s",
++                    self.name,
++                    redact_url(image_url),
++                    e2.__class__.__name__,
++                )
++                # Final fallback: send URL as text
++                return await super().send_image(chat_id, image_url, caption, reply_to, metadata=metadata)
+     
+     async def send_animation(
+         self,

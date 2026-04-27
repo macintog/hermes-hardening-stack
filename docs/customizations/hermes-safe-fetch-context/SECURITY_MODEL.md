@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This document is the security model and definition of done for Hermes hostile-download and hostile-context containment. It is based on the current patch-stack docs and live Hermes surfaces inspected in:
+This document is the security model and definition of done for Hermes hostile-download and hostile-context containment. It is based on the current hardening-payload docs and live Hermes surfaces inspected in:
 
 - `tools/safe_http.py`
 - `agent/context_safety.py`
@@ -216,7 +216,7 @@ A call site or feature is done for this security model only when all applicable 
 10. The default for missing provenance is fail-closed for side effects: `evidence_only`.
 11. Tests cover representative hostile text for every touched surface and tests prove evidence-only content cannot authorize side effects by itself.
 12. Logs/errors redact raw signed URLs, credentials, cookies, tokens, and secret-bearing values.
-13. The implemented tests cover the caller-visible behavior that exists in this stack.
+13. The implemented tests cover the caller-visible behavior that exists in this payload.
 
 ## Non-goals
 

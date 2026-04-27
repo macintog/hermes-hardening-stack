@@ -1,0 +1,89 @@
+diff --git a/gateway/platforms/wecom.py b/gateway/platforms/wecom.py
+index 7ba0fa21..9d02b724 100644
+--- a/gateway/platforms/wecom.py
++++ b/gateway/platforms/wecom.py
+@@ -67,6 +67,7 @@ from gateway.platforms.base import (
+     cache_document_from_bytes,
+     cache_image_from_bytes,
+ )
++from tools.safe_http import redact_url, safe_download_bytes
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -1036,44 +1037,32 @@ class WeComAdapter(BasePlatformAdapter):
+         url: str,
+         max_bytes: int,
+     ) -> Tuple[bytes, Dict[str, str]]:
+-        from tools.url_safety import is_safe_url
+-        if not is_safe_url(url):
+-            raise ValueError(f"Blocked unsafe URL (SSRF protection): {url[:80]}")
++        """Download user-supplied outbound media through safe_http.
+ 
++        safe_http validates the initial URL and every redirect target, enforces
++        caller byte caps while streaming, and redacts signed query strings in
++        errors/logs.  It does not make the fetched bytes trusted content.
++        """
+         if not HTTPX_AVAILABLE:
+             raise RuntimeError("httpx is required for WeCom media download")
+ 
+-        client = self._http_client or httpx.AsyncClient(timeout=30.0, follow_redirects=True)
+-        created_client = client is not self._http_client
+-        try:
+-            async with client.stream(
+-                "GET",
+-                url,
+-                headers={
+-                    "User-Agent": "HermesAgent/1.0",
+-                    "Accept": "*/*",
+-                },
+-            ) as response:
+-                response.raise_for_status()
+-                headers = {key.lower(): value for key, value in response.headers.items()}
+-                content_length = headers.get("content-length")
+-                if content_length and content_length.isdigit() and int(content_length) > max_bytes:
+-                    raise ValueError(
+-                        f"Remote media exceeds WeCom limit: {int(content_length)} bytes > {max_bytes} bytes"
+-                    )
+-
+-                data = bytearray()
+-                async for chunk in response.aiter_bytes():
+-                    data.extend(chunk)
+-                    if len(data) > max_bytes:
+-                        raise ValueError(
+-                            f"Remote media exceeds WeCom limit while downloading: {len(data)} bytes > {max_bytes} bytes"
+-                        )
+-
+-                return bytes(data), headers
+-        finally:
+-            if created_client:
+-                await client.aclose()
++        download = await safe_download_bytes(
++            url,
++            max_bytes=max_bytes,
++            source_type="wecom:outbound-media-url",
++            policy={
++                "platform": "wecom",
++                "media_path": "outbound_media_url",
++                "max_bytes": max_bytes,
++                "redirect_credentials": "no-credentials",
++            },
++            headers={
++                "User-Agent": "HermesAgent/1.0",
++                "Accept": "*/*",
++            },
++            timeout=30.0,
++        )
++        return download.content, dict(download.headers)
+ 
+     @staticmethod
+     def _looks_like_url(media_source: str) -> bool:
+@@ -1257,7 +1246,8 @@ class WeComAdapter(BasePlatformAdapter):
+         except FileNotFoundError as exc:
+             return SendResult(success=False, error=str(exc))
+         except Exception as exc:
+-            logger.error("[%s] Failed to prepare outbound media %s: %s", self.name, media_source, exc)
++            safe_source = redact_url(media_source) if self._looks_like_url(media_source) else media_source
++            logger.error("[%s] Failed to prepare outbound media %s: %s", self.name, safe_source, exc)
+             return SendResult(success=False, error=str(exc))
+ 
+         if prepared["rejected"]:

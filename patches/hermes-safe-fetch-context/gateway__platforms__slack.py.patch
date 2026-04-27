@@ -1,0 +1,172 @@
+diff --git a/gateway/platforms/slack.py b/gateway/platforms/slack.py
+index ea75130a..ea6e350e 100644
+--- a/gateway/platforms/slack.py
++++ b/gateway/platforms/slack.py
+@@ -270,6 +270,9 @@ class SlackAdapter(BasePlatformAdapter):
+     """
+ 
+     MAX_MESSAGE_LENGTH = 39000  # Slack API allows 40,000 chars; leave margin
++    # Slack file downloads can include images, audio, and supported documents.
++    # Keep the helper-local cap aligned with the existing bot document limit.
++    MAX_FILE_DOWNLOAD_BYTES = 20 * 1024 * 1024
+ 
+     def __init__(self, config: PlatformConfig):
+         super().__init__(config, Platform.SLACK)
+@@ -2310,82 +2313,88 @@ class SlackAdapter(BasePlatformAdapter):
+         except Exception:
+             return False
+ 
+-    async def _download_slack_file(self, url: str, ext: str, audio: bool = False, team_id: str = "") -> str:
+-        """Download a Slack file using the bot token for auth, with retry."""
+-        import httpx
+-
++    def _slack_file_download_headers(self, team_id: str = "") -> Dict[str, str]:
+         bot_token = self._team_clients[team_id].token if team_id and team_id in self._team_clients else self.config.token
++        return {"Authorization": f"Bearer {bot_token}"}
+ 
+-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+-            for attempt in range(3):
+-                try:
+-                    response = await client.get(
+-                        url,
+-                        headers={"Authorization": f"Bearer {bot_token}"},
++    async def _safe_download_slack_file_bytes(self, url: str, *, team_id: str = "", media_kind: str = "file"):
++        from tools.safe_http import SafeHTTPError, redact_url, safe_download_bytes
++
++        policy = {
++            "platform": "slack",
++            "auth": "bearer-token",
++            "redirect_credentials": "same-origin-only",
++            "max_bytes": self.MAX_FILE_DOWNLOAD_BYTES,
++            "media_kind": media_kind,
++        }
++        headers = self._slack_file_download_headers(team_id)
++        last_exc = None
++        for attempt in range(3):
++            try:
++                return await safe_download_bytes(
++                    url,
++                    max_bytes=self.MAX_FILE_DOWNLOAD_BYTES,
++                    source_type=f"slack:{media_kind}",
++                    policy=policy,
++                    headers=headers,
++                    timeout=30.0,
++                )
++            except SafeHTTPError as exc:
++                last_exc = exc
++                msg = str(exc)
++                retryable = "HTTP status 429" in msg or "HTTP status 5" in msg or "HTTP download failed" in msg
++                if retryable and attempt < 2:
++                    logger.debug(
++                        "Slack file download retry %d/2 for %s: %s",
++                        attempt + 1,
++                        redact_url(url),
++                        exc,
+                     )
+-                    response.raise_for_status()
+-
+-                    # Slack may return an HTML sign-in/redirect page
+-                    # instead of actual media bytes (e.g. expired token,
+-                    # restricted file access).  Detect this early so we
+-                    # don't cache bogus data and confuse downstream tools.
+-                    ct = response.headers.get("content-type", "")
+-                    if "text/html" in ct:
+-                        raise ValueError(
+-                            "Slack returned HTML instead of media "
+-                            f"(content-type: {ct}); "
+-                            "check bot token scopes and file permissions"
+-                        )
++                    await asyncio.sleep(1.5 * (attempt + 1))
++                    continue
++                raise
++        raise last_exc  # pragma: no cover - loop always returns or raises
+ 
+-                    if audio:
+-                        from gateway.platforms.base import cache_audio_from_bytes
+-                        return cache_audio_from_bytes(response.content, ext)
+-                    else:
+-                        from gateway.platforms.base import cache_image_from_bytes
+-                        return cache_image_from_bytes(response.content, ext)
+-                except (httpx.TimeoutException, httpx.HTTPStatusError) as exc:
+-                    if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code < 429:
+-                        raise
+-                    if attempt < 2:
+-                        logger.debug("Slack file download retry %d/2 for %s: %s",
+-                                     attempt + 1, url[:80], exc)
+-                        await asyncio.sleep(1.5 * (attempt + 1))
+-                        continue
+-                    raise
++    async def _download_slack_file(self, url: str, ext: str, audio: bool = False, team_id: str = "") -> str:
++        """Download a Slack media file using safe HTTP and cache it."""
++        result = await self._safe_download_slack_file_bytes(
++            url,
++            team_id=team_id,
++            media_kind="audio" if audio else "image",
++        )
+ 
+-    async def _download_slack_file_bytes(self, url: str, team_id: str = "") -> bytes:
+-        """Download a Slack file and return raw bytes, with retry."""
+-        import httpx
++        # Slack may return an HTML sign-in/redirect page instead of actual media
++        # bytes (e.g. expired token, restricted file access). Detect this early
++        # so we don't cache bogus data and confuse downstream tools.
++        if "text/html" in result.content_type.lower():
++            raise ValueError(
++                "Slack returned HTML instead of media "
++                f"(content-type: {result.content_type}); "
++                "check bot token scopes and file permissions"
++            )
+ 
+-        bot_token = self._team_clients[team_id].token if team_id and team_id in self._team_clients else self.config.token
++        if audio:
++            from gateway.platforms.base import cache_audio_from_bytes
++            return cache_audio_from_bytes(result.content, ext)
++        else:
++            from gateway.platforms.base import cache_image_from_bytes
++            return cache_image_from_bytes(result.content, ext)
+ 
+-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+-            for attempt in range(3):
+-                try:
+-                    response = await client.get(
+-                        url,
+-                        headers={"Authorization": f"Bearer {bot_token}"},
+-                    )
+-                    response.raise_for_status()
+-                    ct = response.headers.get("content-type", "")
+-                    if "text/html" in ct:
+-                        raise ValueError(
+-                            "Slack returned HTML instead of file bytes "
+-                            f"(content-type: {ct}); "
+-                            "check bot token scopes and file permissions"
+-                        )
+-                    return response.content
+-                except (httpx.TimeoutException, httpx.HTTPStatusError, ValueError) as exc:
+-                    if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code < 429:
+-                        raise
+-                    if isinstance(exc, ValueError):
+-                        raise
+-                    if attempt < 2:
+-                        logger.debug("Slack file download retry %d/2 for %s: %s",
+-                                     attempt + 1, url[:80], exc)
+-                        await asyncio.sleep(1.5 * (attempt + 1))
+-                        continue
+-                    raise
++    async def _download_slack_file_bytes(self, url: str, team_id: str = "") -> bytes:
++        """Download a Slack file and return raw bytes using safe HTTP."""
++        result = await self._safe_download_slack_file_bytes(url, team_id=team_id, media_kind="document")
++
++        # Slack may return an HTML sign-in/redirect page instead of actual file
++        # bytes (e.g. expired token, restricted file access). Detect this after
++        # the safe download boundary so document paths get the same rejection as
++        # media downloads without bypassing safe_http.
++        if "text/html" in result.content_type.lower():
++            raise ValueError(
++                "Slack returned HTML instead of file bytes "
++                f"(content-type: {result.content_type}); "
++                "check bot token scopes and file permissions"
++            )
++        return result.content
+ 
+     # ── Channel mention gating ─────────────────────────────────────────────
+ 

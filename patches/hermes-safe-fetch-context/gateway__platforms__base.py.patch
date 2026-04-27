@@ -1,0 +1,205 @@
+diff --git a/gateway/platforms/base.py b/gateway/platforms/base.py
+index 72054e33..1d108130 100644
+--- a/gateway/platforms/base.py
++++ b/gateway/platforms/base.py
+@@ -454,6 +454,28 @@ async def _ssrf_redirect_guard(response):
+ 
+ # Default location: {HERMES_HOME}/cache/images/ (legacy: image_cache/)
+ IMAGE_CACHE_DIR = get_hermes_dir("cache/images", "image_cache")
++MEDIA_CACHE_MAX_BYTES = 25 * 1024 * 1024
++IMAGE_CACHE_ALLOWED_CONTENT_TYPES = (
++    "image/jpeg",
++    "image/png",
++    "image/gif",
++    "image/webp",
++    "image/bmp",
++)
++AUDIO_CACHE_ALLOWED_CONTENT_TYPES = (
++    "audio/mpeg",
++    "audio/mp3",
++    "audio/ogg",
++    "audio/opus",
++    "audio/wav",
++    "audio/x-wav",
++    "audio/webm",
++    "audio/mp4",
++    "audio/aac",
++    "audio/flac",
++    "audio/x-flac",
++    "application/ogg",
++)
+ 
+ 
+ def get_image_cache_dir() -> Path:
+@@ -525,45 +547,49 @@ async def cache_image_from_url(url: str, ext: str = ".jpg", retries: int = 2) ->
+     Raises:
+         ValueError: If the URL targets a private/internal network (SSRF protection).
+     """
+-    from tools.url_safety import is_safe_url
+-    if not is_safe_url(url):
+-        raise ValueError(f"Blocked unsafe URL (SSRF protection): {safe_url_for_log(url)}")
++    from tools.safe_http import SafeHTTPError, safe_download_bytes
+ 
+-    import httpx
+     _log = logging.getLogger(__name__)
+-
+-    async with httpx.AsyncClient(
+-        timeout=30.0,
+-        follow_redirects=True,
+-        event_hooks={"response": [_ssrf_redirect_guard]},
+-    ) as client:
+-        for attempt in range(retries + 1):
+-            try:
+-                response = await client.get(
+-                    url,
+-                    headers={
+-                        "User-Agent": "Mozilla/5.0 (compatible; HermesAgent/1.0)",
+-                        "Accept": "image/*,*/*;q=0.8",
+-                    },
+-                )
+-                response.raise_for_status()
+-                return cache_image_from_bytes(response.content, ext)
+-            except (httpx.TimeoutException, httpx.HTTPStatusError) as exc:
+-                if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code < 429:
+-                    raise
+-                if attempt < retries:
+-                    wait = 1.5 * (attempt + 1)
+-                    _log.debug(
+-                        "Media cache retry %d/%d for %s (%.1fs): %s",
+-                        attempt + 1,
+-                        retries,
+-                        safe_url_for_log(url),
+-                        wait,
+-                        exc,
+-                    )
+-                    await asyncio.sleep(wait)
+-                    continue
++    headers = {
++        "User-Agent": "Mozilla/5.0 (compatible; HermesAgent/1.0)",
++        "Accept": "image/*,*/*;q=0.8",
++    }
++    policy = {
++        "max_bytes": MEDIA_CACHE_MAX_BYTES,
++        "redirect_private_targets": "block",
++        "unsafe_initial_urls": "block",
++        "allow_userinfo": False,
++    }
++
++    for attempt in range(retries + 1):
++        try:
++            result = await safe_download_bytes(
++                url,
++                max_bytes=MEDIA_CACHE_MAX_BYTES,
++                source_type="gateway_media_cache_image",
++                policy=policy,
++                headers=headers,
++                allowed_content_types=IMAGE_CACHE_ALLOWED_CONTENT_TYPES,
++                allow_userinfo=False,
++            )
++            return cache_image_from_bytes(result.content, ext)
++        except SafeHTTPError as exc:
++            message = str(exc)
++            is_retryable_status = any(f"HTTP status {code}" in message for code in (429, 500, 502, 503, 504))
++            is_retryable_transport = "HTTP download failed" in message
++            if not (is_retryable_status or is_retryable_transport) or attempt >= retries:
+                 raise
++            wait = 1.5 * (attempt + 1)
++            _log.debug(
++                "Media cache retry %d/%d for %s (%.1fs): %s",
++                attempt + 1,
++                retries,
++                safe_url_for_log(url),
++                wait,
++                exc.__class__.__name__,
++            )
++            await asyncio.sleep(wait)
++            continue
+ 
+ 
+ def cleanup_image_cache(max_age_hours: int = 24) -> int:
+@@ -639,45 +665,49 @@ async def cache_audio_from_url(url: str, ext: str = ".ogg", retries: int = 2) ->
+     Raises:
+         ValueError: If the URL targets a private/internal network (SSRF protection).
+     """
+-    from tools.url_safety import is_safe_url
+-    if not is_safe_url(url):
+-        raise ValueError(f"Blocked unsafe URL (SSRF protection): {safe_url_for_log(url)}")
++    from tools.safe_http import SafeHTTPError, safe_download_bytes
+ 
+-    import httpx
+     _log = logging.getLogger(__name__)
+-
+-    async with httpx.AsyncClient(
+-        timeout=30.0,
+-        follow_redirects=True,
+-        event_hooks={"response": [_ssrf_redirect_guard]},
+-    ) as client:
+-        for attempt in range(retries + 1):
+-            try:
+-                response = await client.get(
+-                    url,
+-                    headers={
+-                        "User-Agent": "Mozilla/5.0 (compatible; HermesAgent/1.0)",
+-                        "Accept": "audio/*,*/*;q=0.8",
+-                    },
+-                )
+-                response.raise_for_status()
+-                return cache_audio_from_bytes(response.content, ext)
+-            except (httpx.TimeoutException, httpx.HTTPStatusError) as exc:
+-                if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code < 429:
+-                    raise
+-                if attempt < retries:
+-                    wait = 1.5 * (attempt + 1)
+-                    _log.debug(
+-                        "Audio cache retry %d/%d for %s (%.1fs): %s",
+-                        attempt + 1,
+-                        retries,
+-                        safe_url_for_log(url),
+-                        wait,
+-                        exc,
+-                    )
+-                    await asyncio.sleep(wait)
+-                    continue
++    headers = {
++        "User-Agent": "Mozilla/5.0 (compatible; HermesAgent/1.0)",
++        "Accept": "audio/*,*/*;q=0.8",
++    }
++    policy = {
++        "max_bytes": MEDIA_CACHE_MAX_BYTES,
++        "redirect_private_targets": "block",
++        "unsafe_initial_urls": "block",
++        "allow_userinfo": False,
++    }
++
++    for attempt in range(retries + 1):
++        try:
++            result = await safe_download_bytes(
++                url,
++                max_bytes=MEDIA_CACHE_MAX_BYTES,
++                source_type="gateway_media_cache_audio",
++                policy=policy,
++                headers=headers,
++                allowed_content_types=AUDIO_CACHE_ALLOWED_CONTENT_TYPES,
++                allow_userinfo=False,
++            )
++            return cache_audio_from_bytes(result.content, ext)
++        except SafeHTTPError as exc:
++            message = str(exc)
++            is_retryable_status = any(f"HTTP status {code}" in message for code in (429, 500, 502, 503, 504))
++            is_retryable_transport = "HTTP download failed" in message
++            if not (is_retryable_status or is_retryable_transport) or attempt >= retries:
+                 raise
++            wait = 1.5 * (attempt + 1)
++            _log.debug(
++                "Audio cache retry %d/%d for %s (%.1fs): %s",
++                attempt + 1,
++                retries,
++                safe_url_for_log(url),
++                wait,
++                exc.__class__.__name__,
++            )
++            await asyncio.sleep(wait)
++            continue
+ 
+ 
+ # ---------------------------------------------------------------------------

@@ -1,0 +1,340 @@
+diff --git a/tests/tools/test_safe_http.py b/tests/tools/test_safe_http.py
+new file mode 100644
+index 00000000..143b1e49
+--- /dev/null
++++ b/tests/tools/test_safe_http.py
+@@ -0,0 +1,334 @@
++import pytest
++import httpx
++
++from tools.safe_http import SafeHTTPError, safe_download_bytes, redact_url
++
++
++@pytest.mark.asyncio
++async def test_unsafe_initial_url_blocked_before_request(monkeypatch):
++    monkeypatch.setattr("tools.safe_http.is_safe_url", lambda _url: False)
++
++    async def handler(request):
++        raise AssertionError("unsafe initial URL should be blocked before request")
++
++    with pytest.raises(SafeHTTPError, match="unsafe URL target") as exc:
++        await safe_download_bytes(
++            "http://127.0.0.1:8080/metadata?token=secret#frag",
++            max_bytes=1024,
++            source_type="test",
++            policy={"caller": "test"},
++            transport=httpx.MockTransport(handler),
++        )
++
++    assert "token=secret" not in str(exc.value)
++    assert "#frag" not in str(exc.value)
++
++
++@pytest.mark.asyncio
++async def test_missing_host_and_userinfo_blocked_by_default(monkeypatch):
++    monkeypatch.setattr("tools.safe_http.is_safe_url", lambda _url: True)
++
++    with pytest.raises(SafeHTTPError, match="missing host"):
++        await safe_download_bytes("https:///missing", max_bytes=10, source_type="test")
++
++    with pytest.raises(SafeHTTPError, match="embedded credentials") as exc:
++        await safe_download_bytes(
++            "https://user:pass@files.example/report.pdf?X-Amz-Signature=secret",
++            max_bytes=10,
++            source_type="test",
++        )
++    assert "user:pass" not in str(exc.value)
++    assert "X-Amz-Signature" not in str(exc.value)
++
++
++@pytest.mark.asyncio
++async def test_redirect_to_private_target_is_blocked_before_following(monkeypatch):
++    calls = []
++
++    def fake_safe(url):
++        calls.append(url)
++        return not url.startswith("http://127.0.0.1")
++
++    monkeypatch.setattr("tools.safe_http.is_safe_url", fake_safe)
++
++    async def handler(request):
++        assert str(request.url) == "https://files.example/report.pdf?token=secret"
++        return httpx.Response(302, headers={"Location": "http://127.0.0.1/admin"})
++
++    with pytest.raises(SafeHTTPError) as exc:
++        await safe_download_bytes(
++            "https://files.example/report.pdf?token=secret",
++            max_bytes=1024,
++            source_type="test",
++            policy={"caller": "test"},
++            transport=httpx.MockTransport(handler),
++        )
++
++    assert calls == ["https://files.example/report.pdf?token=secret", "http://127.0.0.1/admin"]
++    assert "token=secret" not in str(exc.value)
++
++
++@pytest.mark.asyncio
++async def test_max_redirect_count_enforced(monkeypatch):
++    monkeypatch.setattr("tools.safe_http.is_safe_url", lambda _url: True)
++
++    async def handler(request):
++        return httpx.Response(302, headers={"Location": "/next"})
++
++    with pytest.raises(SafeHTTPError, match="Too many redirects"):
++        await safe_download_bytes(
++            "https://files.example/start",
++            max_bytes=1024,
++            source_type="test",
++            max_redirects=1,
++            transport=httpx.MockTransport(handler),
++        )
++
++
++@pytest.mark.asyncio
++async def test_content_length_over_cap_is_rejected(monkeypatch):
++    monkeypatch.setattr("tools.safe_http.is_safe_url", lambda _url: True)
++
++    async def handler(request):
++        return httpx.Response(200, headers={"Content-Length": "5"}, content=b"abcde")
++
++    with pytest.raises(SafeHTTPError, match="too large"):
++        await safe_download_bytes(
++            "https://files.example/big.bin",
++            max_bytes=4,
++            source_type="test",
++            policy={"caller": "test"},
++            transport=httpx.MockTransport(handler),
++        )
++
++
++@pytest.mark.asyncio
++async def test_chunked_response_over_cap_is_rejected_while_streaming(monkeypatch):
++    monkeypatch.setattr("tools.safe_http.is_safe_url", lambda _url: True)
++    chunks_yielded = []
++
++    class ChunkedStream(httpx.AsyncByteStream):
++        async def __aiter__(self):
++            for chunk in (b"ab", b"cd", b"e", b"this-must-not-be-read"):
++                chunks_yielded.append(chunk)
++                yield chunk
++
++    async def handler(request):
++        return httpx.Response(200, stream=ChunkedStream())
++
++    with pytest.raises(SafeHTTPError, match="too large"):
++        await safe_download_bytes(
++            "https://files.example/chunked.bin",
++            max_bytes=4,
++            source_type="test",
++            policy={"caller": "test"},
++            transport=httpx.MockTransport(handler),
++        )
++
++    assert chunks_yielded == [b"ab", b"cd", b"e"]
++
++
++@pytest.mark.asyncio
++async def test_content_type_allowlist(monkeypatch):
++    monkeypatch.setattr("tools.safe_http.is_safe_url", lambda _url: True)
++
++    async def handler(request):
++        return httpx.Response(200, headers={"Content-Type": "text/html; charset=utf-8"}, content=b"<html>")
++
++    with pytest.raises(SafeHTTPError, match="disallowed content type"):
++        await safe_download_bytes(
++            "https://files.example/page",
++            max_bytes=1024,
++            source_type="test",
++            allowed_content_types=("image/png",),
++            transport=httpx.MockTransport(handler),
++        )
++
++
++@pytest.mark.asyncio
++async def test_authorization_not_sent_cross_origin_redirect(monkeypatch):
++    monkeypatch.setattr("tools.safe_http.is_safe_url", lambda _url: True)
++    seen_auth = []
++
++    async def handler(request):
++        seen_auth.append((str(request.url), request.headers.get("Authorization")))
++        if request.url.host == "files.example":
++            return httpx.Response(302, headers={"Location": "https://evil.example/steal"})
++        raise AssertionError("cross-origin redirect should be blocked before second request")
++
++    with pytest.raises(SafeHTTPError, match="credential-bearing cross-origin redirect"):
++        await safe_download_bytes(
++            "https://files.example/private.bin",
++            max_bytes=1024,
++            source_type="test",
++            headers={"Authorization": "Bearer secret"},
++            transport=httpx.MockTransport(handler),
++        )
++
++    assert seen_auth == [("https://files.example/private.bin", "Bearer secret")]
++
++
++@pytest.mark.asyncio
++async def test_stream_time_http_error_is_wrapped(monkeypatch):
++    monkeypatch.setattr("tools.safe_http.is_safe_url", lambda _url: True)
++
++    class FailingStream(httpx.AsyncByteStream):
++        async def __aiter__(self):
++            yield b"partial"
++            raise httpx.ReadError("stream broke")
++
++    async def handler(request):
++        return httpx.Response(200, stream=FailingStream(), request=request)
++
++    with pytest.raises(SafeHTTPError, match="HTTP download failed.*ReadError") as exc:
++        await safe_download_bytes(
++            "https://files.example/flaky.bin?token=secret",
++            max_bytes=1024,
++            source_type="test",
++            policy={"caller": "test"},
++            transport=httpx.MockTransport(handler),
++        )
++
++    assert isinstance(exc.value.__cause__, httpx.ReadError)
++    assert "token=secret" not in str(exc.value)
++
++
++@pytest.mark.asyncio
++async def test_result_metadata_and_redaction(monkeypatch):
++    monkeypatch.setattr("tools.safe_http.is_safe_url", lambda _url: True)
++
++    async def handler(request):
++        return httpx.Response(200, headers={"Content-Type": "application/pdf"}, content=b"pdf")
++
++    result = await safe_download_bytes(
++        "https://user:pass@files.example/report.pdf?X-Amz-Signature=secret#frag",
++        max_bytes=10,
++        source_type="test",
++        policy={"caller": "test"},
++        allow_userinfo=True,
++        transport=httpx.MockTransport(handler),
++    )
++
++    assert result.content == b"pdf"
++    assert result.source_url == "https://files.example/report.pdf"
++    assert result.final_url == "https://files.example/report.pdf"
++    assert "user:pass" not in result.source_url
++    assert "X-Amz-Signature" not in result.source_url
++    assert "#frag" not in result.source_url
++    assert "user:pass" not in result.final_url
++    assert "X-Amz-Signature" not in result.final_url
++    assert "#frag" not in result.final_url
++    assert result.status_code == 200
++    assert result.bytes_read == 3
++    assert result.sha256 == "c35b21d6ca39aa7cc3b79a705d989f1a6e88b99ab43988d74048799e3db926a3"
++    assert result.content_type == "application/pdf"
++    assert result.content_length == 3
++    assert result.source_type == "test"
++    assert result.policy["caller"] == "test"
++    assert redact_url("https://user:pass@files.example/report.pdf?token=secret#frag") == "https://files.example/report.pdf"
++
++
++@pytest.mark.asyncio
++async def test_allowed_private_origin_download_and_same_origin_redirect(monkeypatch):
++    monkeypatch.setattr("tools.safe_http.is_safe_url", lambda _url: False)
++    requested_urls = []
++
++    async def handler(request):
++        requested_urls.append(str(request.url))
++        if request.url.path == "/api/v4/files/file_private":
++            return httpx.Response(302, headers={"Location": "/api/v4/files/file_private/download"})
++        return httpx.Response(200, headers={"Content-Type": "text/plain"}, content=b"ok")
++
++    result = await safe_download_bytes(
++        "http://127.0.0.1:8065/api/v4/files/file_private",
++        max_bytes=1024,
++        source_type="test",
++        policy={"caller": "test"},
++        allowed_private_origins=("http://127.0.0.1:8065",),
++        transport=httpx.MockTransport(handler),
++    )
++
++    assert result.content == b"ok"
++    assert requested_urls == [
++        "http://127.0.0.1:8065/api/v4/files/file_private",
++        "http://127.0.0.1:8065/api/v4/files/file_private/download",
++    ]
++
++
++@pytest.mark.asyncio
++async def test_content_type_magic_mismatch_is_rejected(monkeypatch):
++    monkeypatch.setattr("tools.safe_http.is_safe_url", lambda _url: True)
++
++    async def handler(request):
++        return httpx.Response(200, headers={"Content-Type": "image/png"}, content=b"<html>not an image</html>")
++
++    with pytest.raises(SafeHTTPError, match="bytes do not match declared type"):
++        await safe_download_bytes(
++            "https://files.example/fake.png",
++            max_bytes=1024,
++            source_type="test",
++            allowed_content_types=("image/png",),
++            transport=httpx.MockTransport(handler),
++        )
++
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize(
++    ("content_type", "content"),
++    [
++        ("audio/webm", b"\x1aE\xdf\xa3" + b"\x00" * 16 + b"webm" + b"\x00" * 16),
++        ("audio/mp4", b"\x00\x00\x00\x18ftypM4A \x00\x00\x00\x00M4A "),
++        ("audio/aac", b"\xff\xf1\x50\x80\x00\x1f\xfc" + b"\x00" * 8),
++    ],
++)
++async def test_declared_audio_container_magic_is_accepted(monkeypatch, content_type, content):
++    monkeypatch.setattr("tools.safe_http.is_safe_url", lambda _url: True)
++
++    async def handler(request):
++        return httpx.Response(200, headers={"Content-Type": content_type}, content=content)
++
++    result = await safe_download_bytes(
++        "https://files.example/audio",
++        max_bytes=1024,
++        source_type="test",
++        allowed_content_types=(content_type,),
++        transport=httpx.MockTransport(handler),
++    )
++    assert result.content == content
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("content_type", ["audio/webm", "audio/mp4", "audio/aac"])
++async def test_declared_audio_container_magic_mismatch_is_rejected(monkeypatch, content_type):
++    monkeypatch.setattr("tools.safe_http.is_safe_url", lambda _url: True)
++
++    async def handler(request):
++        return httpx.Response(200, headers={"Content-Type": content_type}, content=b"<html>not audio</html>")
++
++    with pytest.raises(SafeHTTPError, match="bytes do not match declared type"):
++        await safe_download_bytes(
++            "https://files.example/audio",
++            max_bytes=1024,
++            source_type="test",
++            allowed_content_types=(content_type,),
++            transport=httpx.MockTransport(handler),
++        )
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("headers", [{"Content-Type": "application/octet-stream"}, {}])
++async def test_generic_content_type_non_audio_bytes_do_not_match_audio_allowlist(monkeypatch, headers):
++    monkeypatch.setattr("tools.safe_http.is_safe_url", lambda _url: True)
++
++    async def handler(request):
++        return httpx.Response(200, headers=headers, content=b"<html>login page</html>")
++
++    with pytest.raises(SafeHTTPError, match="bytes do not match allowed types"):
++        await safe_download_bytes(
++            "https://files.example/audio.bin",
++            max_bytes=1024,
++            source_type="test",
++            allowed_content_types=("audio/webm", "audio/mp4", "audio/aac", "audio/ogg"),
++            transport=httpx.MockTransport(handler),
++        )

@@ -1,0 +1,296 @@
+diff --git a/run_agent.py b/run_agent.py
+index e5f070f9..19ae9722 100644
+--- a/run_agent.py
++++ b/run_agent.py
+@@ -8236,6 +8236,101 @@ class AIAgent:
+             parent_agent=self,
+         )
+ 
++    @staticmethod
++    def _message_text_content(msg: dict) -> str:
++        content = msg.get("content")
++        if isinstance(content, str):
++            return content
++        if isinstance(content, list):
++            parts: list[str] = []
++            for part in content:
++                if isinstance(part, dict):
++                    text = part.get("text") or part.get("content")
++                    if isinstance(text, str):
++                        parts.append(text)
++                elif isinstance(part, str):
++                    parts.append(part)
++            return "\n".join(parts)
++        return ""
++
++    @staticmethod
++    def _untrusted_fence_snippets(text: str) -> str:
++        import re as _re
++        return "\n\n".join(
++            match.group(0)
++            for match in _re.finditer(
++                r"<untrusted-context\b[^>]*>.*?</untrusted-context>",
++                text or "",
++                _re.IGNORECASE | _re.DOTALL,
++            )
++        )
++
++    @classmethod
++    def _trusted_authority_text_from_user_message(cls, msg: dict) -> str:
++        content = cls._message_text_content(msg)
++        active = msg.get("__active_user_intent")
++        if isinstance(active, dict):
++            active_text = str(active.get("active_text") or "")
++            # Evidence-only spans are deliberately excluded from trusted authority.
++            # They remain model-visible in the user message body and are collected
++            # separately as prior untrusted context for the action gate.
++            return active_text
++        if isinstance(active, str):
++            return active.strip()
++        return content
++
++    @classmethod
++    def _latest_trusted_user_intent(cls, messages: list | None) -> str:
++        if messages:
++            for _msg in reversed(messages):
++                if isinstance(_msg, dict) and _msg.get("role") == "user":
++                    return cls._trusted_authority_text_from_user_message(_msg)
++        return ""
++
++    @staticmethod
++    def _strip_internal_message_fields(api_msg: dict) -> None:
++        for internal_field in (
++            "reasoning", "finish_reason", "_thinking_prefill",
++            "__active_user_intent", "__intent_segments",
++        ):
++            api_msg.pop(internal_field, None)
++
++    @staticmethod
++    def _collect_prior_untrusted_context(messages: list | None) -> str | None:
++        """Return recent model-visible tool/evidence text.
++
++        Tool outputs and injected evidence are not authority. The action gate
++        needs this side channel because the model may transform hostile evidence
++        into clean-looking tool arguments that no longer contain visible fence
++        markers. We do not stop at the latest user turn: browser/page evidence
++        from a previous turn can still parameterize a later click/type/navigation.
++        """
++        if not messages:
++            return None
++        collected: list[str] = []
++        for msg in reversed(messages):
++            if not isinstance(msg, dict):
++                continue
++            role = msg.get("role")
++            if role not in {"tool", "assistant", "user"}:
++                continue
++            text = AIAgent._message_text_content(msg)
++            if not text.strip():
++                continue
++            if role == "assistant" and "<untrusted-context" not in text.lower():
++                continue
++            if role == "user":
++                fenced = AIAgent._untrusted_fence_snippets(text)
++                if not fenced:
++                    continue
++                text = fenced
++            collected.append(text)
++            if len(collected) >= 32:
++                break
++        if not collected:
++            return None
++        return "\n\n".join(reversed(collected))
++
+     def _invoke_tool(self, function_name: str, function_args: dict, effective_task_id: str,
+                      tool_call_id: Optional[str] = None, messages: list = None) -> str:
+         """Invoke a single tool and return the result string. No display logic.
+@@ -8244,6 +8339,26 @@ class AIAgent:
+         tools. Used by the concurrent execution path; the sequential path retains
+         its own inline invocation for backward-compatible display handling.
+         """
++        # Deterministic authority gate before executing anything.  The gate
++        # treats <untrusted-context> fences as evidence-only and requires side
++        # effects to be authorized by trusted user/system/developer intent.
++        trusted_user_intent = self._latest_trusted_user_intent(messages)
++        try:
++            from agent.action_authority import AuthorityDecision, evaluate_action_authority
++            from agent.context_safety import render_model_visible_tool_result
++            authority = evaluate_action_authority(
++                function_name,
++                function_args,
++                trusted_user_intent=trusted_user_intent,
++                policy_allows_without_user_intent=function_name in {"todo", "session_search", "delegate_task", "clarify"},
++                prior_untrusted_context=self._collect_prior_untrusted_context(messages),
++            )
++            if authority.decision != AuthorityDecision.ALLOW:
++                return json.dumps(authority.to_error_payload(), ensure_ascii=False)
++        except Exception as exc:
++            logger.warning("Action authority gate failed closed for %s: %s", function_name, exc)
++            return json.dumps({"error": "Action authority gate failed closed"}, ensure_ascii=False)
++
+         # Check plugin hooks for a block directive before executing anything.
+         block_message: Optional[str] = None
+         try:
+@@ -8317,6 +8432,8 @@ class AIAgent:
+                 session_id=self.session_id or "",
+                 enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,
+                 skip_pre_tool_call_hook=True,
++                user_task=trusted_user_intent,
++                prior_untrusted_context=self._collect_prior_untrusted_context(messages),
+             )
+ 
+     @staticmethod
+@@ -8622,6 +8739,7 @@ class AIAgent:
+             if subdir_hints:
+                 function_result += subdir_hints
+ 
++            function_result = render_model_visible_tool_result(function_name, function_result, source_label=function_name)
+             tool_msg = {
+                 "role": "tool",
+                 "content": function_result,
+@@ -8677,15 +8795,35 @@ class AIAgent:
+             if not isinstance(function_args, dict):
+                 function_args = {}
+ 
+-            # Check plugin hooks for a block directive before executing.
++            # Deterministic action-authority gate before plugin hooks or side effects.
+             _block_msg: Optional[str] = None
+             try:
+-                from hermes_cli.plugins import get_pre_tool_call_block_message
+-                _block_msg = get_pre_tool_call_block_message(
+-                    function_name, function_args, task_id=effective_task_id or "",
++                from agent.action_authority import AuthorityDecision, evaluate_action_authority
++                from agent.context_safety import render_model_visible_tool_result
++                trusted_user_intent = self._latest_trusted_user_intent(messages)
++                prior_untrusted_context = self._collect_prior_untrusted_context(messages)
++                authority = evaluate_action_authority(
++                    function_name,
++                    function_args,
++                    trusted_user_intent=trusted_user_intent,
++                    policy_allows_without_user_intent=function_name in {"todo", "session_search", "delegate_task", "clarify"},
++                    prior_untrusted_context=prior_untrusted_context,
+                 )
+-            except Exception:
+-                pass
++                if authority.decision != AuthorityDecision.ALLOW:
++                    _block_msg = json.dumps(authority.to_error_payload(), ensure_ascii=False)
++            except Exception as exc:
++                logger.warning("Action authority gate failed closed for %s: %s", function_name, exc)
++                _block_msg = "Action authority gate failed closed"
++
++            # Check plugin hooks for a block directive before executing.
++            if _block_msg is None:
++                try:
++                    from hermes_cli.plugins import get_pre_tool_call_block_message
++                    _block_msg = get_pre_tool_call_block_message(
++                        function_name, function_args, task_id=effective_task_id or "",
++                    )
++                except Exception:
++                    pass
+ 
+             if _block_msg is not None:
+                 # Tool blocked by plugin policy — skip counter resets.
+@@ -8914,6 +9052,8 @@ class AIAgent:
+                         session_id=self.session_id or "",
+                         enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,
+                         skip_pre_tool_call_hook=True,
++                        user_task=trusted_user_intent,
++                        prior_untrusted_context=prior_untrusted_context,
+                     )
+                     _spinner_result = function_result
+                 except Exception as tool_error:
+@@ -8934,6 +9074,8 @@ class AIAgent:
+                         session_id=self.session_id or "",
+                         enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,
+                         skip_pre_tool_call_hook=True,
++                        user_task=trusted_user_intent,
++                        prior_untrusted_context=prior_untrusted_context,
+                     )
+                 except Exception as tool_error:
+                     function_result = f"Error executing tool '{function_name}': {tool_error}"
+@@ -8986,6 +9128,7 @@ class AIAgent:
+             if subdir_hints:
+                 function_result += subdir_hints
+ 
++            function_result = render_model_visible_tool_result(function_name, function_result, source_label=function_name)
+             tool_msg = {
+                 "role": "tool",
+                 "content": function_result,
+@@ -9055,8 +9198,7 @@ class AIAgent:
+             for msg in messages:
+                 api_msg = msg.copy()
+                 self._copy_reasoning_content_for_api(msg, api_msg)
+-                for internal_field in ("reasoning", "finish_reason", "_thinking_prefill"):
+-                    api_msg.pop(internal_field, None)
++                self._strip_internal_message_fields(api_msg)
+                 if _needs_sanitize:
+                     self._sanitize_tool_calls_for_strict_api(api_msg)
+                 api_messages.append(api_msg)
+@@ -9208,6 +9350,7 @@ class AIAgent:
+         task_id: str = None,
+         stream_callback: Optional[callable] = None,
+         persist_user_message: Optional[str] = None,
++        active_user_intent: Optional[Dict[str, Any] | str] = None,
+     ) -> Dict[str, Any]:
+         """
+         Run a complete conversation with tool calling until completion.
+@@ -9223,7 +9366,8 @@ class AIAgent:
+             persist_user_message: Optional clean user message to store in
+                 transcripts/history when user_message contains API-only
+                 synthetic prefixes.
+-                    or queuing follow-up prefetch work.
++            active_user_intent: Optional internal authority metadata that
++                separates active human command text from gateway evidence spans.
+ 
+         Returns:
+             Dict: Complete conversation result with final response and message history
+@@ -9355,6 +9499,8 @@ class AIAgent:
+ 
+         # Add user message
+         user_msg = {"role": "user", "content": user_message}
++        if active_user_intent is not None:
++            user_msg["__active_user_intent"] = active_user_intent
+         messages.append(user_msg)
+         current_turn_user_idx = len(messages) - 1
+         self._persist_user_message_idx = current_turn_user_idx
+@@ -9515,7 +9661,24 @@ class AIAgent:
+                 elif isinstance(r, str) and r.strip():
+                     _ctx_parts.append(r)
+             if _ctx_parts:
+-                _plugin_user_context = "\n\n".join(_ctx_parts)
++                _raw_plugin_context = "\n\n".join(_ctx_parts)
++                try:
++                    from agent.context_safety import ContextSurface, scan_and_render_untrusted_context
++
++                    _plugin_user_context = scan_and_render_untrusted_context(
++                        _raw_plugin_context,
++                        surface=ContextSurface.PLUGIN_CONTEXT,
++                        source_label="plugin_pre_llm_call",
++                        max_scan_chars=len(_raw_plugin_context),
++                    ).rendered_text or ""
++                except Exception:
++                    # Fail closed on provenance: keep plugin context visibly fenced
++                    # even if the scanner/fencer import path is unavailable.
++                    _plugin_user_context = (
++                        '<untrusted-context source="plugin_pre_llm_call">\n'
++                        + _raw_plugin_context.replace("</untrusted-context>", "&lt;/untrusted-context&gt;")
++                        + "\n</untrusted-context>"
++                    )
+         except Exception as exc:
+             logger.warning("pre_llm_call hook failed: %s", exc)
+ 
+@@ -9726,13 +9889,7 @@ class AIAgent:
+ 
+                 # Remove 'reasoning' field - it's for trajectory storage only
+                 # We've copied it to 'reasoning_content' for the API above
+-                if "reasoning" in api_msg:
+-                    api_msg.pop("reasoning")
+-                # Remove finish_reason - not accepted by strict APIs (e.g. Mistral)
+-                if "finish_reason" in api_msg:
+-                    api_msg.pop("finish_reason")
+-                # Strip internal thinking-prefill marker
+-                api_msg.pop("_thinking_prefill", None)
++                self._strip_internal_message_fields(api_msg)
+                 # Strip Codex Responses API fields (call_id, response_item_id) for
+                 # strict providers like Mistral, Fireworks, etc. that reject unknown fields.
+                 # Uses new dicts so the internal messages list retains the fields

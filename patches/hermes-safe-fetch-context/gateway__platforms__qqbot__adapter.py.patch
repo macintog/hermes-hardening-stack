@@ -1,0 +1,192 @@
+diff --git a/gateway/platforms/qqbot/adapter.py b/gateway/platforms/qqbot/adapter.py
+index 93284645..ee0e0bbf 100644
+--- a/gateway/platforms/qqbot/adapter.py
++++ b/gateway/platforms/qqbot/adapter.py
+@@ -71,6 +71,7 @@ from gateway.platforms.base import (
+     cache_image_from_bytes,
+ )
+ from gateway.platforms.helpers import strip_markdown
++from tools.safe_http import SafeHTTPError, redact_url, safe_download_bytes
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -144,6 +145,12 @@ class QQAdapter(BasePlatformAdapter):
+     MAX_MESSAGE_LENGTH = MAX_MESSAGE_LENGTH
+     _TYPING_INPUT_SECONDS = 60  # input_notify duration reported to QQ
+     _TYPING_DEBOUNCE_SECONDS = 50  # refresh before it expires
++    # Caller-local caps for untrusted QQ attachment/STT downloads. The previous
++    # implementation had no cap; these keep normal media working while bounding
++    # memory/disk usage before handing bytes to cache/STT converters.
++    _QQBOT_IMAGE_DOWNLOAD_MAX_BYTES = 20 * 1024 * 1024
++    _QQBOT_VOICE_DOWNLOAD_MAX_BYTES = 25 * 1024 * 1024
++    _QQBOT_ATTACHMENT_DOWNLOAD_MAX_BYTES = 50 * 1024 * 1024
+ 
+     @property
+     def _log_tag(self) -> str:
+@@ -853,7 +860,7 @@ class QQAdapter(BasePlatformAdapter):
+                         self._log_tag,
+                         _i,
+                         _att.get("content_type", ""),
+-                        str(_att.get("url", ""))[:80],
++                        redact_url(str(_att.get("url", ""))),
+                         _att.get("filename", ""),
+                     )
+ 
+@@ -1142,7 +1149,7 @@ class QQAdapter(BasePlatformAdapter):
+                 "[%s] Processing attachment: content_type=%s, url=%s, filename=%s",
+                 self._log_tag,
+                 ct,
+-                url[:80],
++                redact_url(url),
+                 filename,
+             )
+ 
+@@ -1170,7 +1177,7 @@ class QQAdapter(BasePlatformAdapter):
+                     voice_transcripts.append(f"[Voice] {transcript}")
+                     logger.debug("[%s] Voice transcript: %s", self._log_tag, transcript)
+                 else:
+-                    logger.warning("[%s] Voice STT failed for %s", self._log_tag, url[:60])
++                    logger.warning("[%s] Voice STT failed for %s", self._log_tag, redact_url(url))
+                     voice_transcripts.append("[Voice] [语音识别失败]")
+             elif ct.startswith("image/"):
+                 # Image: download and cache locally.
+@@ -1205,33 +1212,49 @@ class QQAdapter(BasePlatformAdapter):
+         }
+ 
+     async def _download_and_cache(self, url: str, content_type: str) -> Optional[str]:
+-        """Download a URL and cache it locally."""
+-        from tools.url_safety import is_safe_url
+-
+-        if not is_safe_url(url):
+-            raise ValueError(f"Blocked unsafe URL: {url[:80]}")
+-
++        """Safely download a QQ attachment URL and cache it locally."""
+         if not self._http_client:
+             return None
+ 
++        normalized_type = content_type.strip().lower()
++        if normalized_type.startswith("image/"):
++            max_bytes = self._QQBOT_IMAGE_DOWNLOAD_MAX_BYTES
++        elif normalized_type == "voice" or normalized_type.startswith("audio/"):
++            max_bytes = self._QQBOT_VOICE_DOWNLOAD_MAX_BYTES
++        else:
++            max_bytes = self._QQBOT_ATTACHMENT_DOWNLOAD_MAX_BYTES
++
++        headers = self._qq_media_headers()
+         try:
+-            resp = await self._http_client.get(
++            result = await safe_download_bytes(
+                 url,
++                max_bytes=max_bytes,
++                source_type="qqbot_attachment",
++                headers=headers,
+                 timeout=30.0,
+-                headers=self._qq_media_headers(),
++                policy={
++                    "platform": "qqbot",
++                    "caller": "_download_and_cache",
++                    "content_type_hint": normalized_type,
++                    "credentialed": bool(headers),
++                    "credentialed_redirect_policy": "same-origin-only",
++                    "max_bytes": max_bytes,
++                },
+             )
+-            resp.raise_for_status()
+-            data = resp.content
+-        except Exception as exc:
++            data = result.content
++        except SafeHTTPError as exc:
+             logger.debug(
+-                "[%s] Download failed for %s: %s", self._log_tag, url[:80], exc
++                "[%s] Download blocked/failed for %s: %s",
++                self._log_tag,
++                redact_url(url),
++                exc,
+             )
+             return None
+ 
+-        if content_type.startswith("image/"):
+-            ext = mimetypes.guess_extension(content_type) or ".jpg"
++        if normalized_type.startswith("image/"):
++            ext = mimetypes.guess_extension(normalized_type) or ".jpg"
+             return cache_image_from_bytes(data, ext)
+-        elif content_type == "voice" or content_type.startswith("audio/"):
++        elif normalized_type == "voice" or normalized_type.startswith("audio/"):
+             # QQ voice messages are typically .amr or .silk format.
+             # Convert to .wav using ffmpeg so STT engines can process it.
+             return await self._convert_audio_to_wav(data, url)
+@@ -1307,13 +1330,10 @@ class QQAdapter(BasePlatformAdapter):
+             is_pre_wav = True
+             logger.debug("[%s] STT: using voice_wav_url (pre-converted WAV)", self._log_tag)
+ 
+-        from tools.url_safety import is_safe_url
+-        if not is_safe_url(download_url):
+-            logger.warning("[QQ] STT blocked unsafe URL: %s", download_url[:80])
+-            return None
+-
+         try:
+-            # 2. Download audio (QQ CDN requires Authorization header)
++            # 2. Download audio (QQ CDN requires Authorization header). safe_http
++            # validates each redirect target and blocks credentialed cross-origin
++            # redirects fail-closed.
+             if not self._http_client:
+                 logger.warning("[%s] STT: no HTTP client", self._log_tag)
+                 return None
+@@ -1322,23 +1342,32 @@ class QQAdapter(BasePlatformAdapter):
+             logger.debug(
+                 "[%s] STT: downloading voice from %s (pre_wav=%s, headers=%s)",
+                 self._log_tag,
+-                download_url[:80],
++                redact_url(download_url),
+                 is_pre_wav,
+                 bool(download_headers),
+             )
+-            resp = await self._http_client.get(
++            download_result = await safe_download_bytes(
+                 download_url,
+-                timeout=30.0,
++                max_bytes=self._QQBOT_VOICE_DOWNLOAD_MAX_BYTES,
++                source_type="qqbot_voice_stt",
+                 headers=download_headers,
+-                follow_redirects=True,
++                timeout=30.0,
++                policy={
++                    "platform": "qqbot",
++                    "caller": "_stt_voice_attachment",
++                    "content_type_hint": content_type,
++                    "pre_wav": is_pre_wav,
++                    "credentialed": bool(download_headers),
++                    "credentialed_redirect_policy": "same-origin-only",
++                    "max_bytes": self._QQBOT_VOICE_DOWNLOAD_MAX_BYTES,
++                },
+             )
+-            resp.raise_for_status()
+-            audio_data = resp.content
++            audio_data = download_result.content
+             logger.debug(
+                 "[%s] STT: downloaded %d bytes, content_type=%s",
+                 self._log_tag,
+                 len(audio_data),
+-                resp.headers.get("content-type", "unknown"),
++                download_result.content_type or "unknown",
+             )
+ 
+             if len(audio_data) < 10:
+@@ -1387,7 +1416,7 @@ class QQAdapter(BasePlatformAdapter):
+             else:
+                 logger.warning("[%s] STT: ASR returned empty transcript", self._log_tag)
+             return transcript
+-        except (httpx.HTTPStatusError, httpx.TransportError, IOError) as exc:
++        except (SafeHTTPError, httpx.HTTPStatusError, httpx.TransportError, IOError) as exc:
+             logger.warning(
+                 "[%s] STT failed for voice attachment: %s: %s",
+                 self._log_tag,
+@@ -1736,7 +1765,7 @@ class QQAdapter(BasePlatformAdapter):
+                 logger.warning(
+                     "[%s] audio conversion failed for %s (format=%s)",
+                     self._log_tag,
+-                    source_url[:60],
++                    redact_url(source_url),
+                     ext,
+                 )
+                 return cache_document_from_bytes(audio_data, f"qq_voice{ext}")

@@ -1,0 +1,111 @@
+diff --git a/tests/security/test_safe_fetch_surfaces.py b/tests/security/test_safe_fetch_surfaces.py
+new file mode 100644
+index 00000000..52935073
+--- /dev/null
++++ b/tests/security/test_safe_fetch_surfaces.py
+@@ -0,0 +1,105 @@
++import pytest
++
++from gateway.config import PlatformConfig
++from gateway.platforms.bluebubbles import BlueBubblesAdapter, MAX_ATTACHMENT_DOWNLOAD_BYTES
++from gateway.platforms.wecom import WeComAdapter
++from tools.safe_http import SafeHTTPError
++
++
++@pytest.mark.asyncio
++async def test_wecom_outbound_url_media_uses_safe_download(monkeypatch):
++    calls = []
++
++    class Result:
++        content = b"image-bytes"
++        content_type = "image/png"
++        headers = {"content-type": "image/png"}
++
++    async def fake_safe_download(url, **kwargs):
++        calls.append((url, kwargs))
++        return Result()
++
++    monkeypatch.setattr("gateway.platforms.wecom.safe_download_bytes", fake_safe_download)
++    adapter = WeComAdapter(PlatformConfig(extra={"bot_id": "bot", "secret": "secret"}))
++
++    data, content_type, filename = await adapter._load_outbound_media(
++        "https://cdn.example/path/image.png?X-Amz-Signature=secret",
++    )
++
++    assert data == b"image-bytes"
++    assert content_type == "image/png"
++    assert filename == "image.png"
++    assert calls[0][0] == "https://cdn.example/path/image.png?X-Amz-Signature=secret"
++    kwargs = calls[0][1]
++    assert kwargs["max_bytes"] > 0
++    assert kwargs["source_type"] == "wecom:outbound-media-url"
++    assert kwargs["policy"]["redirect_credentials"] == "no-credentials"
++    assert kwargs["headers"]["User-Agent"] == "HermesAgent/1.0"
++
++
++@pytest.mark.asyncio
++async def test_wecom_safe_download_failure_is_fail_closed_and_redacted(monkeypatch, caplog):
++    async def fake_safe_download(url, **kwargs):
++        raise SafeHTTPError("Blocked unsafe URL target: https://cdn.example/private.png")
++
++    monkeypatch.setattr("gateway.platforms.wecom.safe_download_bytes", fake_safe_download)
++    adapter = WeComAdapter(PlatformConfig(extra={"bot_id": "bot", "secret": "secret"}))
++
++    result = await adapter._send_media_source(
++        "chat",
++        "https://cdn.example/private.png?token=secret#frag",
++    )
++
++    assert not result.success
++    assert "token=secret" not in caplog.text
++    assert "#frag" not in caplog.text
++
++
++@pytest.mark.asyncio
++async def test_bluebubbles_attachment_download_uses_safe_download_with_private_origin(monkeypatch):
++    calls = []
++
++    class Result:
++        content = b"image-bytes"
++        content_type = "image/png"
++        headers = {"content-type": "image/png"}
++
++    async def fake_safe_download(url, **kwargs):
++        calls.append((url, kwargs))
++        return Result()
++
++    monkeypatch.setattr("gateway.platforms.bluebubbles.safe_download_bytes", fake_safe_download)
++    monkeypatch.setattr("gateway.platforms.bluebubbles.cache_image_from_bytes", lambda data, ext: f"cached:{ext}:{len(data)}")
++
++    adapter = BlueBubblesAdapter(
++        PlatformConfig(extra={"server_url": "http://127.0.0.1:1234", "password": "pw token"})
++    )
++    adapter.client = object()
++
++    cached = await adapter._download_attachment("ATT GUID", {"mimeType": "image/png"})
++
++    assert cached == "cached:.png:11"
++    assert calls[0][0] == "http://127.0.0.1:1234/api/v1/attachment/ATT%20GUID/download?password=pw%20token"
++    kwargs = calls[0][1]
++    assert kwargs["max_bytes"] == MAX_ATTACHMENT_DOWNLOAD_BYTES
++    assert kwargs["source_type"] == "bluebubbles:attachment"
++    assert kwargs["allowed_private_origins"] == ("http://127.0.0.1:1234",)
++    assert kwargs["policy"]["redirect_credentials"] == "same-origin-only"
++
++
++@pytest.mark.asyncio
++async def test_bluebubbles_attachment_safe_download_failure_is_fail_closed(monkeypatch, caplog):
++    async def fake_safe_download(url, **kwargs):
++        raise SafeHTTPError("Blocked unsafe URL target: http://169.254.169.254/latest")
++
++    monkeypatch.setattr("gateway.platforms.bluebubbles.safe_download_bytes", fake_safe_download)
++    adapter = BlueBubblesAdapter(
++        PlatformConfig(extra={"server_url": "http://127.0.0.1:1234", "password": "secret"})
++    )
++    adapter.client = object()
++
++    cached = await adapter._download_attachment("+15551234567", {"mimeType": "image/png"})
++
++    assert cached is None
++    assert "169.254.169.254" in caplog.text
++    assert "+15551234567" not in caplog.text

@@ -1,0 +1,51 @@
+diff --git a/gateway/platforms/bluebubbles.py b/gateway/platforms/bluebubbles.py
+index afcbf1a7..59658b10 100644
+--- a/gateway/platforms/bluebubbles.py
++++ b/gateway/platforms/bluebubbles.py
+@@ -32,6 +32,8 @@ from gateway.platforms.base import (
+ )
+ from gateway.platforms.helpers import strip_markdown
+ 
++from tools.safe_http import safe_download_bytes
++
+ logger = logging.getLogger(__name__)
+ 
+ # ---------------------------------------------------------------------------
+@@ -42,6 +44,7 @@ DEFAULT_WEBHOOK_HOST = "127.0.0.1"
+ DEFAULT_WEBHOOK_PORT = 8645
+ DEFAULT_WEBHOOK_PATH = "/bluebubbles-webhook"
+ MAX_TEXT_LENGTH = 4000
++MAX_ATTACHMENT_DOWNLOAD_BYTES = 50 * 1024 * 1024
+ 
+ # Tapback reaction codes (BlueBubbles associatedMessageType values)
+ _TAPBACK_ADDED = {
+@@ -689,15 +692,23 @@ class BlueBubblesAdapter(BasePlatformAdapter):
+             return None
+         try:
+             encoded = quote(att_guid, safe="")
+-            resp = await self.client.get(
++            download = await safe_download_bytes(
+                 self._api_url(f"/api/v1/attachment/{encoded}/download"),
+-                timeout=60,
+-                follow_redirects=True,
++                max_bytes=MAX_ATTACHMENT_DOWNLOAD_BYTES,
++                source_type="bluebubbles:attachment",
++                policy={
++                    "platform": "bluebubbles",
++                    "media_path": "inbound_attachment",
++                    "server_origin": self.server_url,
++                    "max_bytes": MAX_ATTACHMENT_DOWNLOAD_BYTES,
++                    "redirect_credentials": "same-origin-only",
++                },
++                allowed_private_origins=(self.server_url,),
++                timeout=60.0,
+             )
+-            resp.raise_for_status()
+-            data = resp.content
++            data = download.content
+ 
+-            mime = (att_meta.get("mimeType") or "").lower()
++            mime = (att_meta.get("mimeType") or download.content_type or "").lower()
+             transfer_name = att_meta.get("transferName", "")
+ 
+             if mime.startswith("image/"):

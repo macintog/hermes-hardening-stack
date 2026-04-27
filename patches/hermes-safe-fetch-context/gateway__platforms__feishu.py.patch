@@ -1,0 +1,62 @@
+diff --git a/gateway/platforms/feishu.py b/gateway/platforms/feishu.py
+index 718f01e9..467cae43 100644
+--- a/gateway/platforms/feishu.py
++++ b/gateway/platforms/feishu.py
+@@ -209,6 +209,7 @@ _FEISHU_WEBHOOK_BODY_TIMEOUT_SECONDS = 30          # max seconds to read request
+ _FEISHU_WEBHOOK_ANOMALY_THRESHOLD = 25             # consecutive error responses before WARNING log
+ _FEISHU_WEBHOOK_ANOMALY_TTL_SECONDS = 6 * 60 * 60  # anomaly tracker TTL (6 hours) — matches openclaw
+ _FEISHU_CARD_ACTION_DEDUP_TTL_SECONDS = 15 * 60    # card action token dedup window (15 min)
++_FEISHU_REMOTE_DOCUMENT_MAX_BYTES = 25 * 1024 * 1024  # Feishu outbound file uploads are capped locally at 25 MB.
+ 
+ _APPROVAL_CHOICE_MAP: Dict[str, str] = {
+     "approve_once": "once",
+@@ -2838,28 +2839,32 @@ class FeishuAdapter(BasePlatformAdapter):
+         default_ext: str,
+         preferred_name: str,
+     ) -> tuple[str, str]:
+-        from tools.url_safety import is_safe_url
+-        if not is_safe_url(file_url):
+-            raise ValueError(f"Blocked unsafe URL (SSRF protection): {file_url[:80]}")
+-
+-        import httpx
+-
+-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+-            response = await client.get(
+-                file_url,
+-                headers={
+-                    "User-Agent": "Mozilla/5.0 (compatible; HermesAgent/1.0)",
+-                    "Accept": "*/*",
+-                },
+-            )
+-            response.raise_for_status()
++        from tools.safe_http import safe_download_bytes
++
++        download = await safe_download_bytes(
++            file_url,
++            max_bytes=_FEISHU_REMOTE_DOCUMENT_MAX_BYTES,
++            source_type="feishu_remote_document",
++            policy={
++                "caller": "gateway.platforms.feishu.FeishuAdapter._download_remote_document",
++                "allow_redirects": True,
++                "max_redirects": 5,
++                "max_bytes": _FEISHU_REMOTE_DOCUMENT_MAX_BYTES,
++            },
++            headers={
++                "User-Agent": "Mozilla/5.0 (compatible; HermesAgent/1.0)",
++                "Accept": "*/*",
++            },
++            timeout=30.0,
++            max_redirects=5,
++        )
+         filename = self._derive_remote_filename(
+             file_url,
+-            content_type=str(response.headers.get("Content-Type", "")),
++            content_type=download.content_type,
+             default_name=preferred_name,
+             default_ext=default_ext,
+         )
+-        cached_path = cache_document_from_bytes(response.content, filename)
++        cached_path = cache_document_from_bytes(download.content, filename)
+         return cached_path, filename
+ 
+     @staticmethod

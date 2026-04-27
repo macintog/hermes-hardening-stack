@@ -1,0 +1,109 @@
+diff --git a/tests/tools/test_customization_tool.py b/tests/tools/test_customization_tool.py
+new file mode 100644
+index 00000000..e39870fd
+--- /dev/null
++++ b/tests/tools/test_customization_tool.py
+@@ -0,0 +1,103 @@
++import json
++import subprocess
++from pathlib import Path
++
++from tools.customization_tool import hermes_customizations
++
++
++def _git(repo: Path, *args: str) -> str:
++    return subprocess.check_output(["git", "-C", str(repo), *args], text=True).strip()
++
++
++def _init_repo(repo: Path) -> None:
++    repo.mkdir()
++    _git(repo, "init", "-b", "main")
++    _git(repo, "config", "user.email", "test.invalid")
++    _git(repo, "config", "user.name", "Test User")
++
++
++def test_audit_passes_for_patch_docs_only_repo(tmp_path):
++    repo = tmp_path / "patches"
++    _init_repo(repo)
++    (repo / "patches/example").mkdir(parents=True)
++    (repo / "docs/customizations/example").mkdir(parents=True)
++    (repo / "patches/example/series").write_text("README.md.patch\n")
++    (repo / "patches/example/README.md.patch").write_text("diff --git a/README.md b/README.md\n")
++    (repo / "docs/customizations/example/README.md").write_text("Intent docs\n")
++    _git(repo, "add", ".")
++    _git(repo, "commit", "-m", "init")
++
++    result = json.loads(hermes_customizations(action="audit", repo_path=str(repo)))
++
++    assert result["ok"] is True
++    assert result["repo_path"] == str(repo)
++    assert result["tracked_file_count"] == 3
++    assert result["forbidden_source_tree_hits"] == []
++    assert result["pii_hits"] == []
++    assert result["series"] == {"patches/example/series": ["README.md.patch"]}
++
++
++def test_audit_flags_hermes_source_tree_duplication(tmp_path):
++    repo = tmp_path / "bad"
++    _init_repo(repo)
++    (repo / "agent").mkdir()
++    (repo / "agent/context_safety.py").write_text("# vendored source\n")
++    _git(repo, "add", ".")
++    _git(repo, "commit", "-m", "bad")
++
++    result = json.loads(hermes_customizations(action="audit", repo_path=str(repo)))
++
++    assert result["ok"] is False
++    assert "agent/context_safety.py" in result["forbidden_source_tree_hits"]
++
++
++def test_audit_flags_user_specific_pii_in_docs(tmp_path):
++    repo = tmp_path / "pii"
++    _init_repo(repo)
++    (repo / "docs/customizations/example").mkdir(parents=True)
++    pii_path = "/" + "Users" + "/alice/.hermes/hermes-agent"
++    (repo / "docs/customizations/example/README.md").write_text(f"Repo: {pii_path}\n")
++    _git(repo, "add", ".")
++    _git(repo, "commit", "-m", "pii")
++
++    result = json.loads(hermes_customizations(action="audit", repo_path=str(repo)))
++
++    assert result["ok"] is False
++    assert result["pii_hits"]
++    assert result["pii_hits"][0]["pattern"] == "macos_user_path"
++
++
++def test_audit_ignores_redacted_url_userinfo_in_patch_fixtures(tmp_path):
++    repo = tmp_path / "fixtures"
++    _init_repo(repo)
++    (repo / "patches/example").mkdir(parents=True)
++    (repo / "patches/example/series").write_text("README.md.patch\n")
++    userinfo_url = "https://user:" + "pass" + "@files.example/report.pdf?token=***"
++    (repo / "patches/example/README.md.patch").write_text(
++        f"+ assert redact_url('{userinfo_url}')\n"
++    )
++    _git(repo, "add", ".")
++    _git(repo, "commit", "-m", "fixtures")
++
++    result = json.loads(hermes_customizations(action="audit", repo_path=str(repo)))
++
++    assert result["ok"] is True
++    assert result["pii_hits"] == []
++
++
++def test_status_reads_customization_pointer_from_config(tmp_path):
++    config = tmp_path / "config.yaml"
++    repo = tmp_path / "patches"
++    repo.mkdir()
++    config.write_text(
++        "customizations:\n"
++        f"  hermes_agent_patches: {repo}\n"
++        "  hermes_agent_patches_remote: https://example.invalid/repo.git\n"
++    )
++
++    result = json.loads(hermes_customizations(action="status", config_path=str(config)))
++
++    assert result["ok"] is True
++    assert result["configured_repo_path"] == str(repo)
++    assert result["configured_remote"] == "https://example.invalid/repo.git"
++    assert result["repo_exists"] is True

@@ -1,0 +1,287 @@
+diff --git a/tools/safe_http.py b/tools/safe_http.py
+new file mode 100644
+index 00000000..16521269
+--- /dev/null
++++ b/tools/safe_http.py
+@@ -0,0 +1,281 @@
++"""Safe HTTP download helpers for untrusted remote URLs."""
++
++from __future__ import annotations
++
++import hashlib
++import tempfile
++from dataclasses import dataclass
++from pathlib import Path
++from typing import Mapping, Sequence
++from urllib.parse import urlsplit, urlunsplit
++
++import httpx
++
++from agent.artifact_provenance import ArtifactProvenance
++from tools.url_safety import is_safe_url
++
++
++class SafeHTTPError(ValueError):
++    """Raised when a safe HTTP policy blocks or fails a download."""
++
++
++@dataclass(frozen=True)
++class SafeHTTPResult:
++    content: bytes
++    source_url: str
++    final_url: str
++    status_code: int
++    content_type: str
++    content_length: int | None
++    bytes_read: int
++    sha256: str
++    source_type: str
++    policy: Mapping[str, object]
++    headers: Mapping[str, str]
++
++    def to_provenance(self, *, source_label: str | None = None) -> ArtifactProvenance:
++        """Return provenance for the downloaded bytes.
++
++        Safe HTTP results store only redacted URLs; this method deliberately
++        keeps query strings, fragments, and userinfo out of model-visible
++        provenance.
++        """
++        return ArtifactProvenance(
++            source_type=self.source_type,
++            source_label=source_label,
++            source_url_redacted=self.source_url,
++            final_url_redacted=self.final_url,
++            sha256=self.sha256,
++            content_type=self.content_type,
++            status_code=self.status_code,
++            bytes_read=self.bytes_read,
++            fetch_policy=self.policy,
++            extraction_chain=("safe_fetch",),
++            trust_level="external",
++            authority="none",
++        )
++
++
++def redact_url(url: str) -> str:
++    try:
++        parts = urlsplit(url)
++        netloc = parts.hostname or ""
++        if parts.port:
++            netloc = f"{netloc}:{parts.port}"
++        return urlunsplit((parts.scheme, netloc, parts.path or "", "", ""))
++    except Exception:
++        return "<redacted-url>"
++
++
++def _validate_url(
++    url: str,
++    *,
++    allow_userinfo: bool,
++    allowed_private_origins: Sequence[str] | None = None,
++) -> None:
++    parts = urlsplit(url)
++    if parts.scheme not in {"http", "https"}:
++        raise SafeHTTPError(f"Blocked unsafe URL scheme: {parts.scheme or '<missing>'}")
++    if not parts.hostname:
++        raise SafeHTTPError("Blocked URL with missing host")
++    if not allow_userinfo and (parts.username or parts.password):
++        raise SafeHTTPError(f"Blocked URL with embedded credentials: {redact_url(url)}")
++    if not is_safe_url(url) and not any(
++        _same_origin(url, origin) for origin in (allowed_private_origins or ())
++    ):
++        raise SafeHTTPError(f"Blocked unsafe URL target: {redact_url(url)}")
++
++
++def _same_origin(left: str, right: str) -> bool:
++    a = urlsplit(left)
++    b = urlsplit(right)
++    def port(p):
++        return p.port or (443 if p.scheme == "https" else 80)
++    return (a.scheme, a.hostname, port(a)) == (b.scheme, b.hostname, port(b))
++
++
++_MAGIC_BYTES_BY_TYPE: dict[str, tuple[bytes, ...]] = {
++    "image/png": (b"\x89PNG\r\n\x1a\n",),
++    "image/jpeg": (b"\xff\xd8\xff",),
++    "image/gif": (b"GIF87a", b"GIF89a"),
++    "image/bmp": (b"BM",),
++    "application/pdf": (b"%PDF-",),
++    "application/zip": (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08"),
++    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": (b"PK\x03\x04",),
++    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": (b"PK\x03\x04",),
++    "application/vnd.openxmlformats-officedocument.presentationml.presentation": (b"PK\x03\x04",),
++    "audio/mpeg": (b"ID3", b"\xff\xfb", b"\xff\xf3", b"\xff\xf2"),
++    "audio/mp3": (b"ID3", b"\xff\xfb", b"\xff\xf3", b"\xff\xf2"),
++    "audio/ogg": (b"OggS",),
++    "audio/opus": (b"OggS",),
++    "application/ogg": (b"OggS",),
++    "audio/wav": (b"RIFF",),
++    "audio/x-wav": (b"RIFF",),
++    "audio/flac": (b"fLaC",),
++    "audio/x-flac": (b"fLaC",),
++}
++
++
++def _looks_like_webm(content: bytes) -> bool:
++    # WebM is an EBML container with a DocType of "webm" near the start.
++    return content.startswith(b"\x1aE\xdf\xa3") and b"webm" in content[:4096].lower()
++
++
++def _looks_like_mp4(content: bytes) -> bool:
++    # Shallow ISO BMFF check: an ftyp box with a common MP4/M4A-compatible brand.
++    if len(content) < 12 or content[4:8] != b"ftyp":
++        return False
++    box_size = int.from_bytes(content[:4], "big", signed=False)
++    if box_size < 8 or box_size > max(len(content), 32 * 1024 * 1024):
++        return False
++    brands = content[8:min(len(content), max(16, box_size))]
++    allowed = (b"M4A ", b"M4B ", b"mp41", b"mp42", b"isom", b"iso2", b"dash")
++    return any(brand in brands for brand in allowed)
++
++
++def _looks_like_aac(content: bytes) -> bool:
++    if content.startswith(b"ADIF"):
++        return True
++    if len(content) < 7 or content[0] != 0xFF or (content[1] & 0xF0) != 0xF0:
++        return False
++    # ADTS layer bits must be 00 and sampling frequency index must not be reserved.
++    if (content[1] & 0x06) != 0:
++        return False
++    sampling_frequency_index = (content[2] >> 2) & 0x0F
++    return sampling_frequency_index != 0x0F
++
++
++def _looks_like_content_type(content: bytes, normalized_type: str) -> bool:
++    if not content:
++        return True
++    if normalized_type == "image/webp":
++        return content.startswith(b"RIFF") and len(content) >= 12 and content[8:12] == b"WEBP"
++    if normalized_type == "audio/webm":
++        return _looks_like_webm(content)
++    if normalized_type == "audio/mp4":
++        return _looks_like_mp4(content)
++    if normalized_type == "audio/aac":
++        return _looks_like_aac(content)
++    prefixes = _MAGIC_BYTES_BY_TYPE.get(normalized_type)
++    if not prefixes:
++        return True
++    return any(content.startswith(prefix) for prefix in prefixes)
++
++
++async def safe_download_bytes(
++    url: str,
++    *,
++    max_bytes: int,
++    source_type: str,
++    policy: Mapping[str, object] | None = None,
++    headers: Mapping[str, str] | None = None,
++    timeout: float = 30.0,
++    max_redirects: int = 5,
++    allowed_content_types: Sequence[str] | None = None,
++    allow_userinfo: bool = False,
++    allowed_private_origins: Sequence[str] | None = None,
++    transport: httpx.AsyncBaseTransport | None = None,
++) -> SafeHTTPResult:
++    if max_bytes < 1:
++        raise SafeHTTPError("max_bytes must be positive")
++    _validate_url(
++        url,
++        allow_userinfo=allow_userinfo,
++        allowed_private_origins=allowed_private_origins,
++    )
++    request_headers = dict(headers or {})
++    has_credentials = any(k.lower() in {"authorization", "cookie"} for k in request_headers)
++    current_url = url
++    redirects = 0
++
++    async with httpx.AsyncClient(timeout=timeout, follow_redirects=False, transport=transport) as client:
++        while True:
++            try:
++                stream_context = client.stream("GET", current_url, headers=request_headers)
++                response = await stream_context.__aenter__()
++            except httpx.HTTPError as exc:
++                raise SafeHTTPError(f"HTTP download failed for {redact_url(current_url)}: {exc.__class__.__name__}") from exc
++            try:
++                location = response.headers.get("Location")
++                if response.status_code in {301, 302, 303, 307, 308} and location:
++                    redirects += 1
++                    if redirects > max_redirects:
++                        raise SafeHTTPError(f"Too many redirects downloading {redact_url(url)}")
++                    next_url = str(response.url.join(location))
++                    _validate_url(
++                        next_url,
++                        allow_userinfo=allow_userinfo,
++                        allowed_private_origins=allowed_private_origins,
++                    )
++                    if has_credentials and not _same_origin(url, next_url):
++                        raise SafeHTTPError(f"Blocked credential-bearing cross-origin redirect from {redact_url(url)} to {redact_url(next_url)}")
++                    current_url = next_url
++                    continue
++
++                try:
++                    response.raise_for_status()
++                except httpx.HTTPStatusError as exc:
++                    raise SafeHTTPError(f"HTTP status {response.status_code} downloading {redact_url(str(response.url))}") from exc
++
++                content_type = response.headers.get("Content-Type", "")
++                normalized_type = content_type.split(";", 1)[0].strip().lower()
++                allowed_types = {ct.lower() for ct in allowed_content_types or ()}
++                defer_generic_type_check = allowed_content_types and normalized_type in {"", "application/octet-stream"}
++                if allowed_content_types and normalized_type not in allowed_types and not defer_generic_type_check:
++                    raise SafeHTTPError(f"Blocked disallowed content type {normalized_type or '<missing>'} from {redact_url(str(response.url))}")
++                content_length = response.headers.get("Content-Length")
++                length_value = int(content_length) if content_length and content_length.isdigit() else None
++                if length_value is not None and length_value > max_bytes:
++                    raise SafeHTTPError(f"Response too large from {redact_url(str(response.url))}: {length_value} bytes exceeds {max_bytes}")
++
++                body = bytearray()
++                bytes_read = 0
++                try:
++                    async for chunk in response.aiter_bytes():
++                        bytes_read += len(chunk)
++                        if bytes_read > max_bytes:
++                            raise SafeHTTPError(f"Response too large from {redact_url(str(response.url))}: exceeds {max_bytes} bytes")
++                        body.extend(chunk)
++                except SafeHTTPError:
++                    raise
++                except httpx.HTTPError as exc:
++                    raise SafeHTTPError(f"HTTP download failed for {redact_url(str(response.url))}: {exc.__class__.__name__}") from exc
++                content = bytes(body)
++                if allowed_content_types:
++                    if defer_generic_type_check:
++                        if not any(_looks_like_content_type(content, allowed_type) for allowed_type in allowed_types):
++                            raise SafeHTTPError(
++                                f"Blocked content whose bytes do not match allowed types from {redact_url(str(response.url))}"
++                            )
++                    elif normalized_type and not _looks_like_content_type(content, normalized_type):
++                        raise SafeHTTPError(
++                            f"Blocked content whose bytes do not match declared type {normalized_type} from {redact_url(str(response.url))}"
++                        )
++                digest = hashlib.sha256(content).hexdigest()
++                return SafeHTTPResult(
++                    content=content,
++                    source_url=redact_url(url),
++                    final_url=redact_url(str(response.url)),
++                    status_code=response.status_code,
++                    content_type=content_type,
++                    content_length=length_value,
++                    bytes_read=bytes_read,
++                    sha256=digest,
++                    source_type=source_type,
++                    policy=dict(policy or {}),
++                    headers={k.lower(): v for k, v in response.headers.items()},
++                )
++            finally:
++                await stream_context.__aexit__(None, None, None)
++
++
++async def safe_download_to_file(url: str, *, max_bytes: int, suffix: str = "", **kwargs) -> tuple[str, SafeHTTPResult]:
++    result = await safe_download_bytes(url, max_bytes=max_bytes, **kwargs)
++    fd, path = tempfile.mkstemp(suffix=suffix)
++    Path(path).write_bytes(result.content)
++    try:
++        import os
++        os.close(fd)
++    except OSError:
++        pass
++    return path, result
