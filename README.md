@@ -10,6 +10,8 @@ The payload hardens three connected boundaries:
 
 It is a patch payload for a clean Hermes Agent checkout. It does not vendor, mirror, or fork Hermes Agent source.
 
+License: MIT. See `LICENSE`.
+
 Executable sources:
 
 - `patches/hermes-safe-fetch-context/series` — apply order for final-state payload fragments
