@@ -1,0 +1,25 @@
+diff --git a/cli.py b/cli.py
+index d76ce01bc..d8a7ac857 100644
+--- a/cli.py
++++ b/cli.py
+@@ -11814,8 +11814,20 @@ def main(
+     # Run interactive mode
+     cli.run()
+ 
+ 
++def _normalize_fire_argv(argv: list[str]) -> list[str]:
++    """Normalize documented short flags before Python Fire parses argv.
++
++    Fire treats some uppercase short flags as residual command tokens.  Without
++    this shim, direct ``python cli.py -Q -q ...`` can execute the query and then
++    exit with ``Could not consume arg: -Q``.  The installed ``hermes`` wrapper
++    and documented CLI both support ``-Q`` as ``--quiet``.
++    """
++    return ["--quiet" if arg == "-Q" else arg for arg in argv]
++
++
+ if __name__ == "__main__":
+     import fire
+ 
++    sys.argv[:] = _normalize_fire_argv(sys.argv)
+     fire.Fire(main)

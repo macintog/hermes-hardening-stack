@@ -1,0 +1,51 @@
+diff --git a/tests/tools/test_browser_vision_evidence_ledger.py b/tests/tools/test_browser_vision_evidence_ledger.py
+new file mode 100644
+index 000000000..352618cad
+--- /dev/null
++++ b/tests/tools/test_browser_vision_evidence_ledger.py
+@@ -0,0 +1,45 @@
++import json
++from pathlib import Path
++from unittest.mock import MagicMock
++
++
++def test_browser_vision_result_includes_native_evidence_ledger(tmp_path, monkeypatch):
++    import tools.browser_tool as browser_tool
++
++    screenshot = tmp_path / "browser_screenshot_fixture.png"
++
++    monkeypatch.setattr(browser_tool, "_is_camofox_mode", lambda: False)
++    monkeypatch.setattr(browser_tool, "_last_session_key", lambda task_id: task_id)
++    monkeypatch.setattr(browser_tool, "_cleanup_old_screenshots", lambda *a, **k: None)
++    monkeypatch.setattr(browser_tool, "_get_vision_model", lambda: "test-vision")
++    monkeypatch.setattr(browser_tool, "_get_cloud_provider", lambda: None)
++    def _fake_browser_command(*args, **kwargs):
++        screenshot.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
++        return {"success": True, "data": {"path": str(screenshot)}}
++
++    monkeypatch.setattr(browser_tool, "_run_browser_command", _fake_browser_command)
++
++    response = MagicMock()
++    response.choices = [MagicMock(message=MagicMock(content="Screenshot analysis."))]
++    monkeypatch.setattr(browser_tool, "call_llm", lambda **kwargs: response)
++
++    result = json.loads(browser_tool.browser_vision("What is visible?", annotate=False, task_id="t"))
++
++    assert result["success"] is True
++    assert result["analysis"] == "Screenshot analysis."
++    assert result["screenshot_path"] == str(screenshot)
++    ledger = result["evidence_ledger"]
++    assert ledger["schema"] == "hermes.tool_result_ledger.v1"
++    assert ledger["ledger_origin"] == "native_tool"
++    assert ledger["tool_name"] == "browser_vision"
++    item = ledger["evidence_items"][0]
++    assert item["kind"] == "browser_screenshot_observation"
++    assert item["source_type"] == "browser_screenshot"
++    assert item["text_ref"] == "analysis"
++    assert item["text"] is None
++    assert item["evidence_only"] is True
++    assert item["verbatim"] is False
++    assert ledger["operational_artifacts"][0]["kind"] == "screenshot"
++    assert ledger["side_effects"] == []
++    assert ledger["action_decisions"] == []
++    assert ledger["metadata"]["ledgers_exposed"] is True

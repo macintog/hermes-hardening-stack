@@ -1,0 +1,365 @@
+diff --git a/agent/context_references.py b/agent/context_references.py
+index fe63190e2..153a24f84 100644
+--- a/agent/context_references.py
++++ b/agent/context_references.py
+@@ -9,7 +9,7 @@ import re
+ import subprocess
+ from dataclasses import dataclass, field
+ from pathlib import Path
+-from typing import Awaitable, Callable
++from typing import Any, Awaitable, Callable
+ 
+ from agent.model_metadata import estimate_tokens_rough
+ from hermes_cli._subprocess_compat import IS_WINDOWS, windows_hide_flags
+@@ -19,6 +19,10 @@ REFERENCE_PATTERN = re.compile(
+     rf"(?<![\w/])@(?:(?P<simple>diff|staged)\b|(?P<kind>file|folder|git|url):(?P<value>{_QUOTED_REFERENCE_VALUE}(?::\d+(?:-\d+)?)?|\S+))"
+ )
+ TRAILING_PUNCTUATION = ",.;!?"
++_MAX_REFERENCE_EXPANSIONS = 20
++_MAX_REFERENCE_CHARS = 200_000
++_TRUNCATED_REFERENCE_MARKER = "\n[... reference truncated ...]\n"
++_NATIVE_LEDGER_SCHEMAS = {"hermes.evidence_ledger.v1", "hermes.tool_result_ledger.v1"}
+ _SENSITIVE_HOME_DIRS = (".ssh", ".aws", ".gnupg", ".kube", ".docker", ".azure", ".config/gh")
+ _SENSITIVE_HERMES_DIRS = (Path("skills") / ".hub",)
+ _SENSITIVE_HOME_FILES = (
+@@ -108,8 +112,9 @@ def preprocess_context_references(
+     *,
+     cwd: str | Path,
+     context_length: int,
+-    url_fetcher: Callable[[str], str | Awaitable[str]] | None = None,
++    url_fetcher: Callable[[str], Any | Awaitable[Any]] | None = None,
+     allowed_root: str | Path | None = None,
++    trusted_user_intent: str | None = None,
+ ) -> ContextReferenceResult:
+     coro = preprocess_context_references_async(
+         message,
+@@ -117,6 +122,7 @@ def preprocess_context_references(
+         context_length=context_length,
+         url_fetcher=url_fetcher,
+         allowed_root=allowed_root,
++        trusted_user_intent=trusted_user_intent,
+     )
+     # Safe for both CLI (no loop) and gateway (loop already running).
+     try:
+@@ -135,12 +141,18 @@ async def preprocess_context_references_async(
+     *,
+     cwd: str | Path,
+     context_length: int,
+-    url_fetcher: Callable[[str], str | Awaitable[str]] | None = None,
++    url_fetcher: Callable[[str], Any | Awaitable[Any]] | None = None,
+     allowed_root: str | Path | None = None,
++    trusted_user_intent: str | None = None,
+ ) -> ContextReferenceResult:
+     refs = parse_context_references(message)
+     if not refs:
+         return ContextReferenceResult(message=message, original_message=message)
++    if len(refs) > _MAX_REFERENCE_EXPANSIONS:
++        refs = refs[:_MAX_REFERENCE_EXPANSIONS]
++        warnings = [f"@ context injection limited to {_MAX_REFERENCE_EXPANSIONS} references."]
++    else:
++        warnings = []
+ 
+     cwd_path = Path(cwd).expanduser().resolve()
+     # Default to the current working directory so @ references cannot escape
+@@ -148,16 +160,10 @@ async def preprocess_context_references_async(
+     allowed_root_path = (
+         Path(allowed_root).expanduser().resolve() if allowed_root is not None else cwd_path
+     )
+-    warnings: list[str] = []
+     blocks: list[str] = []
+     injected_tokens = 0
++    trusted_text = trusted_user_intent if trusted_user_intent is not None else message
+ 
+-    # Expand all references concurrently. Each _expand_reference is independent
+-    # (no shared state during expansion) — a message with several @url: refs
+-    # would otherwise pay one full web_extract round-trip per ref in series.
+-    # gather preserves positional order, so we reassemble warnings/blocks in the
+-    # original ref order exactly as the prior serial loop did; the token-budget
+-    # check below is unchanged (it runs once, after all refs are expanded).
+     expanded = await asyncio.gather(
+         *(
+             _expand_reference(
+@@ -165,16 +171,21 @@ async def preprocess_context_references_async(
+                 cwd_path,
+                 url_fetcher=url_fetcher,
+                 allowed_root=allowed_root_path,
++                trusted_user_intent=trusted_text,
++                prior_untrusted_context=message,
+             )
+             for ref in refs
+         )
+     )
+-    for warning, block in expanded:
++    for ref, (warning, block) in zip(refs, expanded):
+         if warning:
+             warnings.append(warning)
+         if block:
+-            blocks.append(block)
+-            injected_tokens += estimate_tokens_rough(block)
++            limited_block, limit_warning = _limit_reference_block(ref, block)
++            if limit_warning:
++                warnings.append(limit_warning)
++            blocks.append(limited_block)
++            injected_tokens += estimate_tokens_rough(limited_block)
+ 
+     hard_limit = max(1, int(context_length * 0.50))
+     soft_limit = max(1, int(context_length * 0.25))
+@@ -219,13 +230,27 @@ async def _expand_reference(
+     ref: ContextReference,
+     cwd: Path,
+     *,
+-    url_fetcher: Callable[[str], str | Awaitable[str]] | None = None,
++    url_fetcher: Callable[[str], Any | Awaitable[Any]] | None = None,
+     allowed_root: Path | None = None,
++    trusted_user_intent: str | None = None,
++    prior_untrusted_context: str | None = None,
+ ) -> tuple[str | None, str | None]:
+     try:
+         if ref.kind == "file":
++            safety_warning = _preflight_local_reference(ref, cwd, allowed_root)
++            if safety_warning:
++                return safety_warning, None
++            authority_warning = _authorize_local_reference(ref, trusted_user_intent, prior_untrusted_context, tool_name="read_file")
++            if authority_warning:
++                return authority_warning, None
+             return _expand_file_reference(ref, cwd, allowed_root=allowed_root)
+         if ref.kind == "folder":
++            safety_warning = _preflight_local_reference(ref, cwd, allowed_root)
++            if safety_warning:
++                return safety_warning, None
++            authority_warning = _authorize_local_reference(ref, trusted_user_intent, prior_untrusted_context, tool_name="search_files")
++            if authority_warning:
++                return authority_warning, None
+             return _expand_folder_reference(ref, cwd, allowed_root=allowed_root)
+         if ref.kind == "diff":
+             return _expand_git_reference(ref, cwd, ["diff"], "git diff")
+@@ -238,13 +263,49 @@ async def _expand_reference(
+             content = await _fetch_url_content(ref.target, url_fetcher=url_fetcher)
+             if not content:
+                 return f"{ref.raw}: no content extracted", None
+-            return None, f"🌐 {ref.raw} ({estimate_tokens_rough(content)} tokens)\n{content}"
++            return None, f"🌐 {ref.raw} ({estimate_tokens_rough(content)} tokens)\n{_render_url_evidence(content, ref.target)}"
+     except Exception as exc:
+         return f"{ref.raw}: {exc}", None
+ 
+     return f"{ref.raw}: unsupported reference type", None
+ 
+ 
++def _preflight_local_reference(
++    ref: ContextReference,
++    cwd: Path,
++    allowed_root: Path | None,
++) -> str | None:
++    try:
++        path = _resolve_path(cwd, ref.target, allowed_root=allowed_root)
++        _ensure_reference_path_allowed(path)
++    except Exception as exc:
++        return f"{ref.raw}: {exc}"
++    return None
++
++
++def _authorize_local_reference(
++    ref: ContextReference,
++    trusted_user_intent: str | None,
++    prior_untrusted_context: str | None,
++    *,
++    tool_name: str,
++) -> str | None:
++    try:
++        from agent.action_authority import AuthorityDecision, evaluate_action_authority
++    except Exception:
++        return None
++
++    decision = evaluate_action_authority(
++        tool_name,
++        {"path": ref.target},
++        trusted_user_intent=trusted_user_intent or "",
++        prior_untrusted_context=prior_untrusted_context or "",
++    )
++    if decision.decision == AuthorityDecision.ALLOW:
++        return None
++    return f"{ref.raw}: local reference expansion requires trusted active-user authority ({decision.reason})"
++
++
+ def _expand_file_reference(
+     ref: ContextReference,
+     cwd: Path,
+@@ -327,25 +388,167 @@ def _expand_git_reference(
+ async def _fetch_url_content(
+     url: str,
+     *,
+-    url_fetcher: Callable[[str], str | Awaitable[str]] | None = None,
++    url_fetcher: Callable[[str], Any | Awaitable[Any]] | None = None,
+ ) -> str:
+     fetcher = url_fetcher or _default_url_fetcher
+-    content = fetcher(url)
+-    if inspect.isawaitable(content):
+-        content = await content
+-    return str(content or "").strip()
++    payload = fetcher(url)
++    if inspect.isawaitable(payload):
++        payload = await payload
++    return _extract_web_reference_text(payload).strip()
+ 
+ 
+ async def _default_url_fetcher(url: str) -> str:
+     from tools.web_tools import web_extract_tool
+ 
+-    raw = await web_extract_tool([url], format="markdown")
+-    payload = json.loads(raw)
+-    docs = payload.get("results", [])
+-    if not docs:
++    raw = await web_extract_tool([url], format="markdown", use_llm_processing=True)
++    return _extract_web_reference_text(raw)
++
++
++def _extract_web_reference_text(payload: Any) -> str:
++    if payload is None:
++        return ""
++    if isinstance(payload, str):
++        text = payload.strip()
++        if _is_untrusted_context_fenced(text):
++            return text
++        try:
++            parsed = json.loads(text)
++        except json.JSONDecodeError:
++            return text
++        extracted = _extract_web_reference_text(parsed)
++        return extracted if extracted else text
++    if isinstance(payload, dict):
++        if _has_valid_native_ledger(payload):
++            return _stable_json(payload)
++        if "evidence_ledger" in payload:
++            return _stable_json_with_invalid_ledger_diagnostic(payload)
++        direct = _first_text_field(payload)
++        if direct is not None:
++            return direct
++        doc = _first_document(payload)
++        if doc is not None:
++            if _has_valid_native_ledger(payload):
++                return _stable_json(payload)
++            if "evidence_ledger" in doc:
++                if _has_valid_native_ledger(doc):
++                    return _stable_json(doc)
++                return _stable_json_with_invalid_ledger_diagnostic(doc)
++            direct = _first_text_field(doc)
++            if direct is not None:
++                return direct
+         return ""
+-    doc = docs[0]
+-    return str(doc.get("content") or doc.get("raw_content") or "").strip()
++    if isinstance(payload, (int, float, bool)):
++        return str(payload)
++    return ""
++
++
++def _first_text_field(payload: dict[str, Any]) -> str | None:
++    for key in ("markdown", "text", "content", "raw_content"):
++        value = payload.get(key)
++        if isinstance(value, str) and value.strip():
++            return value.strip()
++    return None
++
++
++def _first_document(payload: dict[str, Any]) -> dict[str, Any] | None:
++    candidates: list[Any] = []
++    if isinstance(payload.get("results"), list):
++        candidates.extend(payload["results"])
++    data = payload.get("data")
++    if isinstance(data, dict):
++        for key in ("documents", "results"):
++            if isinstance(data.get(key), list):
++                candidates.extend(data[key])
++    for candidate in candidates:
++        if isinstance(candidate, dict):
++            return candidate
++    return None
++
++
++def _has_valid_native_ledger(payload: dict[str, Any]) -> bool:
++    return "evidence_ledger" in payload and _native_ledger_validation_error(payload) is None
++
++
++def _native_ledger_validation_error(payload: dict[str, Any]) -> str | None:
++    ledger = payload.get("evidence_ledger")
++    if not isinstance(ledger, dict):
++        return "evidence_ledger_not_object"
++    if ledger.get("schema") not in _NATIVE_LEDGER_SCHEMAS:
++        return "unsupported_evidence_ledger_schema"
++    if ledger.get("ledger_origin") != "native_tool":
++        return "ledger_origin_not_native_tool"
++    items = ledger.get("evidence_items")
++    if not isinstance(items, list):
++        return "evidence_items_not_list"
++    if not all(isinstance(item, dict) and item.get("can_authorize_action") is False for item in items):
++        return "evidence_items_not_all_non_authorizing"
++    return None
++
++
++def _stable_json_with_invalid_ledger_diagnostic(payload: dict[str, Any]) -> str:
++    diagnostic = {
++        "ledger_status": "invalid",
++        "rendered_as": "untrusted_text",
++        "reason": _native_ledger_validation_error(payload) or "unknown",
++    }
++    enriched = dict(payload)
++    enriched["evidence_ledger_diagnostic"] = diagnostic
++    return _stable_json(enriched)
++
++
++def _stable_json(payload: Any) -> str:
++    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
++
++
++def _is_untrusted_context_fenced(text: str) -> bool:
++    try:
++        from agent.context_safety import is_rendered_untrusted_context
++    except Exception:
++        return False
++    return is_rendered_untrusted_context(text)
++
++
++def _render_url_evidence(content: str, source_label: str) -> str:
++    if _is_untrusted_context_fenced(content):
++        return content
++    try:
++        from agent.context_safety import ContextSurface, scan_and_render_untrusted_context
++
++        result = scan_and_render_untrusted_context(
++            content,
++            surface=ContextSurface.DOWNLOADED_TEXT,
++            source_label=source_label,
++        )
++        if result.rendered_text:
++            return result.rendered_text
++    except Exception:
++        pass
++    escaped = content.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
++    return f'<untrusted-context source="downloaded_text" verdict="fence" label="{source_label}">\\n{escaped}\\n</untrusted-context>'
++
++
++def _limit_reference_block(ref: ContextReference, block: str) -> tuple[str, str | None]:
++    if len(block) <= _MAX_REFERENCE_CHARS:
++        return block, None
++    truncated = _truncate_preserving_untrusted_context(block, _MAX_REFERENCE_CHARS)
++    if truncated is None:
++        truncated = block[:_MAX_REFERENCE_CHARS]
++    return truncated, f"{ref.raw}: expanded context truncated to {_MAX_REFERENCE_CHARS} characters."
++
++
++def _truncate_preserving_untrusted_context(block: str, max_chars: int) -> str | None:
++    opening_start = block.find("<untrusted-context")
++    closing_start = block.rfind("</untrusted-context>")
++    if opening_start < 0 or closing_start < 0 or closing_start < opening_start:
++        return None
++    opening_end = block.find(">", opening_start)
++    if opening_end < 0:
++        return None
++    suffix = block[closing_start:]
++    prefix_budget = max_chars - len(_TRUNCATED_REFERENCE_MARKER) - len(suffix)
++    if prefix_budget <= opening_end + 1:
++        return None
++    return block[:prefix_budget] + _TRUNCATED_REFERENCE_MARKER + suffix
+ 
+ 
+ def _resolve_path(cwd: Path, target: str, *, allowed_root: Path | None = None) -> Path:

@@ -1,0 +1,52 @@
+diff --git a/tests/hermes_cli/test_uv_tool_update.py b/tests/hermes_cli/test_uv_tool_update.py
+index b8f294d..89ddefb 100644
+--- a/tests/hermes_cli/test_uv_tool_update.py
++++ b/tests/hermes_cli/test_uv_tool_update.py
+@@ -51,6 +51,14 @@ def _patch_managed_uv(request):
+         yield
+ 
+ 
++@pytest.fixture(autouse=True)
++def _disable_sfw_wrapper(monkeypatch):
++    monkeypatch.setattr(
++        "hermes_cli.main._wrap_package_manager_argv_for_sfw",
++        lambda cmd, *, env=None, force=False: (cmd, env),
++    )
++
++
+ # ---------------------------------------------------------------------------
+ # is_uv_tool_install
+ # ---------------------------------------------------------------------------
+@@ -209,6 +217,32 @@ class TestCmdUpdatePipUsesUvTool:
+             "hermes-agent",
+         ]
+ 
++    @patch("subprocess.run")
++    def test_uv_pip_update_routes_through_sfw_wrapper(self, mock_run):
++        from hermes_cli import main as hm
++
++        mock_run.return_value = subprocess.CompletedProcess(["uv"], 0, stdout="", stderr="")
++
++        def _wrap(cmd, *, env=None, force=False):
++            assert cmd == ["/opt/homebrew/bin/uv", "pip", "install", "--upgrade", "hermes-agent"]
++            assert force is False
++            return ["/shim/sfw-package-shim", "uv", "pip", "install", "--upgrade", "hermes-agent"], {"PATH": "wrapped"}
++
++        with patch("shutil.which", return_value="/opt/homebrew/bin/uv"), \
++             patch("hermes_cli.config.is_uv_tool_install", return_value=False), \
++             patch("hermes_cli.main._wrap_package_manager_argv_for_sfw", side_effect=_wrap):
++            hm._cmd_update_pip(SimpleNamespace())
++
++        assert mock_run.call_args[0][0] == [
++            "/shim/sfw-package-shim",
++            "uv",
++            "pip",
++            "install",
++            "--upgrade",
++            "hermes-agent",
++        ]
++        assert mock_run.call_args.kwargs["env"] == {"PATH": "wrapped"}
++
+     @patch("subprocess.run")
+     def test_falls_back_to_pip_when_no_uv(self, mock_run):
+         from hermes_cli.main import _cmd_update_pip

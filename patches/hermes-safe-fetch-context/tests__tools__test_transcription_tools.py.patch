@@ -1,0 +1,21 @@
+diff --git a/tests/tools/test_transcription_tools.py b/tests/tools/test_transcription_tools.py
+index 5e4a9ad71..a34a3eb0c 100644
+--- a/tests/tools/test_transcription_tools.py
++++ b/tests/tools/test_transcription_tools.py
+@@ -796,6 +806,16 @@ class TestTranscribeAudioDispatch:
+ 
+         assert result["success"] is True
+         assert result["provider"] == "groq"
++        ledger = result["evidence_ledger"]
++        assert ledger["tool_name"] == "transcribe_audio"
++        item = ledger["evidence_items"][0]
++        assert item["kind"] == "transcript_text"
++        assert item["text_ref"] == "transcript"
++        assert item["source_type"] == "audio_file"
++        assert item["evidence_only"] is True
++        assert item["instruction_authority"] == "none"
++        assert item["can_authorize_action"] is False
++        assert item["char_count"] == 2
+         mock_groq.assert_called_once()
+ 
+     def test_dispatches_to_local(self, sample_ogg):

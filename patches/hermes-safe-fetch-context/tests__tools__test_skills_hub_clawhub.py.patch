@@ -1,0 +1,49 @@
+diff --git a/tests/tools/test_skills_hub_clawhub.py b/tests/tools/test_skills_hub_clawhub.py
+index 2318ec80e..2e90f016c 100644
+--- a/tests/tools/test_skills_hub_clawhub.py
++++ b/tests/tools/test_skills_hub_clawhub.py
+@@ -1,7 +1,8 @@
+ #!/usr/bin/env python3
+ 
+ import unittest
+-from unittest.mock import patch
++from types import SimpleNamespace
++from unittest.mock import AsyncMock, patch
+ 
+ from tools.skills_hub import ClawHubSource, SkillMeta
+ 
+@@ -16,6 +17,10 @@ class _MockResponse:
+         return self._json_data
+ 
+ 
++def _safe_download_result(text: str):
++    return SimpleNamespace(content=text.encode("utf-8"))
++
++
+ class TestClawHubSource(unittest.TestCase):
+     def setUp(self):
+         self.src = ClawHubSource()
+@@ -203,8 +208,9 @@ class TestClawHubSource(unittest.TestCase):
+         self.assertEqual(meta.identifier, "self-improving-agent")
+         self.assertEqual(meta.tags, ["automation"])
+ 
++    @patch("tools.safe_http.safe_download_bytes", new_callable=AsyncMock)
+     @patch("tools.skills_hub.httpx.get")
+-    def test_fetch_resolves_latest_version_and_downloads_raw_files(self, mock_get):
++    def test_fetch_resolves_latest_version_and_downloads_raw_files(self, mock_get, mock_download):
+         def side_effect(url, *args, **kwargs):
+             if url.endswith("/skills/caldav-calendar"):
+                 return _MockResponse(
+@@ -224,11 +230,10 @@ class TestClawHubSource(unittest.TestCase):
+                         ]
+                     },
+                 )
+-            if url == "https://files.example/skill-md":
+-                return _MockResponse(status_code=200, text="# Skill")
+             return _MockResponse(status_code=404, json_data={})
+ 
+         mock_get.side_effect = side_effect
++        mock_download.return_value = _safe_download_result("# Skill")
+ 
+         bundle = self.src.fetch("caldav-calendar")
+ 

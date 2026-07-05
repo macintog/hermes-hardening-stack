@@ -1,0 +1,82 @@
+diff --git a/tools/skill_manager_tool.py b/tools/skill_manager_tool.py
+index 4ce5f06e4..ba15a9f50 100644
+--- a/tools/skill_manager_tool.py
++++ b/tools/skill_manager_tool.py
+@@ -15,6 +15,7 @@ Actions:
+   create     -- Create a new skill (SKILL.md + directory structure)
+   edit       -- Replace the SKILL.md content of a user skill (full rewrite)
+   patch      -- Targeted find-and-replace within SKILL.md or any supporting file
++  promote_trust -- Explicitly trust the current local contents of an installed skill
+   delete     -- Remove a user skill entirely
+   write_file -- Add/overwrite a supporting file (reference, template, script, asset)
+   remove_file-- Remove a supporting file from a user skill
+@@ -824,6 +825,7 @@ def skill_manage(
+     new_string: str = None,
+     replace_all: bool = False,
+     absorbed_into: str = None,
++    reason: str = None,
+ ) -> str:
+     """
+     Manage user-created skills. Dispatches to the appropriate action handler.
+@@ -850,6 +852,15 @@ def skill_manage(
+     elif action == "delete":
+         result = _delete_skill(name, absorbed_into=absorbed_into)
+ 
++    elif action == "promote_trust":
++        from tools.skills_tool import skill_trust_promote
++
++        return skill_trust_promote(
++            name,
++            promoted_by="skill_manage",
++            reason=reason or "explicit local trust promotion",
++        )
++
+     elif action == "write_file":
+         if not file_path:
+             return tool_error("file_path is required for 'write_file'. Example: 'references/api-guide.md'", success=False)
+@@ -863,7 +874,7 @@ def skill_manage(
+         result = _remove_file(name, file_path)
+ 
+     else:
+-        result = {"success": False, "error": f"Unknown action '{action}'. Use: create, edit, patch, delete, write_file, remove_file"}
++        result = {"success": False, "error": f"Unknown action '{action}'. Use: create, edit, patch, promote_trust, delete, write_file, remove_file"}
+ 
+     if result.get("success"):
+         try:
+@@ -906,6 +917,7 @@ SKILL_MANAGE_SCHEMA = {
+         "Actions: create (full SKILL.md + optional category), "
+         "patch (old_string/new_string — preferred for fixes), "
+         "edit (full SKILL.md rewrite — major overhauls only), "
++        "promote_trust (explicitly trust the current installed skill content), "
+         "delete, write_file, remove_file.\n\n"
+         "On delete, pass `absorbed_into=<umbrella>` when you're merging this "
+         "skill's content into another one, or `absorbed_into=\"\"` when you're "
+@@ -934,7 +946,7 @@ SKILL_MANAGE_SCHEMA = {
+         "properties": {
+             "action": {
+                 "type": "string",
+-                "enum": ["create", "patch", "edit", "delete", "write_file", "remove_file"],
++                "enum": ["create", "patch", "edit", "promote_trust", "delete", "write_file", "remove_file"],
+                 "description": "The action to perform."
+             },
+             "name": {
+@@ -1006,6 +1018,10 @@ SKILL_MANAGE_SCHEMA = {
+                     "rewriting) will have to guess at intent."
+                 )
+             },
++            "reason": {
++                "type": "string",
++                "description": "For 'promote_trust': short local reason for trusting this exact skill content."
++            },
+         },
+         "required": ["action", "name"],
+     },
+@@ -1029,6 +1045,7 @@ registry.register(
+         old_string=args.get("old_string"),
+         new_string=args.get("new_string"),
+         replace_all=args.get("replace_all", False),
+-        absorbed_into=args.get("absorbed_into")),
++        absorbed_into=args.get("absorbed_into"),
++        reason=args.get("reason")),
+     emoji="📝",
+ )

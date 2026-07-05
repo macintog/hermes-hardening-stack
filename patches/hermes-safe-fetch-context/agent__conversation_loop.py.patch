@@ -1,0 +1,103 @@
+diff --git a/agent/conversation_loop.py b/agent/conversation_loop.py
+index 7a5919807..55eaa45f2 100644
+--- a/agent/conversation_loop.py
++++ b/agent/conversation_loop.py
+@@ -34,7 +34,8 @@ from agent.error_classifier import FailoverReason, classify_api_error
+ from agent.iteration_budget import IterationBudget
+ from agent.turn_context import build_turn_context
+ from agent.turn_retry_state import TurnRetryState
+-from agent.memory_manager import build_memory_context_block
++from agent.context_safety import ContextSurface
++from agent.memory_manager import sanitize_context
+ from agent.message_sanitization import (
+     close_interrupted_tool_sequence,
+     _repair_tool_call_arguments,
+@@ -505,6 +506,7 @@ def run_conversation(
+     persist_user_message: Optional[str] = None,
+     persist_user_timestamp: Optional[float] = None,
+     moa_config: Optional[dict[str, Any]] = None,
++    active_user_intent: dict | str | None = None,
+ ) -> Dict[str, Any]:
+     """
+     Run a complete conversation with tool calling until completion.
+@@ -523,6 +525,9 @@ def run_conversation(
+         persist_user_timestamp: Optional platform event timestamp to store
+             as metadata on that persisted user message.
+                 or queuing follow-up prefetch work.
++        active_user_intent: Trusted, gateway-segmented user intent for
++            action authority. Evidence-only quoted or attached context stays
++            in the message body, not this authority marker.
+ 
+     Returns:
+         Dict: Complete conversation result with final response and message history
+@@ -576,6 +581,8 @@ def run_conversation(
+     _should_review_memory = _ctx.should_review_memory
+     _plugin_user_context = _ctx.plugin_user_context
+     _ext_prefetch_cache = _ctx.ext_prefetch_cache
++    if active_user_intent and 0 <= current_turn_user_idx < len(messages):
++        messages[current_turn_user_idx]["__active_user_intent"] = active_user_intent
+ 
+     # Main conversation loop counters (pure locals consumed by the loop below).
+     api_call_count = 0
+@@ -596,6 +603,25 @@ def run_conversation(
+     # over instead of spinning. Reset here so each turn starts fresh. See #26080.
+     agent._auth_pool_refresh_counts = {}
+ 
++    agent._current_turn_api_context_taint = []
++    _turn_api_context_injections: list[str] = []
++    if isinstance(_ext_prefetch_cache, str) and _ext_prefetch_cache:
++        _memory_context = agent._prepare_ephemeral_api_context(
++            sanitize_context(_ext_prefetch_cache),
++            surface=ContextSurface.MEMORY_CONTEXT,
++            source_label="memory_prefetch",
++        )
++        if _memory_context:
++            _turn_api_context_injections.append(_memory_context)
++    if _plugin_user_context:
++        _plugin_context = agent._prepare_ephemeral_api_context(
++            _plugin_user_context,
++            surface=ContextSurface.PLUGIN_CONTEXT,
++            source_label="plugin_pre_llm_call",
++        )
++        if _plugin_context:
++            _turn_api_context_injections.append(_plugin_context)
++
+     # Optional opt-in runtime: if api_mode == codex_app_server, hand the
+     # turn to the codex app-server subprocess (terminal/file ops/patching
+     # all run inside Codex). Default Hermes path is bypassed entirely.
+@@ -769,31 +795,17 @@ def run_conversation(
+             # API-call-time only — the original message in `messages` is
+             # never mutated, so nothing leaks into session persistence.
+             if idx == current_turn_user_idx and msg.get("role") == "user":
+-                _injections = []
+-                if _ext_prefetch_cache:
+-                    _fenced = build_memory_context_block(_ext_prefetch_cache)
+-                    if _fenced:
+-                        _injections.append(_fenced)
+-                if _plugin_user_context:
+-                    _injections.append(_plugin_user_context)
+-                if _injections:
++                if _turn_api_context_injections:
+                     _base = api_msg.get("content", "")
+                     if isinstance(_base, str):
+-                        api_msg["content"] = _base + "\n\n" + "\n\n".join(_injections)
++                        api_msg["content"] = _base + "\n\n" + "\n\n".join(_turn_api_context_injections)
+ 
+             # For ALL assistant messages, pass reasoning back to the API
+             # This ensures multi-turn reasoning context is preserved
+             agent._copy_reasoning_content_for_api(msg, api_msg)
+ 
+-            # Remove 'reasoning' field - it's for trajectory storage only
+-            # We've copied it to 'reasoning_content' for the API above
+-            if "reasoning" in api_msg:
+-                api_msg.pop("reasoning")
+-            # Remove finish_reason - not accepted by strict APIs (e.g. Mistral)
+-            if "finish_reason" in api_msg:
+-                api_msg.pop("finish_reason")
+-            # Strip internal thinking-prefill marker
+-            api_msg.pop("_thinking_prefill", None)
++            agent._render_tool_message_content_for_api(api_msg)
++            agent._strip_internal_message_fields_for_api(api_msg)
+             # Strip Codex Responses API fields (call_id, response_item_id) for
+             # strict providers like Mistral, Fireworks, etc. that reject unknown fields.
+             # Uses new dicts so the internal messages list retains the fields

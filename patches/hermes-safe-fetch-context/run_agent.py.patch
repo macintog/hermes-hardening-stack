@@ -1,0 +1,226 @@
+diff --git a/run_agent.py b/run_agent.py
+index 0116edf87..850ec3c17 100644
+--- a/run_agent.py
++++ b/run_agent.py
+@@ -134,6 +134,7 @@ else:
+ 
+ # Import our tool system
+ from model_tools import (
++    confirm_action_authority_if_requested,
+     get_tool_definitions,  # noqa: F401  # re-exported for tests that mock.patch("run_agent.get_tool_definitions")
+     get_toolset_for_tool,
+     handle_function_call,  # noqa: F401  # re-exported for tests that mock.patch("run_agent.handle_function_call")
+@@ -193,6 +194,19 @@ from agent.tool_result_classification import (
+     FILE_MUTATING_TOOL_NAMES as _FILE_MUTATING_TOOLS,
+     file_mutation_result_landed,
+ )
++from agent.context_safety import (
++    ContextSurface,
++    render_model_visible_tool_result,
++    scan_and_render_untrusted_context,
++)
++from agent.action_authority import AuthorityDecision, evaluate_action_authority
++from agent.turn_security_context import (
++    build_turn_security_context,
++    collect_prior_untrusted_context,
++    collect_trusted_policy_context,
++    extract_untrusted_blocks,
++    latest_trusted_user_intent,
++)
+ from agent.trajectory import (
+     convert_scratchpad_to_think,
+     save_trajectory as _save_trajectory_to_file,
+@@ -5200,6 +5214,177 @@ class AIAgent:
+         from agent.agent_runtime_helpers import reapply_reasoning_echo_for_provider
+         return reapply_reasoning_echo_for_provider(self, api_messages)
+ 
++    @staticmethod
++    def _strip_internal_message_fields_for_api(api_msg: dict) -> None:
++        """Remove Hermes-only message metadata from a provider API copy."""
++        for internal_field in (
++            "reasoning",
++            "finish_reason",
++            "_thinking_prefill",
++            "__active_user_intent",
++            "__tool_name",
++            "__trusted_control_result",
++            "tool_name",
++        ):
++            api_msg.pop(internal_field, None)
++
++    @staticmethod
++    def _tool_message_name(msg: dict) -> str:
++        for key in ("__tool_name", "tool_name", "name"):
++            value = msg.get(key)
++            if isinstance(value, str) and value:
++                return value
++        return ""
++
++    @staticmethod
++    def _render_model_visible_tool_result_text(tool_name: str, content: str) -> str:
++        rendered = render_model_visible_tool_result(tool_name, content)
++        if isinstance(rendered, str):
++            return rendered
++        return json.dumps(rendered, ensure_ascii=False)
++
++    @staticmethod
++    def _render_tool_message_content_for_api(api_msg: dict) -> None:
++        """Fence untrusted tool result content in the provider API copy only."""
++        if api_msg.get("role") != "tool" or api_msg.get("__trusted_control_result"):
++            return
++        tool_name = AIAgent._tool_message_name(api_msg)
++        content = api_msg.get("content")
++        if tool_name and isinstance(content, str):
++            api_msg["content"] = AIAgent._render_model_visible_tool_result_text(tool_name, content)
++
++    @staticmethod
++    def _trusted_skill_payload_from_tool_content(content: str) -> dict | None:
++        """Compatibility helper; turn_security_context owns policy extraction."""
++        try:
++            payload = json.loads(content)
++        except Exception:
++            return None
++        if not isinstance(payload, dict) or payload.get("success") is False:
++            return None
++        authority = str(payload.get("authority") or "").strip().lower()
++        if authority not in {"trusted", "trusted_by_local_policy"}:
++            return None
++        return payload
++
++    @staticmethod
++    def _is_trusted_skill_result_content(content: str) -> bool:
++        return AIAgent._trusted_skill_payload_from_tool_content(content) is not None
++
++    @staticmethod
++    def _rendered_untrusted_context_blocks(content: str) -> list[str]:
++        return list(extract_untrusted_blocks(content or ""))
++
++    @staticmethod
++    def _iter_untrusted_strings(value) -> list[str]:
++        chunks: list[str] = []
++        if isinstance(value, str):
++            chunks.extend(extract_untrusted_blocks(value))
++        elif isinstance(value, dict):
++            for nested in value.values():
++                chunks.extend(AIAgent._iter_untrusted_strings(nested))
++        elif isinstance(value, (list, tuple)):
++            for nested in value:
++                chunks.extend(AIAgent._iter_untrusted_strings(nested))
++        return chunks
++
++    @staticmethod
++    def _collect_prior_untrusted_context(messages: list, api_context_taint: list[str] | None = None) -> str:
++        """Compatibility wrapper for agent.turn_security_context."""
++        return collect_prior_untrusted_context(messages or [], api_context_taint=api_context_taint or [])
++
++    def _collect_action_visible_untrusted_context(self, messages: list) -> str:
++        """Collect persisted and API-only evidence blocks visible this turn."""
++        return collect_prior_untrusted_context(
++            messages,
++            api_context_taint=getattr(self, "_current_turn_api_context_taint", []) or [],
++            cached_system_prompt=getattr(self, "_cached_system_prompt", "") or "",
++        )
++
++    def _handle_function_call_authority_kwargs(self, messages: list) -> dict:
++        ctx = build_turn_security_context(
++            messages or [],
++            api_context_taint=getattr(self, "_current_turn_api_context_taint", []) or [],
++            cached_system_prompt=getattr(self, "_cached_system_prompt", "") or "",
++        )
++        return ctx.as_authority_kwargs()
++
++    def _prepare_ephemeral_api_context(
++        self,
++        text: str,
++        *,
++        surface: ContextSurface,
++        source_label: str,
++    ) -> str:
++        """Render API-only context and register the same block for action gating."""
++        if not isinstance(text, str) or not text.strip():
++            return ""
++        result = scan_and_render_untrusted_context(
++            text,
++            surface=surface,
++            source_label=source_label,
++        )
++        rendered = result.rendered_text or ""
++        if rendered:
++            taint = getattr(self, "_current_turn_api_context_taint", None)
++            if not isinstance(taint, list):
++                taint = []
++                self._current_turn_api_context_taint = taint
++            if rendered not in taint:
++                taint.append(rendered)
++        return rendered
++
++    @staticmethod
++    def _trusted_policy_text_from_tool_content(content: str) -> str:
++        return collect_trusted_policy_context([{"role": "tool", "content": content}])
++
++    @staticmethod
++    def _collect_trusted_policy_context(messages: list) -> str:
++        """Compatibility wrapper for agent.turn_security_context."""
++        return collect_trusted_policy_context(messages or [])
++
++    @staticmethod
++    def _trusted_authority_text_from_user_message(msg: dict) -> str:
++        return latest_trusted_user_intent([msg] if isinstance(msg, dict) else [])
++
++    @staticmethod
++    def _latest_trusted_user_intent(messages: list) -> str:
++        return latest_trusted_user_intent(messages or [])
++
++    @staticmethod
++    def _latest_user_intent(messages: list) -> str:
++        for msg in reversed(messages or []):
++            if isinstance(msg, dict) and msg.get("role") == "user":
++                content = msg.get("content")
++                if isinstance(content, str):
++                    return content
++                if isinstance(content, list):
++                    return "\n".join(str(part.get("text") if isinstance(part, dict) else part) for part in content)
++        return ""
++
++    def _authority_block_result(self, function_name: str, function_args: dict, messages: list) -> str | None:
++        authority_kwargs = self._handle_function_call_authority_kwargs(messages)
++        if not authority_kwargs:
++            return None
++        authority = evaluate_action_authority(
++            function_name,
++            function_args,
++            trusted_user_intent=authority_kwargs.get("user_task"),
++            trusted_policy_context=authority_kwargs.get("trusted_policy_context"),
++            prior_untrusted_context=authority_kwargs.get("prior_untrusted_context"),
++        )
++        authority = confirm_action_authority_if_requested(function_name, function_args, authority)
++        if authority.decision == AuthorityDecision.ALLOW:
++            return None
++        return json.dumps(authority.to_error_payload(), ensure_ascii=False)
++
++    def _uses_direct_authority_dispatch(self, function_name: str) -> bool:
++        return (
++            function_name in {"todo", "memory", "clarify", "delegate_task", "session_search"}
++            or bool(getattr(self, "_context_engine_tool_names", None) and function_name in self._context_engine_tool_names)
++            or bool(getattr(self, "_memory_manager", None) and self._memory_manager.has_tool(function_name) is True)
++        )
++
+     @staticmethod
+     def _sanitize_tool_calls_for_strict_api(api_msg: dict, model: "str | None" = None) -> dict:
+         """Strip Codex Responses API fields from tool_calls for strict providers.
+@@ -5438,6 +5623,7 @@ class AIAgent:
+         persist_user_message: Optional[str] = None,
+         persist_user_timestamp: Optional[float] = None,
+         moa_config: Optional[dict[str, Any]] = None,
++        active_user_intent: dict | str | None = None,
+     ) -> Dict[str, Any]:
+         """Forwarder — see ``agent.conversation_loop.run_conversation``."""
+         from agent.conversation_loop import run_conversation
+@@ -5451,6 +5637,7 @@ class AIAgent:
+             persist_user_message,
+             persist_user_timestamp=persist_user_timestamp,
+             moa_config=moa_config,
++            active_user_intent=active_user_intent,
+         )
+ 
+     def chat(self, message: str, stream_callback: Optional[callable] = None) -> str:

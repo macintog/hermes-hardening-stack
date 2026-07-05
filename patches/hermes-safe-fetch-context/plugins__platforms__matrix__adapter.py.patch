@@ -1,0 +1,152 @@
+diff --git a/plugins/platforms/matrix/adapter.py b/plugins/platforms/matrix/adapter.py
+index 0b663f1b7..56814970b 100644
+--- a/plugins/platforms/matrix/adapter.py
++++ b/plugins/platforms/matrix/adapter.py
+@@ -130,9 +130,18 @@ from gateway.platforms.base import (
+     proxy_kwargs_for_aiohttp,
+ )
+ from gateway.platforms.helpers import ThreadParticipationTracker
++from tools.safe_http import SafeHTTPError, safe_download_bytes
+ 
+ logger = logging.getLogger(__name__)
+ 
++_MATRIX_IMAGE_CONTENT_TYPES = (
++    "image/png",
++    "image/jpeg",
++    "image/gif",
++    "image/webp",
++    "image/bmp",
++)
++
+ _MATRIX_BANG_COMMAND_RE = re.compile(
+     r"^!([A-Za-z][A-Za-z0-9_-]*)(?=$|\s)(.*)$",
+     re.DOTALL,
+@@ -1693,16 +1702,14 @@ class MatrixAdapter(BasePlatformAdapter):
+         metadata: Optional[Dict[str, Any]] = None,
+     ) -> SendResult:
+         """Download an image URL and upload it to Matrix."""
+-        from tools.url_safety import is_safe_url
+-
+-        if not is_safe_url(image_url):
+-            logger.warning("Matrix: blocked unsafe image URL (SSRF protection)")
+-            return await super().send_image(
+-                chat_id, image_url, caption, reply_to, metadata=metadata
+-            )
+-
+         try:
+             data, ct, fname = await self._download_external_media_with_cap(image_url)
++        except SafeHTTPError as exc:
++            logger.warning(
++                "Matrix: blocked image download by safe HTTP policy; URL fallback not sent: %s",
++                exc,
++            )
++            return SendResult(success=False, error=str(exc))
+         except Exception as exc:
+             logger.warning(
+                 "Matrix: failed to download image %s: %s",
+@@ -1727,94 +1734,18 @@ class MatrixAdapter(BasePlatformAdapter):
+ 
+     async def _download_external_media_with_cap(self, url: str) -> tuple[bytes, str, str]:
+         """Download external media while enforcing redirect safety and size caps."""
+-        from tools.url_safety import is_safe_url
+-
+-        if not is_safe_url(url):
+-            raise ValueError("blocked unsafe media URL")
+-
+-        def _check_content_length(headers: Any) -> None:
+-            raw = None
+-            try:
+-                raw = headers.get("Content-Length") or headers.get("content-length")
+-            except Exception:
+-                raw = None
+-            if raw is None:
+-                return
+-            try:
+-                size = int(raw)
+-            except (TypeError, ValueError):
+-                return
+-            if size > self._max_media_bytes:
+-                raise ValueError(
+-                    f"media exceeds Matrix limit ({size} > {self._max_media_bytes} bytes)"
+-                )
+-
+-        def _check_image_content_type(content_type: str) -> str:
+-            content_type = str(content_type or "").split(";", 1)[0].strip().lower()
+-            if not content_type.startswith("image/"):
+-                raise ValueError("external media is not an image")
+-            return content_type
+-
+-        def _append_chunk(parts: list[bytes], total: int, chunk: bytes) -> int:
+-            total += len(chunk)
+-            if total > self._max_media_bytes:
+-                raise ValueError(
+-                    f"media exceeds Matrix limit (> {self._max_media_bytes} bytes)"
+-                )
+-            parts.append(chunk)
+-            return total
+-
+         fname = url.rsplit("/", 1)[-1].split("?")[0] or "image.png"
+-
+-        try:
+-            import aiohttp as _aiohttp
+-
+-            _sess_kw, _req_kw = proxy_kwargs_for_aiohttp(self._proxy_url)
+-            async with _aiohttp.ClientSession(**_sess_kw) as http:
+-                async with http.get(
+-                    url,
+-                    timeout=_aiohttp.ClientTimeout(total=30),
+-                    allow_redirects=True,
+-                    **_req_kw,
+-                ) as resp:
+-                    resp.raise_for_status()
+-                    if not is_safe_url(str(resp.url)):
+-                        raise ValueError("blocked unsafe redirect URL")
+-                    _check_content_length(resp.headers)
+-                    parts: list[bytes] = []
+-                    total = 0
+-                    async for chunk in resp.content.iter_chunked(65536):
+-                        total = _append_chunk(parts, total, bytes(chunk))
+-                    ct = _check_image_content_type(
+-                        getattr(resp, "content_type", None)
+-                        or resp.headers.get("content-type", "application/octet-stream")
+-                    )
+-                    return b"".join(parts), ct, fname
+-        except ImportError:
+-            import httpx
+-
+-            _httpx_kw: dict = {}
+-            if self._proxy_url:
+-                _httpx_kw["proxy"] = self._proxy_url
+-            async with httpx.AsyncClient(**_httpx_kw) as http:
+-                async with http.stream(
+-                    "GET",
+-                    url,
+-                    follow_redirects=True,
+-                    timeout=30,
+-                ) as resp:
+-                    resp.raise_for_status()
+-                    if not is_safe_url(str(resp.url)):
+-                        raise ValueError("blocked unsafe redirect URL")
+-                    _check_content_length(resp.headers)
+-                    parts: list[bytes] = []
+-                    total = 0
+-                    async for chunk in resp.aiter_bytes():
+-                        total = _append_chunk(parts, total, bytes(chunk))
+-                    ct = _check_image_content_type(
+-                        resp.headers.get("content-type", "application/octet-stream")
+-                    )
+-                    return b"".join(parts), ct, fname
++        result = await safe_download_bytes(
++            url,
++            max_bytes=self._max_media_bytes,
++            source_type="gateway:matrix-outbound-image",
++            policy={"redirect_credentials": "no-credentials"},
++            headers={"User-Agent": "HermesAgent/1.0", "Accept": "image/*,*/*;q=0.8"},
++            timeout=30.0,
++            allowed_content_types=_MATRIX_IMAGE_CONTENT_TYPES,
++        )
++        ct = (result.content_type or "image/png").split(";", 1)[0].strip().lower()
++        return result.content, ct, fname
+ 
+     async def send_image_file(
+         self,

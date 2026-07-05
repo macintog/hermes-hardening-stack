@@ -1,0 +1,171 @@
+diff --git a/hermes_cli/main.py b/hermes_cli/main.py
+index e6445af..7c559dd 100644
+--- a/hermes_cli/main.py
++++ b/hermes_cli/main.py
+@@ -4776,11 +4776,14 @@ def _run_npm_install_deterministic(
+ 
+     lockfile = cwd / "package-lock.json"
+     if lockfile.exists():
+-        ci_cmd = [npm, "ci", *extra_args]
++        ci_cmd, ci_env = _wrap_package_manager_argv_for_sfw(
++            [npm, "ci", *extra_args],
++            env=run_env,
++        )
+         ci_result = subprocess.run(
+             ci_cmd,
+             cwd=cwd,
+-            env=run_env,
++            env=ci_env,
+             capture_output=capture_output,
+             text=True,
+             encoding="utf-8",
+@@ -4791,11 +4794,14 @@ def _run_npm_install_deterministic(
+             return ci_result
+         # Fall through to `npm install` — lockfile may be out of sync on a
+         # WIP fork/branch, or `npm ci` may not be available on very old npm.
+-    install_cmd = [npm, "install", *extra_args]
++    install_cmd, install_env = _wrap_package_manager_argv_for_sfw(
++        [npm, "install", *extra_args],
++        env=run_env,
++    )
+     return subprocess.run(
+         install_cmd,
+         cwd=cwd,
+-        env=run_env,
++        env=install_env,
+         capture_output=capture_output,
+         text=True,
+         encoding="utf-8",
+@@ -4888,13 +4894,18 @@ def _build_web_ui(web_dir: Path, *, fatal: bool = False) -> bool:
+     # users react by rebooting, which leaves the editable install in a
+     # half-state. Streaming + idle-kill makes failures observable AND
+     # recoverable (the stale-dist fallback below handles the kill path).
+-    r2 = _run_with_idle_timeout([npm, "run", "build"], cwd=web_dir, env=build_env)
++    build_cmd, build_run_env = _wrap_package_manager_argv_for_sfw(
++        [npm, "run", "build"],
++        env=build_env,
++        force=True,
++    )
++    r2 = _run_with_idle_timeout(build_cmd, cwd=web_dir, env=build_run_env)
+     if r2.returncode != 0:
+         # Retry once after a short delay — covers boot-time races on Windows
+         # (antivirus scanning Node.js binaries, npm cache not ready, transient
+         # I/O when launched via Scheduled Task at logon). See issue #23817.
+         _time.sleep(3)
+-        r2 = _run_with_idle_timeout([npm, "run", "build"], cwd=web_dir, env=build_env)
++        r2 = _run_with_idle_timeout(build_cmd, cwd=web_dir, env=build_run_env)
+ 
+     if r2.returncode != 0:
+         # _run_with_idle_timeout merges stderr into stdout; older callers
+@@ -5672,7 +5683,12 @@ def cmd_gui(args: argparse.Namespace):
+                 stopped = _stop_desktop_processes_locking_build(desktop_dir)
+                 if stopped:
+                     print(f"  ⚠ Stopped running desktop app to free the build output (pid {', '.join(map(str, stopped))})")
+-            build_result = subprocess.run([npm, "run", build_script], cwd=desktop_dir, env=env, check=False)
++            build_cmd, build_run_env = _wrap_package_manager_argv_for_sfw(
++                [npm, "run", build_script],
++                env=env,
++                force=True,
++            )
++            build_result = subprocess.run(build_cmd, cwd=desktop_dir, env=build_run_env, check=False)
+             if (
+                 build_result.returncode != 0
+                 and not source_mode
+@@ -5699,7 +5715,12 @@ def cmd_gui(args: argparse.Namespace):
+                     # The purge can't remove a win-unpacked tree whose Hermes.exe
+                     # is still locked by a running instance; stop it before retry.
+                     _stop_desktop_processes_locking_build(desktop_dir)
+-                    build_result = subprocess.run([npm, "run", build_script], cwd=desktop_dir, env=env, check=False)
++                    build_cmd, build_run_env = _wrap_package_manager_argv_for_sfw(
++                        [npm, "run", build_script],
++                        env=env,
++                        force=True,
++                    )
++                    build_result = subprocess.run(build_cmd, cwd=desktop_dir, env=build_run_env, check=False)
+             if (
+                 build_result.returncode != 0
+                 and not source_mode
+@@ -5715,7 +5736,12 @@ def cmd_gui(args: argparse.Namespace):
+                 if not _electron_dist_ok(PROJECT_ROOT):
+                     _redownload_electron_dist(PROJECT_ROOT, env, mirror=mirror)
+                 _stop_desktop_processes_locking_build(desktop_dir)
+-                build_result = subprocess.run([npm, "run", build_script], cwd=desktop_dir, env=mirror_env, check=False)
++                build_cmd, build_run_env = _wrap_package_manager_argv_for_sfw(
++                    [npm, "run", build_script],
++                    env=mirror_env,
++                    force=True,
++                )
++                build_result = subprocess.run(build_cmd, cwd=desktop_dir, env=build_run_env, check=False)
+             if build_result.returncode != 0:
+                 print("✗ Desktop GUI build failed")
+                 print(f"  Run manually:  cd apps/desktop && npm run {build_script}")
+@@ -5757,7 +5783,11 @@ def cmd_gui(args: argparse.Namespace):
+ 
+     if source_mode:
+         print("→ Launching Hermes Desktop from source build...")
+-        launch_result = subprocess.run([npm, "exec", "--", "electron", "."], cwd=desktop_dir, env=env, check=False)
++        launch_cmd, launch_env = _wrap_package_manager_argv_for_sfw(
++            [npm, "exec", "--", "electron", "."],
++            env=env,
++        )
++        launch_result = subprocess.run(launch_cmd, cwd=desktop_dir, env=launch_env, check=False)
+         sys.exit(launch_result.returncode)
+ 
+     if packaged_executable is None:
+@@ -7121,6 +7151,24 @@ def _recover_from_interrupted_install() -> None:
+             pass
+ 
+ 
++def _wrap_package_manager_argv_for_sfw(
++    cmd: list[str],
++    *,
++    env: dict[str, str] | None = None,
++    force: bool = False,
++) -> tuple[list[str], dict[str, str] | None]:
++    if not cmd:
++        return cmd, env
++    from hermes_constants import wrap_package_manager_command_for_sfw
++
++    return wrap_package_manager_command_for_sfw(
++        cmd[0],
++        cmd[1:],
++        env=env,
++        force=force,
++    )
++
++
+ def _run_install_with_heartbeat(
+     cmd: list[str],
+     *,
+@@ -7148,12 +7196,13 @@ def _run_install_with_heartbeat(
+ 
+     t = threading.Thread(target=_heartbeat, daemon=True)
+     t.start()
++    run_cmd, run_env = _wrap_package_manager_argv_for_sfw(cmd, env=env)
+     try:
+         subprocess.run(
+-            cmd,
++            run_cmd,
+             cwd=PROJECT_ROOT,
+             check=True,
+-            env=env,
++            env=run_env,
+         )
+     finally:
+         done.set()
+@@ -9051,10 +9100,13 @@ def _cmd_update_pip(args):
+     else:
+         cmd = [sys.executable, "-m", "pip", "install", "--upgrade", "hermes-agent"]
+ 
++    run_env = {**os.environ, "VIRTUAL_ENV": sys.prefix} if export_virtualenv else None
++    cmd, run_env = _wrap_package_manager_argv_for_sfw(cmd, env=run_env)
++
+     print(f"→ Running: {' '.join(cmd)}")
+     run_kwargs = {}
+-    if export_virtualenv:
+-        run_kwargs["env"] = {**os.environ, "VIRTUAL_ENV": sys.prefix}
++    if run_env is not None:
++        run_kwargs["env"] = run_env
+     result = subprocess.run(cmd, **run_kwargs)
+     if result.returncode != 0:
+         print("✗ Update failed")

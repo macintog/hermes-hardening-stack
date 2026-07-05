@@ -1,0 +1,51 @@
+diff --git a/tests/gateway/test_stt_config.py b/tests/gateway/test_stt_config.py
+index e22d4d1aa..d4a1f53be 100644
+--- a/tests/gateway/test_stt_config.py
++++ b/tests/gateway/test_stt_config.py
+@@ -185,3 +185,43 @@ async def test_prepare_inbound_message_text_transcribes_queued_voice_event():
+     # Success path: the transcript passes through as a plain quoted line, with
+     # no "voice message" meta-commentary that the LLM would echo back.
+     assert "queued voice transcript" in result
++
++
++@pytest.mark.asyncio
++async def test_prepare_inbound_message_text_does_not_send_hardcoded_stt_setup_notice():
++    from gateway.run import GatewayRunner
++
++    runner = GatewayRunner.__new__(GatewayRunner)
++    runner.config = GatewayConfig(stt_enabled=True)
++    runner._model = "test-model"
++    runner._base_url = ""
++    runner._has_setup_skill = lambda: True
++    runner._session_key_for_source = lambda source: "telegram:123"
++    runner._consume_pending_native_image_paths = lambda session_key: []
++    runner._reply_anchor_for_event = lambda event: None
++    runner._thread_metadata_for_source = lambda source, anchor: {"thread_id": "topic"}
++    runner._enrich_message_with_transcription = AsyncMock(
++        return_value=("No STT provider is configured", [])
++    )
++    adapter = type("Adapter", (), {})()
++    adapter.send = AsyncMock()
++    runner.adapters = {Platform.TELEGRAM: adapter}
++
++    source = SessionSource(
++        platform=Platform.TELEGRAM,
++        chat_id="123",
++        chat_type="dm",
++    )
++    event = MessageEvent(
++        text="",
++        message_type=MessageType.VOICE,
++        source=source,
++        media_urls=["/tmp/queued-voice.ogg"],
++        media_types=["audio/ogg"],
++    )
++
++    result = await runner._prepare_inbound_message_text(
++        event=event,
++        source=source,
++        history=[],
++    )
++    assert result is not None
++    assert "No STT provider is configured" in result
++    adapter.send.assert_not_awaited()

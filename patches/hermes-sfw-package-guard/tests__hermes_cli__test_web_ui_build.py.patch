@@ -1,0 +1,82 @@
+diff --git a/tests/hermes_cli/test_web_ui_build.py b/tests/hermes_cli/test_web_ui_build.py
+index 8f94458..bfc0c97 100644
+--- a/tests/hermes_cli/test_web_ui_build.py
++++ b/tests/hermes_cli/test_web_ui_build.py
+@@ -11,10 +11,19 @@ import time
+ from pathlib import Path
+ from unittest.mock import patch
+ 
++import pytest
+ 
+ from hermes_cli.main import _web_ui_build_needed, _build_web_ui, _run_npm_install_deterministic
+ 
+ 
++@pytest.fixture(autouse=True)
++def _disable_sfw_wrapper(monkeypatch):
++    monkeypatch.setattr(
++        "hermes_cli.main._wrap_package_manager_argv_for_sfw",
++        lambda cmd, *, env=None, force=False: (cmd, env),
++    )
++
++
+ def _touch(path: Path, offset: float = 0.0) -> None:
+     path.parent.mkdir(parents=True, exist_ok=True)
+     path.touch()
+@@ -156,6 +165,27 @@ class TestBuildWebUISkipsWhenFresh:
+         assert kwargs["env"]["CI"] == "1"
+         assert kwargs["env"]["PYTHON"] == "/nix/store/python"
+ 
++    def test_npm_install_routes_ci_through_sfw_wrapper(self, tmp_path):
++        web_dir, _ = _make_web_dir(tmp_path)
++        (web_dir / "package-lock.json").write_text("{}", encoding="utf-8")
++
++        mock_cp = __import__("subprocess").CompletedProcess([], 0, stdout="", stderr="")
++
++        def _wrap(cmd, *, env=None, force=False):
++            assert cmd == ["/usr/bin/npm", "ci"]
++            assert force is False
++            assert env is not None
++            assert env["CI"] == "1"
++            return ["/shim/sfw-package-shim", "npm", "ci"], {"PATH": "wrapped"}
++
++        with patch("hermes_cli.main._wrap_package_manager_argv_for_sfw", side_effect=_wrap), \
++             patch("hermes_cli.main.subprocess.run", return_value=mock_cp) as mock_run:
++            result = _run_npm_install_deterministic("/usr/bin/npm", web_dir)
++
++        assert result.returncode == 0
++        assert mock_run.call_args[0][0] == ["/shim/sfw-package-shim", "npm", "ci"]
++        assert mock_run.call_args.kwargs["env"] == {"PATH": "wrapped"}
++
+     def test_npm_install_uses_workspace_web_scope(self, tmp_path):
+         web_dir, _ = _make_web_dir(tmp_path)
+         # Real workspace checkout: the single lockfile lives at the root, so
+@@ -228,6 +258,29 @@ class TestBuildWebUISkipsWhenFresh:
+         assert args[0] == ["/usr/bin/npm", "run", "build"]
+         assert kwargs["cwd"] == web_dir
+ 
++    def test_web_build_forces_sfw_for_npm_run_build(self, tmp_path):
++        web_dir, _ = _make_web_dir(tmp_path)
++
++        install_cp = __import__("subprocess").CompletedProcess([], 0, stdout="", stderr="")
++        build_cp = __import__("subprocess").CompletedProcess([], 0, stdout="", stderr="")
++
++        def _wrap(cmd, *, env=None, force=False):
++            if cmd == ["/usr/bin/npm", "run", "build"]:
++                assert force is True
++                return ["/shim/sfw-package-shim", "npm", "run", "build"], {"PATH": "wrapped", "SFW_FORCE": "1"}
++            return cmd, env
++
++        with patch("hermes_cli.main.shutil.which", return_value="/usr/bin/npm"), \
++             patch("hermes_cli.main._wrap_package_manager_argv_for_sfw", side_effect=_wrap), \
++             patch("hermes_cli.main.subprocess.run", return_value=install_cp), \
++             patch("hermes_cli.main._run_with_idle_timeout", return_value=build_cp) as mock_idle:
++            result = _build_web_ui(web_dir)
++
++        assert result is True
++        args, kwargs = mock_idle.call_args
++        assert args[0] == ["/shim/sfw-package-shim", "npm", "run", "build"]
++        assert kwargs["env"] == {"PATH": "wrapped", "SFW_FORCE": "1"}
++
+     def test_termux_web_install_is_workspace_scoped(self, tmp_path, monkeypatch):
+         web_dir, _ = _make_web_dir(tmp_path)
+         (tmp_path / "package-lock.json").write_text("{}", encoding="utf-8")

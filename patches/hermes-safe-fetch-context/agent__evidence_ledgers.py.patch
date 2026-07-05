@@ -1,0 +1,256 @@
+diff --git a/agent/evidence_ledgers.py b/agent/evidence_ledgers.py
+new file mode 100644
+index 000000000..7ba78751e
+--- /dev/null
++++ b/agent/evidence_ledgers.py
+@@ -0,0 +1,250 @@
++"""Native Hermes tool-result evidence ledger helpers.
++
++Small stdlib-only helpers for attaching ephemeral, non-authoritative evidence
++metadata to built-in tool results. These ledgers are not durable storage and do
++not make action/policy decisions.
++"""
++
++from __future__ import annotations
++
++import hashlib
++import json
++from pathlib import Path
++from typing import Any, Mapping
++from urllib.parse import quote, urlsplit, urlunsplit
++import re
++
++LEDGER_SCHEMA = "hermes.tool_result_ledger.v1"
++DEFAULT_HASH_LIMIT_BYTES = 64 * 1024 * 1024
++_TOKEN_PATH_KEYWORDS = re.compile(r"(?i)(token|secret|signature|credential|api[_-]?key|session|password)")
++_LONG_TOKEN_SEGMENT = re.compile(r"(?i)^[a-z0-9._~-]{24,}$")
++
++
++def file_byte_count(path: str | Path) -> int | None:
++    """Return file size in bytes, or None when unavailable."""
++    try:
++        return Path(path).stat().st_size
++    except OSError:
++        return None
++
++
++def file_sha256(
++    path: str | Path,
++    *,
++    max_bytes: int = DEFAULT_HASH_LIMIT_BYTES,
++) -> tuple[str | None, str]:
++    """Return (sha256, status) using bounded streaming reads.
++
++    status is one of: ok, missing, skipped, error.
++    """
++    try:
++        p = Path(path)
++        size = p.stat().st_size
++        if size > max_bytes:
++            return None, "skipped"
++        h = hashlib.sha256()
++        with p.open("rb") as f:
++            for chunk in iter(lambda: f.read(1024 * 1024), b""):
++                h.update(chunk)
++        return h.hexdigest(), "ok"
++    except FileNotFoundError:
++        return None, "missing"
++    except OSError:
++        return None, "error"
++
++
++def _redact_uri_path(path: str) -> str:
++    safe_segments: list[str] = []
++    for segment in (path or "").split("/"):
++        decoded = segment.lower()
++        if _TOKEN_PATH_KEYWORDS.search(decoded) or _LONG_TOKEN_SEGMENT.fullmatch(decoded):
++            safe_segments.append("<redacted>")
++        else:
++            safe_segments.append(quote(segment, safe=":@!$&'()*+,;="))
++    return "/".join(safe_segments)
++
++
++def redact_source_uri(value: str | None) -> str | None:
++    """Return a display-safe URI/path without credentials/query/local dirs."""
++    if not value:
++        return None
++    s = str(value)
++    if s.startswith(("http://", "https://")):
++        parts = urlsplit(s)
++        netloc = parts.hostname or ""
++        if parts.port:
++            netloc = f"{netloc}:{parts.port}"
++        return urlunsplit((parts.scheme, netloc, _redact_uri_path(parts.path), "", ""))
++    if s.startswith("file://"):
++        return f"file:{Path(s[7:]).name}"
++    try:
++        p = Path(s)
++        if p.is_absolute():
++            return f"file:{p.name}"
++    except OSError:
++        pass
++    return s
++
++
++def redact_args(args: Mapping[str, Any] | None) -> dict[str, Any]:
++    """Redact sensitive args and omit prompt/question text."""
++    redacted: dict[str, Any] = {}
++    for key, value in dict(args or {}).items():
++        lowered = str(key).lower()
++        if any(token in lowered for token in ("token", "secret", "key", "password", "auth")):
++            redacted[key] = "<redacted>"
++        elif lowered in {"image_url", "url", "source_uri", "path", "screenshot_path"}:
++            redacted[key] = redact_source_uri(str(value)) if value is not None else None
++        elif lowered in {"urls", "source_uris", "paths"} and isinstance(value, (list, tuple)):
++            redacted[key] = [redact_source_uri(str(item)) if item is not None else None for item in value]
++        elif lowered in {"question", "prompt", "user_prompt"}:
++            redacted[key] = "<omitted>"
++        else:
++            redacted[key] = value
++    return redacted
++
++
++def text_byte_count(text: str | None) -> int | None:
++    """Return UTF-8 byte count for text, or None when text is absent."""
++    if text is None:
++        return None
++    return len(str(text).encode("utf-8"))
++
++
++def text_sha256(
++    text: str | None,
++    *,
++    max_bytes: int = DEFAULT_HASH_LIMIT_BYTES,
++) -> tuple[str | None, str]:
++    """Return (sha256, status) for text using a bounded UTF-8 byte budget."""
++    if text is None:
++        return None, "missing"
++    payload = str(text).encode("utf-8")
++    if len(payload) > max_bytes:
++        return None, "skipped"
++    return hashlib.sha256(payload).hexdigest(), "ok"
++
++
++def _stable_evidence_id(payload: Mapping[str, Any]) -> str:
++    compact = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
++    return "ev_" + hashlib.sha256(compact.encode("utf-8")).hexdigest()[:16]
++
++
++def build_evidence_item(
++    *,
++    kind: str,
++    source_type: str,
++    extraction_layer: str,
++    id: str | None = None,
++    text_ref: str | None = "analysis",
++    text: str | None = None,
++    verbatim: bool = False,
++    content_type: str | None = None,
++    source_uri: str | None = None,
++    sha256: str | None = None,
++    byte_count: int | None = None,
++    char_count: int | None = None,
++    trust_boundary: str = "untrusted_external",
++    instruction_authority: str = "none",
++    can_inform_response: bool = True,
++    can_authorize_action: bool = False,
++    side_effect_use_policy: str = "requires_independent_trusted_intent",
++    metadata: Mapping[str, Any] | None = None,
++) -> dict[str, Any]:
++    redacted_source = redact_source_uri(source_uri)
++    identity_payload = {
++        "kind": kind,
++        "source_type": source_type,
++        "extraction_layer": extraction_layer,
++        "text_ref": text_ref,
++        "source_uri": redacted_source,
++        "sha256": sha256,
++        "byte_count": byte_count,
++        "char_count": char_count,
++    }
++    return {
++        "id": id or _stable_evidence_id(identity_payload),
++        "kind": kind,
++        "text_ref": text_ref,
++        "text": text,
++        "evidence_only": True,
++        "instruction_authority": instruction_authority,
++        "trust_boundary": trust_boundary,
++        "can_inform_response": bool(can_inform_response),
++        "can_authorize_action": bool(can_authorize_action),
++        "side_effect_use_policy": side_effect_use_policy,
++        "verbatim": bool(verbatim),
++        "source_type": source_type,
++        "extraction_layer": extraction_layer,
++        "content_type": content_type,
++        "sha256": sha256,
++        "byte_count": byte_count,
++        "char_count": char_count,
++        "source_uri": redacted_source,
++        "metadata": dict(metadata or {}),
++    }
++
++
++def build_tool_invocation(
++    *,
++    name: str,
++    args: Mapping[str, Any] | None = None,
++    read_only: bool = True,
++    blocked: bool = False,
++    metadata: Mapping[str, Any] | None = None,
++) -> dict[str, Any]:
++    return {
++        "name": name,
++        "read_only": bool(read_only),
++        "blocked": bool(blocked),
++        "source": "hermes_tool",
++        "args_redacted": redact_args(args),
++        "metadata": dict(metadata or {}),
++    }
++
++
++def build_operational_artifact(
++    *,
++    kind: str,
++    path: str | Path,
++    content_type: str | None = None,
++    sha256: str | None = None,
++    byte_count: int | None = None,
++) -> dict[str, Any]:
++    return {
++        "kind": kind,
++        "content_type": content_type,
++        "sha256": sha256,
++        "byte_count": byte_count,
++        "source_uri": redact_source_uri(str(path)),
++    }
++
++
++def attach_evidence_ledger(
++    result: dict[str, Any],
++    *,
++    tool_name: str,
++    evidence_items: list[dict[str, Any]],
++    tool_invocation: dict[str, Any],
++    operational_artifacts: list[dict[str, Any]] | None = None,
++    trust_boundary: str = "untrusted_external",
++    metadata: Mapping[str, Any] | None = None,
++) -> dict[str, Any]:
++    result["evidence_ledger"] = {
++        "schema": LEDGER_SCHEMA,
++        "ledger_origin": "native_tool",
++        "tool_name": tool_name,
++        "read_only": True,
++        "trust_boundary": trust_boundary,
++        "evidence_items": list(evidence_items),
++        "tool_invocation": tool_invocation,
++        "operational_artifacts": list(operational_artifacts or []),
++        "side_effects": [],
++        "action_decisions": [],
++        "metadata": {
++            "ledgers_exposed": True,
++            "no_followup_actions_evaluated": True,
++            **dict(metadata or {}),
++        },
++    }
++    return result

@@ -1,0 +1,57 @@
+diff --git a/agent/skill_commands.py b/agent/skill_commands.py
+index ad1f03824..42e555a82 100644
+--- a/agent/skill_commands.py
++++ b/agent/skill_commands.py
+@@ -121,6 +121,8 @@ def _build_skill_message(
+     from tools.skills_tool import SKILLS_DIR
+ 
+     content = str(loaded_skill.get("content") or "")
++    authority = str(loaded_skill.get("authority") or "evidence_only").strip().lower()
++    evidence_only = authority not in {"trusted", "trusted_by_local_policy"}
+ 
+     # ── Template substitution and inline-shell expansion ──
+     # Done before anything else so downstream blocks (setup notes,
+@@ -128,15 +130,18 @@ def _build_skill_message(
+     skills_cfg = _load_skills_config()
+     if skills_cfg.get("template_vars", True):
+         content = _substitute_template_vars(content, skill_dir, session_id)
+-    if skills_cfg.get("inline_shell", False):
++    if skills_cfg.get("inline_shell", False) and not evidence_only:
+         timeout = int(skills_cfg.get("inline_shell_timeout", 10) or 10)
+         content = _expand_inline_shell(content, skill_dir, timeout)
++    if evidence_only:
++        from agent.context_safety import render_model_visible_tool_result
++        content = render_model_visible_tool_result("skill_view", content, source_label=str(loaded_skill.get("name") or "skill_content"))
+ 
+     parts = [activation_note, "", content.strip()]
+ 
+     # ── Inject the absolute skill directory so the agent can reference
+     #    bundled scripts without an extra skill_view() round-trip. ──
+-    if skill_dir:
++    if skill_dir and not evidence_only:
+         parts.append("")
+         parts.append(f"[Skill directory: {skill_dir}]")
+         parts.append(
+@@ -195,11 +200,17 @@ def _build_skill_message(
+         parts.append("[This skill has supporting files:]")
+         for sf in supporting:
+             parts.append(f"- {sf}  ->  {skill_dir / sf}")
+-        parts.append(
+-            f'\nLoad any of these with skill_view(name="{skill_view_target}", '
+-            f'file_path="<path>"), or run scripts directly by absolute path '
+-            f"(e.g. `node {skill_dir}/scripts/foo.js`)."
+-        )
++        if evidence_only:
++            parts.append(
++                f'\nLoad any of these as evidence with skill_view(name="{skill_view_target}", '
++                f'file_path="<path>").'
++            )
++        else:
++            parts.append(
++                f'\nLoad any of these with skill_view(name="{skill_view_target}", '
++                f'file_path="<path>"), or run scripts directly by absolute path '
++                f"(e.g. `node {skill_dir}/scripts/foo.js`)."
++            )
+ 
+     if user_instruction:
+         parts.append("")

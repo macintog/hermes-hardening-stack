@@ -1,0 +1,27 @@
+diff --git a/agent/agent_runtime_helpers.py b/agent/agent_runtime_helpers.py
+index af64541a8..754793606 100644
+--- a/agent/agent_runtime_helpers.py
++++ b/agent/agent_runtime_helpers.py
+@@ -2002,6 +2002,12 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
+             pass
+         return result
+ 
++    if not pre_tool_block_checked and agent._uses_direct_authority_dispatch(function_name):
++        authority_block = agent._authority_block_result(function_name, function_args, messages or [])
++        if authority_block is not None:
++            return authority_block
++
++    authority_kwargs = agent._handle_function_call_authority_kwargs(messages or [])
+     tool_start_time = time.monotonic()
+ 
+     def _finish_agent_tool(result: Any, observed_args: Optional[dict] = None) -> Any:
+@@ -2118,6 +2124,9 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
+                 session_id=agent.session_id or "",
+                 turn_id=getattr(agent, "_current_turn_id", "") or "",
+                 api_request_id=getattr(agent, "_current_api_request_id", "") or "",
++                user_task=authority_kwargs.get("user_task"),
++                trusted_policy_context=authority_kwargs.get("trusted_policy_context"),
++                prior_untrusted_context=authority_kwargs.get("prior_untrusted_context"),
+                 enabled_tools=list(agent.valid_tool_names) if agent.valid_tool_names else None,
+                 skip_pre_tool_call_hook=True,
+                 skip_tool_request_middleware=True,

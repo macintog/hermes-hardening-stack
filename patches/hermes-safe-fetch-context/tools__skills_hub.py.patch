@@ -1,0 +1,253 @@
+diff --git a/tools/skills_hub.py b/tools/skills_hub.py
+index c2a22eef3..82bb95303 100644
+--- a/tools/skills_hub.py
++++ b/tools/skills_hub.py
+@@ -13,6 +13,7 @@ This is a library module (not an agent tool). It provides:
+ Used by hermes_cli/skills_hub.py for CLI commands and the /skills slash command.
+ """
+ 
++import asyncio
+ import hashlib
+ import json
+ import logging
+@@ -20,6 +21,7 @@ import os
+ import re
+ import shutil
+ import subprocess
++import threading
+ import time
+ from abc import ABC, abstractmethod
+ from dataclasses import dataclass, field
+@@ -1074,11 +1076,11 @@ class WellKnownSkillSource(SkillSource):
+         if isinstance(cached, dict) and isinstance(cached.get("skills"), list):
+             return cached
+ 
+-        resp = _guarded_http_get(index_url, timeout=20)
+-        if resp is None or resp.status_code != 200:
+-            return None
+         try:
+-            data = resp.json()
++            text = self._fetch_text(index_url)
++            if text is None:
++                return None
++            data = json.loads(text)
+         except json.JSONDecodeError:
+             return None
+ 
+@@ -1105,10 +1107,46 @@ class WellKnownSkillSource(SkillSource):
+ 
+     @staticmethod
+     def _fetch_text(url: str) -> Optional[str]:
+-        resp = _guarded_http_get(url, timeout=20)
+-        if resp is not None and resp.status_code == 200:
+-            return resp.text
+-        return None
++        async def _download() -> Optional[str]:
++            from tools import safe_http
++
++            result = await safe_http.safe_download_bytes(
++                url,
++                max_bytes=2_000_000,
++                max_redirects=5,
++                allow_userinfo=False,
++                source_type="skills_hub_fetch",
++                policy={"surface": "skills_hub_fetch"},
++                headers={"User-Agent": "HermesAgent/1.0", "Accept": "application/json,text/plain,text/markdown,*/*;q=0.8"},
++                timeout=20.0,
++            )
++            return result.content.decode("utf-8", errors="replace")
++
++        def _run_in_thread() -> Optional[str]:
++            holder: dict[str, Any] = {"value": None, "error": None}
++
++            def _target() -> None:
++                try:
++                    holder["value"] = asyncio.run(_download())
++                except Exception as exc:  # pragma: no cover - defensive bridge
++                    holder["error"] = exc
++
++            thread = threading.Thread(target=_target, daemon=True)
++            thread.start()
++            thread.join()
++            if holder["error"]:
++                raise holder["error"]
++            return holder["value"]
++
++        try:
++            try:
++                asyncio.get_running_loop()
++            except RuntimeError:
++                return asyncio.run(_download())
++            return _run_in_thread()
++        except Exception as exc:
++            logger.debug("WellKnownSkillSource fetch failed for %s: %s", url, exc)
++            return None
+ 
+     @staticmethod
+     def _wrap_identifier(base_url: str, skill_name: str) -> str:
+@@ -1229,10 +1267,46 @@ class UrlSource(SkillSource):
+ 
+     @staticmethod
+     def _fetch_text(url: str) -> Optional[str]:
+-        resp = _guarded_http_get(url, timeout=20)
+-        if resp is not None and resp.status_code == 200:
+-            return resp.text
+-        return None
++        async def _download() -> Optional[str]:
++            from tools import safe_http
++
++            result = await safe_http.safe_download_bytes(
++                url,
++                max_bytes=2_000_000,
++                max_redirects=5,
++                allow_userinfo=False,
++                source_type="skills_hub_url_fetch",
++                policy={"surface": "skills_hub_url_fetch"},
++                headers={"User-Agent": "HermesAgent/1.0", "Accept": "text/plain,text/markdown,*/*;q=0.8"},
++                timeout=20.0,
++            )
++            return result.content.decode("utf-8", errors="replace")
++
++        def _run_in_thread() -> Optional[str]:
++            holder: dict[str, Any] = {"value": None, "error": None}
++
++            def _target() -> None:
++                try:
++                    holder["value"] = asyncio.run(_download())
++                except Exception as exc:  # pragma: no cover - defensive bridge
++                    holder["error"] = exc
++
++            thread = threading.Thread(target=_target, daemon=True)
++            thread.start()
++            thread.join()
++            if holder["error"]:
++                raise holder["error"]
++            return holder["value"]
++
++        try:
++            try:
++                asyncio.get_running_loop()
++            except RuntimeError:
++                return asyncio.run(_download())
++            return _run_in_thread()
++        except Exception as exc:
++            logger.debug("UrlSource fetch failed for %s: %s", url, exc)
++            return None
+ 
+     # Skill names must look like identifiers: lowercase letters/digits with
+     # optional hyphens/underscores. Blocks dangerous (``../evil``) AND useless
+@@ -2350,10 +2424,7 @@ class ClawHubSource(SkillSource):
+         return files
+ 
+     def _fetch_text(self, url: str) -> Optional[str]:
+-        resp = _guarded_http_get(url, timeout=20)
+-        if resp is not None and resp.status_code == 200:
+-            return resp.text
+-        return None
++        return UrlSource._fetch_text(url)
+ 
+ 
+ # ---------------------------------------------------------------------------
+@@ -3036,6 +3107,23 @@ class HubLockFile:
+         self.path.parent.mkdir(parents=True, exist_ok=True)
+         self.path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+ 
++    @staticmethod
++    def _provenance_for(source: str, trust_level: str) -> dict:
++        if source == "official" or trust_level == "builtin":
++            source_type = "bundled"
++            authority = "trusted_by_local_policy"
++        elif source == "url":
++            source_type = "direct-url"
++            authority = "evidence_only"
++        else:
++            source_type = "community-hub"
++            authority = "evidence_only"
++        return {
++            "source_type": source_type,
++            "authority": authority,
++            "promotion_required": authority == "evidence_only",
++        }
++
+     def record_install(
+         self,
+         name: str,
+@@ -3055,20 +3143,51 @@ class HubLockFile:
+         safe_name = _validate_skill_name(name)
+         safe_install_path = _normalize_lock_install_path(install_path, safe_name)
+         data = self.load()
+-        data["installed"][safe_name] = {
++        installed_at = datetime.now(timezone.utc).isoformat()
++        data["installed"][name] = {
+             "source": source,
+             "identifier": identifier,
+             "trust_level": trust_level,
++            "provenance": self._provenance_for(source, trust_level),
+             "scan_verdict": scan_verdict,
+             "content_hash": skill_hash,
+             "install_path": safe_install_path,
+             "files": files,
+             "metadata": metadata or {},
+-            "installed_at": datetime.now(timezone.utc).isoformat(),
+-            "updated_at": datetime.now(timezone.utc).isoformat(),
++            "installed_at": installed_at,
++            "updated_at": installed_at,
+         }
+         self.save(data)
+ 
++    def record_promotion(
++        self,
++        name: str,
++        *,
++        promoted_by: str,
++        reason: str,
++        skill_hash: str,
++    ) -> bool:
++        data = self.load()
++        entry = data["installed"].get(name)
++        if not entry:
++            return False
++        promoted_at = datetime.now(timezone.utc).isoformat()
++        entry["provenance"] = {
++            **(entry.get("provenance") if isinstance(entry.get("provenance"), dict) else {}),
++            "source_type": "manually-promoted",
++            "authority": "trusted_by_local_policy",
++            "promotion_required": False,
++        }
++        entry["trust_promotion"] = {
++            "promoted_at": promoted_at,
++            "promoted_by": promoted_by,
++            "reason": reason,
++            "content_hash": skill_hash,
++        }
++        entry["updated_at"] = promoted_at
++        self.save(data)
++        return True
++
+     def record_uninstall(self, name: str) -> None:
+         data = self.load()
+         data["installed"].pop(name, None)
+@@ -3255,6 +3374,23 @@ def install_from_quarantine(
+     install_dir.parent.mkdir(parents=True, exist_ok=True)
+     shutil.move(str(quarantine_path), str(install_dir))
+ 
++    provenance = HubLockFile._provenance_for(bundle.source, bundle.trust_level)
++    (install_dir / ".hermes_skill_provenance.json").write_text(
++        json.dumps(
++            {
++                "version": 1,
++                "source": bundle.source,
++                "identifier": bundle.identifier,
++                "trust_level": bundle.trust_level,
++                "provenance": provenance,
++            },
++            indent=2,
++            ensure_ascii=False,
++        )
++        + "\n",
++        encoding="utf-8",
++    )
++
+     # Record in lock file
+     lock = HubLockFile()
+     lock.record_install(

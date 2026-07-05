@@ -1,0 +1,110 @@
+diff --git a/tests/gateway/test_feishu.py b/tests/gateway/test_feishu.py
+index f21b7dc..e81c52b 100644
+--- a/tests/gateway/test_feishu.py
++++ b/tests/gateway/test_feishu.py
+@@ -1802,67 +1802,61 @@ class TestAdapterBehavior(unittest.TestCase):
+         self.assertIn("look", caption)
+ 
+     def test_download_remote_document_reads_response_before_httpx_client_closes(self):
+-        """#18451 — snapshot Content-Type + body while the httpx.AsyncClient
+-        context is still active so pooled connections fully release on
+-        exit.  Otherwise the response is only readable because httpx
+-        eagerly buffers it; a future refactor to .stream() would silently
+-        read-after-close."""
++        """#18451 — cache the bytes returned by the SafeHTTP downloader."""
+         from gateway.config import PlatformConfig
+         from plugins.platforms.feishu.adapter import FeishuAdapter
++        from tools.safe_http import SafeHTTPResult
+ 
+         events: list[str] = []
+-
+-        class _FakeResponse:
+-            headers = {"Content-Type": "application/octet-stream"}
+-
+-            def raise_for_status(self) -> None:
+-                events.append("raise_for_status")
+ 
+-            @property
+-            def content(self) -> bytes:
+-                events.append("content_read")
+-                return b"doc-bytes"
+-
+-        class _FakeAsyncClient:
+-            def __init__(self, *_a: object, **_k: object) -> None:
+-                pass
+-
+-            async def __aenter__(self) -> "_FakeAsyncClient":
+-                events.append("client_enter")
+-                return self
+-
+-            async def __aexit__(self, *exc: object) -> None:
+-                events.append("client_exit")
++        async def fake_safe_download_bytes(url: str, **kwargs: object) -> SafeHTTPResult:
++            events.append("safe_download")
++            assert kwargs["source_type"] == "gateway:feishu-remote-document"
++            assert kwargs["policy"] == {"redirect_credentials": "no-credentials"}
++            return SafeHTTPResult(
++                content=b"doc-bytes",
++                source_url=url,
++                final_url=url,
++                status_code=200,
++                content_type="application/octet-stream",
++                content_length=9,
++                bytes_read=9,
++                sha256="",
++                source_type="gateway:feishu-remote-document",
++                policy={"redirect_credentials": "no-credentials"},
++                headers={},
++            )
+ 
+-            async def get(self, *_a: object, **_k: object) -> _FakeResponse:
+-                events.append("get")
+-                return _FakeResponse()
++        def fake_cache_document_from_bytes(content: bytes, filename: str) -> str:
++            events.append("content_cached")
++            self.assertEqual(content, b"doc-bytes")
++            self.assertTrue(filename)
++            return "/tmp/cached-doc.bin"
+ 
+         with tempfile.TemporaryDirectory() as tmp:
+             with patch.dict(os.environ, {"HERMES_HOME": tmp}, clear=False):
+                 adapter = FeishuAdapter(PlatformConfig())
+ 
+                 async def _run() -> tuple[str, str]:
+-                    with patch("tools.url_safety.is_safe_url", return_value=True):
+-                        with patch("httpx.AsyncClient", _FakeAsyncClient):
+-                            with patch(
+-                                "plugins.platforms.feishu.adapter.cache_document_from_bytes",
+-                                return_value="/tmp/cached-doc.bin",
+-                            ):
+-                                return await adapter._download_remote_document(
+-                                    "https://example.com/doc.bin",
+-                                    default_ext=".bin",
+-                                    preferred_name="doc",
+-                                )
++                    with patch(
++                        "plugins.platforms.feishu.adapter.safe_download_bytes",
++                        side_effect=fake_safe_download_bytes,
++                    ):
++                        with patch(
++                            "plugins.platforms.feishu.adapter.cache_document_from_bytes",
++                            side_effect=fake_cache_document_from_bytes,
++                        ):
++                            return await adapter._download_remote_document(
++                                "https://example.com/doc.bin",
++                                default_ext=".bin",
++                                preferred_name="doc",
++                            )
+ 
+                 path, filename = asyncio.run(_run())
+ 
+         self.assertEqual(path, "/tmp/cached-doc.bin")
+         self.assertTrue(filename)
+-        # content_read MUST happen before client_exit — otherwise we're
+-        # reading response body after the connection pool has been torn
+-        # down, which only works by accident (httpx's eager buffering).
+-        self.assertLess(events.index("content_read"), events.index("client_exit"))
++        self.assertLess(events.index("safe_download"), events.index("content_cached"))
+ 
+     def test_dedup_state_persists_across_adapter_restart(self):
+         from gateway.config import PlatformConfig

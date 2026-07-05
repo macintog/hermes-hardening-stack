@@ -1,0 +1,480 @@
+diff --git a/tools/skills_tool.py b/tools/skills_tool.py
+index 09471690b..43ecc09dc 100644
+--- a/tools/skills_tool.py
++++ b/tools/skills_tool.py
+@@ -68,10 +68,12 @@ Usage:
+ 
+ import json
+ import logging
++import hashlib
+ 
+ from hermes_constants import get_hermes_home, display_hermes_home
+ import os
+ import re
++from datetime import datetime, timezone
+ from enum import Enum
+ from pathlib import Path, PurePosixPath, PureWindowsPath
+ from typing import Dict, Any, List, Optional, Set, Tuple
+@@ -112,16 +114,7 @@ _secret_capture_callback = None
+ 
+ 
+ def _skill_lookup_path_error(name: str) -> Optional[str]:
+-    """Return an error if a local skill lookup *name* can escape search roots.
+-
+-    The skill ``name`` is joined onto each trusted search dir to build the
+-    on-disk lookup path, so it must stay relative and free of ``..`` segments —
+-    otherwise ``name="../outside"`` or an absolute path could select a skill
+-    (and read files) outside the skills directory. Mirrors the ``file_path``
+-    validation done later via ``tools.path_security``. We also reject Windows
+-    drive paths (e.g. ``C:\\skills``), whose ``:`` would otherwise be misread as
+-    a plugin namespace separator.
+-    """
++    """Return an error if a local skill lookup name can escape search roots."""
+     from tools.path_security import has_traversal_component
+ 
+     if not isinstance(name, str):
+@@ -138,6 +131,253 @@ def _skill_lookup_path_error(name: str) -> Optional[str]:
+     return None
+ 
+ 
++def _hub_lock_path() -> Path:
++    return SKILLS_DIR / ".hub" / "lock.json"
++
++
++def _trust_promotions_path() -> Path:
++    return SKILLS_DIR / ".hub" / "trust_promotions.json"
++
++
++def _skill_provenance_sidecar_path(skill_md: Path) -> Path:
++    skill_dir = skill_md.parent if skill_md.name == "SKILL.md" else skill_md
++    return skill_dir / ".hermes_skill_provenance.json"
++
++
++def _read_json_file(path: Path, fallback: Any) -> Any:
++    try:
++        if path.exists():
++            return json.loads(path.read_text(encoding="utf-8"))
++    except (json.JSONDecodeError, OSError):
++        pass
++    return fallback
++
++
++def _write_json_file(path: Path, data: Any) -> None:
++    path.parent.mkdir(parents=True, exist_ok=True)
++    path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
++
++
++def _hash_path(path: Path) -> str:
++    hasher = hashlib.sha256()
++    if path.is_file():
++        hasher.update(path.read_bytes())
++        return hasher.hexdigest()
++    for child in sorted(p for p in path.rglob("*") if p.is_file()):
++        try:
++            rel = child.relative_to(path).as_posix()
++        except ValueError:
++            rel = child.name
++        hasher.update(rel.encode("utf-8"))
++        hasher.update(b"\0")
++        hasher.update(child.read_bytes())
++        hasher.update(b"\0")
++    return hasher.hexdigest()
++
++
++def _load_trust_promotion(key: str, current_hash: str) -> Optional[Dict[str, Any]]:
++    data = _read_json_file(_trust_promotions_path(), {"version": 1, "skills": {}})
++    skills = data.get("skills") if isinstance(data, dict) else {}
++    entry = skills.get(key) if isinstance(skills, dict) else None
++    if not isinstance(entry, dict):
++        return None
++    promoted_hash = str(entry.get("content_hash") or "")
++    if promoted_hash and promoted_hash != current_hash:
++        return None
++    return entry
++
++
++def _matching_hub_lock_entry(skill_md: Path, resolved_name: str) -> Optional[Dict[str, Any]]:
++    data = _read_json_file(_hub_lock_path(), {"version": 1, "installed": {}})
++    installed = data.get("installed") if isinstance(data, dict) else {}
++    if not isinstance(installed, dict):
++        return None
++
++    skill_path = skill_md.parent if skill_md.name == "SKILL.md" else skill_md
++    try:
++        rel_dir = skill_path.resolve().relative_to(SKILLS_DIR.resolve()).as_posix()
++    except ValueError:
++        rel_dir = ""
++
++    by_name = installed.get(resolved_name)
++    if isinstance(by_name, dict):
++        return by_name
++
++    for name, entry in installed.items():
++        if not isinstance(entry, dict):
++            continue
++        install_path = str(entry.get("install_path") or "")
++        if install_path and (rel_dir == install_path or rel_dir.startswith(f"{install_path}/")):
++            return {"name": name, **entry}
++    return None
++
++
++def _sidecar_authority_metadata(skill_md: Path) -> Optional[Dict[str, Any]]:
++    data = _read_json_file(_skill_provenance_sidecar_path(skill_md), {})
++    if not isinstance(data, dict):
++        return None
++    provenance = data.get("provenance") if isinstance(data.get("provenance"), dict) else {}
++    source_type = str(provenance.get("source_type") or data.get("source_type") or "")
++    if not source_type:
++        return None
++    authority = str(provenance.get("authority") or "")
++    if source_type == "bundled":
++        authority = "trusted_by_local_policy"
++    elif authority != "trusted_by_local_policy":
++        authority = "evidence_only"
++    return {
++        "provenance": source_type,
++        "authority": authority,
++        "promotion_required": authority == "evidence_only",
++        "installed_source": data.get("source"),
++        "installed_identifier": data.get("identifier"),
++        "sidecar_provenance": True,
++    }
++
++
++def _authority_metadata_for_skill(
++    skill_md: Path,
++    resolved_name: str,
++    *,
++    plugin_key: str | None = None,
++) -> Dict[str, Any]:
++    if plugin_key:
++        current_hash = _hash_path(skill_md)
++        promotion = _load_trust_promotion(plugin_key, current_hash)
++        if promotion:
++            return {
++                "provenance": "manually-promoted",
++                "authority": "trusted_by_local_policy",
++                "trust_promotion": promotion,
++            }
++        return {
++            "provenance": "plugin",
++            "authority": "evidence_only",
++            "promotion_required": True,
++        }
++
++    try:
++        skill_md.resolve().relative_to(SKILLS_DIR.resolve())
++        inside_skills_dir = True
++    except ValueError:
++        inside_skills_dir = False
++
++    if not inside_skills_dir:
++        return {
++            "provenance": "external",
++            "authority": "evidence_only",
++            "promotion_required": True,
++        }
++
++    entry = _matching_hub_lock_entry(skill_md, resolved_name)
++    current_hash = _hash_path(skill_md.parent if skill_md.name == "SKILL.md" else skill_md)
++    promotion = _load_trust_promotion(resolved_name, current_hash)
++    if promotion:
++        return {
++            "provenance": "manually-promoted",
++            "authority": "trusted_by_local_policy",
++            "trust_promotion": promotion,
++        }
++
++    if not entry:
++        sidecar = _sidecar_authority_metadata(skill_md)
++        if sidecar:
++            return sidecar
++        return {
++            "provenance": "local-authored",
++            "authority": "trusted_by_local_policy",
++        }
++
++    provenance = entry.get("provenance") if isinstance(entry, dict) else {}
++    if isinstance(provenance, dict):
++        source_type = str(provenance.get("source_type") or "")
++        authority = str(provenance.get("authority") or "")
++    else:
++        source_type = ""
++        authority = ""
++    if not source_type:
++        if entry.get("source") == "official" or entry.get("trust_level") == "builtin":
++            source_type = "bundled"
++        elif entry.get("source") == "url":
++            source_type = "direct-url"
++        else:
++            source_type = "community-hub"
++    if source_type == "bundled":
++        authority = "trusted_by_local_policy"
++    elif authority != "trusted_by_local_policy":
++        authority = "evidence_only"
++    return {
++        "provenance": source_type,
++        "authority": authority,
++        "promotion_required": authority == "evidence_only",
++        "installed_source": entry.get("source"),
++        "installed_identifier": entry.get("identifier"),
++    }
++
++
++def skill_trust_promote(
++    name: str,
++    promoted_by: str = "local-user",
++    reason: str = "",
++) -> str:
++    """Promote an installed or plugin-provided skill to trusted local policy."""
++    try:
++        loaded = json.loads(skill_view(name, preprocess=False))
++    except Exception as exc:
++        return tool_error(f"Could not load skill '{name}' for promotion: {exc}", success=False)
++    if not loaded.get("success"):
++        return json.dumps(loaded, ensure_ascii=False)
++
++    skill_dir_raw = loaded.get("skill_dir")
++    target_path = Path(skill_dir_raw) if skill_dir_raw else None
++    if target_path is None or not target_path.exists():
++        return tool_error(f"Skill '{name}' has no promotable local path.", success=False)
++
++    key = str(loaded.get("name") or name)
++    if ":" in name:
++        key = name
++        target_path = target_path / "SKILL.md"
++    current_hash = _hash_path(target_path)
++    promoted_at = datetime.now(timezone.utc).isoformat()
++    entry = {
++        "promoted_at": promoted_at,
++        "promoted_by": str(promoted_by or "local-user"),
++        "reason": str(reason or ""),
++        "content_hash": current_hash,
++    }
++
++    data = _read_json_file(_trust_promotions_path(), {"version": 1, "skills": {}})
++    if not isinstance(data, dict):
++        data = {"version": 1, "skills": {}}
++    skills = data.setdefault("skills", {})
++    if isinstance(skills, dict):
++        skills[key] = entry
++    _write_json_file(_trust_promotions_path(), data)
++
++    try:
++        from tools.skills_hub import HubLockFile
++
++        HubLockFile(_hub_lock_path()).record_promotion(
++            key,
++            promoted_by=entry["promoted_by"],
++            reason=entry["reason"],
++            skill_hash=current_hash,
++        )
++    except Exception:
++        logger.debug("Could not mirror skill trust promotion into hub lock", exc_info=True)
++
++    return json.dumps(
++        {
++            "success": True,
++            "name": key,
++            "authority": "trusted_by_local_policy",
++            "provenance": "manually-promoted",
++            "trust_promotion": entry,
++        },
++        ensure_ascii=False,
++    )
++
++
+ def load_env() -> Dict[str, str]:
+     """Load profile-scoped environment variables from HERMES_HOME/.env."""
+     env_path = get_hermes_home() / ".env"
+@@ -810,6 +1050,11 @@ def _serve_plugin_skill(
+             "Plugin skill '%s:%s' contains patterns that may indicate prompt injection",
+             namespace, bare,
+         )
++    authority_meta = _authority_metadata_for_skill(
++        skill_md,
++        f"{namespace}:{bare}",
++        plugin_key=f"{namespace}:{bare}",
++    )
+ 
+     description = str(parsed_frontmatter.get("description", ""))
+     if len(description) > MAX_DESCRIPTION_LENGTH:
+@@ -838,10 +1083,16 @@ def _serve_plugin_skill(
+         try:
+             from agent.skill_preprocessing import preprocess_skill_content
+ 
++            skills_cfg = None
++            if authority_meta["authority"] == "evidence_only":
++                from agent.skill_preprocessing import load_skills_config
++
++                skills_cfg = {**load_skills_config(), "inline_shell": False}
+             rendered_content = preprocess_skill_content(
+                 content,
+                 skill_md.parent,
+                 session_id=session_id,
++                skills_cfg=skills_cfg,
+             )
+         except Exception:
+             logger.debug(
+@@ -855,7 +1106,15 @@ def _serve_plugin_skill(
+             "content": f"{banner}{rendered_content}" if banner else rendered_content,
+             "description": description,
+             "linked_files": None,
++            "authority": authority_meta["authority"],
++            "context_safety": {
++                "provenance": authority_meta["provenance"],
++                "surface": "skill_content",
++            },
++            "skill_provenance": authority_meta,
++            "trust_promotion": authority_meta.get("trust_promotion"),
+             "readiness_status": SkillReadinessStatus.AVAILABLE.value,
++            "skill_dir": str(skill_md.parent),
+         },
+         ensure_ascii=False,
+     )
+@@ -1132,27 +1391,23 @@ def skill_view(
+                 ensure_ascii=False,
+             )
+ 
+-        # Security: warn if skill is loaded from outside trusted directories
+-        # (local skills dir + configured external_dirs are all trusted)
+-        _outside_skills_dir = True
+-        _trusted_dirs = [SKILLS_DIR.resolve()]
+-        try:
+-            _trusted_dirs.extend(d.resolve() for d in all_dirs[1:])
+-        except Exception:
+-            pass
+-        for _td in _trusted_dirs:
+-            try:
+-                skill_md.resolve().relative_to(_td)
+-                _outside_skills_dir = False
+-                break
+-            except ValueError:
+-                continue
+-
+         # Security: detect common prompt injection patterns
+         # (pattern list at module level as _INJECTION_PATTERNS)
+         _content_lower = content.lower()
+         _injection_detected = any(p in _content_lower for p in _INJECTION_PATTERNS)
+ 
++        parsed_frontmatter: Dict[str, Any] = {}
++        try:
++            parsed_frontmatter, _ = _parse_frontmatter(content)
++        except Exception:
++            parsed_frontmatter = {}
++
++        resolved_name = parsed_frontmatter.get("name", skill_md.parent.name)
++        authority_meta = _authority_metadata_for_skill(skill_md, str(resolved_name))
++        _skill_provenance = authority_meta["provenance"]
++        _context_provenance = "local" if _skill_provenance == "local-authored" else _skill_provenance
++        _outside_skills_dir = _skill_provenance == "external"
++
+         if _outside_skills_dir or _injection_detected:
+             _warnings = []
+             if _outside_skills_dir:
+@@ -1161,12 +1416,6 @@ def skill_view(
+                 _warnings.append("skill content contains patterns that may indicate prompt injection")
+             logging.getLogger(__name__).warning("Skill security warning for '%s': %s", name, "; ".join(_warnings))
+ 
+-        parsed_frontmatter: Dict[str, Any] = {}
+-        try:
+-            parsed_frontmatter, _ = _parse_frontmatter(content)
+-        except Exception:
+-            parsed_frontmatter = {}
+-
+         if not skill_matches_platform(parsed_frontmatter):
+             return json.dumps(
+                 {
+@@ -1178,7 +1427,6 @@ def skill_view(
+             )
+ 
+         # Check if the skill is disabled by the user
+-        resolved_name = parsed_frontmatter.get("name", skill_md.parent.name)
+         if _is_skill_disabled(resolved_name):
+             return json.dumps(
+                 {
+@@ -1281,6 +1529,22 @@ def skill_view(
+                     ensure_ascii=False,
+                 )
+ 
++            try:
++                from agent.context_safety import ContextSurface, scan_context_text
++                safety = scan_context_text(
++                    content,
++                    surface=ContextSurface.SKILL_CONTENT,
++                    source_label=f"{name}/{file_path}",
++                )
++                context_safety = {
++                    "provenance": _context_provenance,
++                    "finding_count": safety.flags.get("finding_count", 0),
++                    "surface": safety.surface.value,
++                    "verdict": safety.verdict.value,
++                }
++            except Exception:
++                context_safety = {"provenance": _context_provenance, "finding_count": 0}
++
+             return json.dumps(
+                 {
+                     "success": True,
+@@ -1288,6 +1552,10 @@ def skill_view(
+                     "file": file_path,
+                     "content": content,
+                     "file_type": target_file.suffix,
++                    "authority": authority_meta["authority"],
++                    "context_safety": context_safety,
++                    "skill_provenance": authority_meta,
++                    "trust_promotion": authority_meta.get("trust_promotion"),
+                 },
+                 ensure_ascii=False,
+             )
+@@ -1442,16 +1710,39 @@ def skill_view(
+             try:
+                 from agent.skill_preprocessing import preprocess_skill_content
+ 
++                skills_cfg = None
++                if authority_meta["authority"] == "evidence_only":
++                    from agent.skill_preprocessing import load_skills_config
++
++                    skills_cfg = {**load_skills_config(), "inline_shell": False}
+                 rendered_content = preprocess_skill_content(
+                     content,
+                     skill_dir,
+                     session_id=task_id,
++                    skills_cfg=skills_cfg,
+                 )
+             except Exception:
+                 logger.debug(
+                     "Could not preprocess skill content for %s", skill_name, exc_info=True
+                 )
+ 
++        authority = authority_meta["authority"]
++        try:
++            from agent.context_safety import ContextSurface, scan_context_text
++            safety = scan_context_text(
++                rendered_content,
++                surface=ContextSurface.SKILL_CONTENT,
++                source_label=skill_name,
++            )
++            context_safety = {
++                "provenance": _context_provenance,
++                "finding_count": safety.flags.get("finding_count", 0),
++                "surface": safety.surface.value,
++                "verdict": safety.verdict.value,
++            }
++        except Exception:
++            context_safety = {"provenance": _context_provenance, "finding_count": 0}
++
+         result = {
+             "success": True,
+             "name": skill_name,
+@@ -1459,6 +1750,10 @@ def skill_view(
+             "tags": tags,
+             "related_skills": related_skills,
+             "content": rendered_content,
++            "authority": authority,
++            "context_safety": context_safety,
++            "skill_provenance": authority_meta,
++            "trust_promotion": authority_meta.get("trust_promotion"),
+             "path": rel_path,
+             "skill_dir": str(skill_dir) if skill_dir else None,
+             "linked_files": linked_files if linked_files else None,

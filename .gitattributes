@@ -1,0 +1,11 @@
+*.patch -whitespace
+validation/runs/**/*.log -whitespace
+hermes-agent-patches-audit-handoff export-ignore
+hermes-agent-patches-audit-handoff/** export-ignore
+hermes-agent-patches-closeout-audit export-ignore
+hermes-agent-patches-closeout-audit/** export-ignore
+hermes-agent-patches-*-audit export-ignore
+hermes-agent-patches-*-audit/** export-ignore
+.pytest_cache export-ignore
+.pytest_cache/** export-ignore
+.DS_Store export-ignore

@@ -1,0 +1,33 @@
+diff --git a/agent/file_safety.py b/agent/file_safety.py
+index 8cbb472d1..2f28517d5 100644
+--- a/agent/file_safety.py
++++ b/agent/file_safety.py
+@@ -20,6 +20,10 @@ def _hermes_root_path() -> Path:
+         return Path(os.path.expanduser("~/.hermes"))
+ 
+ 
++def _resolve_file_safety_path(path: os.PathLike[str] | str) -> Path:
++    return Path(path).expanduser().resolve()
++
++
+ def build_write_denied_paths(home: str) -> set[str]:
+     """Return exact sensitive paths that must never be written."""
+     hermes_home = _hermes_home_path()
+@@ -202,7 +206,7 @@ def get_read_block_error(path: str) -> Optional[str]:
+     ``"auth.json"`` would otherwise miss the denylist when the task's
+     terminal cwd differs from the process cwd.
+     """
+-    resolved = Path(path).expanduser().resolve()
++    resolved = _resolve_file_safety_path(path)
+ 
+     # Resolve BOTH the active HERMES_HOME (profile-aware) AND the global
+     # Hermes root so credential stores at <root>/auth.json etc. are also
+@@ -211,7 +215,7 @@ def get_read_block_error(path: str) -> Optional[str]:
+     hermes_dirs: list[Path] = []
+     for base in (_hermes_home_path(), _hermes_root_path()):
+         try:
+-            real = base.resolve()
++            real = _resolve_file_safety_path(base)
+             if real not in hermes_dirs:
+                 hermes_dirs.append(real)
+         except Exception:

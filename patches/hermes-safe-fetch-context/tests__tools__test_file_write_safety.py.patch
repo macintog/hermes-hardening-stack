@@ -1,0 +1,26 @@
+diff --git a/tests/tools/test_file_write_safety.py b/tests/tools/test_file_write_safety.py
+index ddd40caad..4d671e196 100644
+--- a/tests/tools/test_file_write_safety.py
++++ b/tests/tools/test_file_write_safety.py
+@@ -187,6 +187,21 @@ class TestCheckSensitivePathMacOSBypass:
+         from tools.file_tools import _check_sensitive_path
+         assert _check_sensitive_path("/private/var/db/something") is not None
+ 
++    def test_private_var_folders_temp_allowed(self):
++        from tools.file_tools import _check_sensitive_path
++        assert _check_sensitive_path("/private/var/folders/5m/demo/T/sample.txt") is None
++
++    def test_private_var_folders_prefix_lookalike_blocked(self):
++        from tools.file_tools import _check_sensitive_path
++        assert _check_sensitive_path("/private/var/folders.evil/sample.txt") is not None
++
++    def test_private_var_folders_symlink_escape_blocked(self, tmp_path):
++        from tools import file_tools
++
++        link = tmp_path / "escape"
++        link.symlink_to("/private/var/db")
++        assert file_tools._check_sensitive_path(str(link / "sample.txt")) is not None
++
+     def test_boot_still_blocked(self):
+         from tools.file_tools import _check_sensitive_path
+         assert _check_sensitive_path("/boot/grub/grub.cfg") is not None

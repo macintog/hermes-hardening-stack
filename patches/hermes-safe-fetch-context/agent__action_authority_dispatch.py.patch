@@ -1,0 +1,242 @@
+diff --git a/agent/action_authority_dispatch.py b/agent/action_authority_dispatch.py
+new file mode 100644
+index 000000000..0369aef21
+--- /dev/null
++++ b/agent/action_authority_dispatch.py
+@@ -0,0 +1,236 @@
++"""Action-authority choreography for model tool dispatch."""
++
++from __future__ import annotations
++
++import json
++import logging
++from dataclasses import dataclass
++from typing import Any, Dict, Optional
++
++from agent.action_authority import (
++    ActionAuthorityResult,
++    AuthorityDecision,
++    action_authority_approval_metadata,
++    evaluate_action_authority,
++)
++
++logger = logging.getLogger(__name__)
++
++
++_ACTION_DECISION_LEDGER_SKIP_CLASSES = {
++    "read_only_local_inspection",
++    "read_only_network_fetch",
++    "agent_loop_internal",
++}
++
++
++@dataclass(frozen=True)
++class ToolDispatchAuthorization:
++    authority: ActionAuthorityResult
++    action_decision: Dict[str, Any] | None = None
++    blocked_payload: Dict[str, Any] | None = None
++    acp_block_message: str | None = None
++
++    @property
++    def allowed(self) -> bool:
++        return self.authority.decision == AuthorityDecision.ALLOW and self.blocked_payload is None and self.acp_block_message is None
++
++
++def summarize_action_authority_text(value: Optional[str], *, limit: int = 240) -> str:
++    if not value:
++        return ""
++    summary = " ".join(str(value).split())
++    if len(summary) <= limit:
++        return summary
++    return summary[: limit - 1] + "..."
++
++
++def action_decision_payload_for_dispatch(
++    function_name: str,
++    authority: ActionAuthorityResult,
++    *,
++    user_task: Optional[str] = None,
++    trusted_policy_context: Optional[str] = None,
++    prior_untrusted_context: Optional[str] = None,
++) -> Dict[str, Any]:
++    trusted_scope = summarize_action_authority_text(user_task)
++    trusted_intent = {
++        "present": bool(trusted_scope),
++        "source": "user_task" if trusted_scope else None,
++    }
++    if trusted_scope:
++        trusted_intent["scope"] = trusted_scope
++    policy_scope = summarize_action_authority_text(trusted_policy_context)
++    if policy_scope:
++        trusted_intent["policy_context"] = policy_scope
++
++    evidence_inputs: list[Dict[str, Any]] = []
++    evidence_summary = summarize_action_authority_text(prior_untrusted_context)
++    if evidence_summary:
++        evidence_inputs.append({
++            "source": "prior_untrusted_context",
++            "evidence_only": True,
++            "summary": evidence_summary,
++        })
++
++    return authority.to_action_decision_payload(
++        function_name,
++        trusted_intent=trusted_intent,
++        evidence_inputs=evidence_inputs,
++    )
++
++
++def should_emit_action_decision(authority: ActionAuthorityResult) -> bool:
++    if authority.decision != AuthorityDecision.ALLOW:
++        return True
++    return getattr(authority.action_class, "value", str(authority.action_class)) not in _ACTION_DECISION_LEDGER_SKIP_CLASSES
++
++
++def confirm_action_authority_if_requested(
++    function_name: str,
++    function_args: Dict[str, Any],
++    authority: ActionAuthorityResult,
++    *,
++    approval_callback=None,
++) -> ActionAuthorityResult:
++    if authority.decision != AuthorityDecision.REQUIRE_CONFIRMATION:
++        return authority
++    metadata = action_authority_approval_metadata(function_name, function_args, authority)
++    try:
++        from tools.approval import request_scoped_approval
++
++        if approval_callback is None:
++            try:
++                from tools.terminal_tool import _get_approval_callback
++
++                approval_callback = _get_approval_callback()
++            except Exception:
++                approval_callback = None
++        approval = request_scoped_approval(
++            metadata["key"],
++            metadata["subject"],
++            metadata["description"],
++            allow_permanent=bool(metadata.get("allow_permanent", True)),
++            approval_callback=approval_callback,
++        )
++    except Exception as exc:
++        logger.warning("Action-authority scoped approval failed: %s", exc, exc_info=True)
++        return authority
++    if approval.get("approved"):
++        return ActionAuthorityResult(
++            AuthorityDecision.ALLOW,
++            authority.action_class,
++            reason="action authority scope approved by user",
++            source=approval.get("source") or "trusted_user_confirmation",
++            scope_root=authority.scope_root,
++        )
++    return ActionAuthorityResult(
++        authority.decision,
++        authority.action_class,
++        reason=approval.get("message") or authority.reason,
++        source=authority.source,
++        scope_root=authority.scope_root,
++    )
++
++
++def maybe_confirm_action_authority_with_acp(
++    function_name: str,
++    function_args: Dict[str, Any],
++    authority: ActionAuthorityResult,
++) -> tuple[ActionAuthorityResult, Optional[str]]:
++    if (
++        authority.decision != AuthorityDecision.REQUIRE_CONFIRMATION
++        or function_name not in {"write_file", "patch"}
++    ):
++        return authority, None
++    try:
++        from acp_adapter.edit_approval import (
++            build_edit_proposal,
++            get_edit_approval_requester,
++            maybe_require_edit_approval,
++        )
++
++        if get_edit_approval_requester() is None:
++            return authority, None
++        if build_edit_proposal(function_name, function_args) is None:
++            return authority, None
++        edit_block_message = maybe_require_edit_approval(function_name, function_args)
++        if edit_block_message is not None:
++            return authority, edit_block_message
++    except Exception as exc:
++        logger.debug("ACP edit approval guard error: %s", exc)
++        return authority, json.dumps({"error": "Edit approval denied: approval guard failed"}, ensure_ascii=False)
++    return ActionAuthorityResult(
++        AuthorityDecision.ALLOW,
++        authority.action_class,
++        reason="action authority scope approved by ACP edit approval",
++        source="acp_edit_approval",
++        scope_root=authority.scope_root,
++    ), None
++
++
++def authorize_tool_dispatch(
++    function_name: str,
++    function_args: Dict[str, Any],
++    *,
++    user_task: Optional[str] = None,
++    trusted_policy_context: Optional[str] = None,
++    prior_untrusted_context: Optional[str] = None,
++    approval_callback=None,
++) -> ToolDispatchAuthorization:
++    authority = evaluate_action_authority(
++        function_name,
++        function_args,
++        trusted_user_intent=user_task,
++        trusted_policy_context=trusted_policy_context,
++        prior_untrusted_context=prior_untrusted_context,
++    )
++    authority, acp_block_message = maybe_confirm_action_authority_with_acp(
++        function_name,
++        function_args,
++        authority,
++    )
++    if acp_block_message is not None:
++        return ToolDispatchAuthorization(authority=authority, acp_block_message=acp_block_message)
++    authority = confirm_action_authority_if_requested(
++        function_name,
++        function_args,
++        authority,
++        approval_callback=approval_callback,
++    )
++    action_decision = (
++        action_decision_payload_for_dispatch(
++            function_name,
++            authority,
++            user_task=user_task,
++            trusted_policy_context=trusted_policy_context,
++            prior_untrusted_context=prior_untrusted_context,
++        )
++        if should_emit_action_decision(authority)
++        else None
++    )
++    if authority.decision == AuthorityDecision.ALLOW:
++        return ToolDispatchAuthorization(authority=authority, action_decision=action_decision)
++    payload = authority.to_error_payload()
++    if action_decision:
++        payload["action_decisions"] = [action_decision]
++    return ToolDispatchAuthorization(authority=authority, action_decision=action_decision, blocked_payload=payload)
++
++
++def attach_action_decision(rendered_result: Any, action_decision: Dict[str, Any] | None) -> Any:
++    if not action_decision:
++        return rendered_result
++    if isinstance(rendered_result, str):
++        try:
++            decoded = json.loads(rendered_result)
++        except Exception:
++            decoded = None
++        if isinstance(decoded, dict):
++            return attach_action_decision(decoded, action_decision)
++    if isinstance(rendered_result, dict):
++        existing = rendered_result.get("action_decisions")
++        decisions = list(existing) if isinstance(existing, list) else []
++        decisions.append(action_decision)
++        rendered_result["action_decisions"] = decisions
++        return rendered_result
++    return {"result": rendered_result, "action_decisions": [action_decision]}

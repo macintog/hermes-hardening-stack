@@ -1,0 +1,57 @@
+diff --git a/tests/hermes_cli/test_update_autostash.py b/tests/hermes_cli/test_update_autostash.py
+index be1a5f1..200a33d 100644
+--- a/tests/hermes_cli/test_update_autostash.py
++++ b/tests/hermes_cli/test_update_autostash.py
+@@ -39,6 +39,16 @@ def _patch_managed_uv(request):
+          patch("hermes_cli.managed_uv.update_managed_uv", side_effect=_fake_update_managed_uv):
+         yield
+ 
++
++@pytest.fixture(autouse=True)
++def _disable_sfw_wrapper(monkeypatch):
++    monkeypatch.setattr(
++        hermes_main,
++        "_wrap_package_manager_argv_for_sfw",
++        lambda cmd, *, env=None, force=False: (cmd, env),
++    )
++
++
+ def test_stash_local_changes_if_needed_returns_none_when_tree_clean(monkeypatch, tmp_path):
+     calls = []
+ 
+@@ -523,6 +533,35 @@ def test_install_heartbeat_prints_when_dependency_install_is_silent(monkeypatch,
+     assert "still installing dependencies" in out
+ 
+ 
++def test_install_heartbeat_routes_package_manager_through_sfw(monkeypatch):
++    """Dependency install retries should share the same SFW wrapping path."""
++    seen = {}
++
++    def fake_wrap(cmd, *, env=None, force=False):
++        seen["wrap"] = (cmd, env, force)
++        return ["/shim/sfw-package-shim", "uv", "pip", "install", "-e", "."], {"PATH": "wrapped"}
++
++    def fake_run(cmd, **kwargs):
++        seen["run"] = (cmd, kwargs)
++        return SimpleNamespace(returncode=0)
++
++    monkeypatch.setattr(hermes_main, "_wrap_package_manager_argv_for_sfw", fake_wrap)
++    monkeypatch.setattr(hermes_main.subprocess, "run", fake_run)
++
++    hermes_main._run_install_with_heartbeat(
++        ["/usr/bin/uv", "pip", "install", "-e", "."],
++        env={"PATH": "base"},
++    )
++
++    assert seen["wrap"] == (
++        ["/usr/bin/uv", "pip", "install", "-e", "."],
++        {"PATH": "base"},
++        False,
++    )
++    assert seen["run"][0] == ["/shim/sfw-package-shim", "uv", "pip", "install", "-e", "."]
++    assert seen["run"][1]["env"] == {"PATH": "wrapped"}
++
++
+ # ---------------------------------------------------------------------------
+ # ff-only fallback to reset --hard on diverged history
+ # ---------------------------------------------------------------------------

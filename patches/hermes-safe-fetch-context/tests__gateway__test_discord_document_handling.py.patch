@@ -1,0 +1,214 @@
+diff --git a/tests/gateway/test_discord_document_handling.py b/tests/gateway/test_discord_document_handling.py
+index 7b75c4a07..539bfc101 100644
+--- a/tests/gateway/test_discord_document_handling.py
++++ b/tests/gateway/test_discord_document_handling.py
+@@ -137,20 +137,26 @@ def make_message(attachments: list, content: str = "") -> SimpleNamespace:
+     )
+ 
+ 
+-def _mock_aiohttp_download(raw_bytes: bytes):
+-    """Return a patch context manager that makes aiohttp return raw_bytes."""
+-    resp = AsyncMock()
+-    resp.status = 200
+-    resp.read = AsyncMock(return_value=raw_bytes)
+-    resp.__aenter__ = AsyncMock(return_value=resp)
+-    resp.__aexit__ = AsyncMock(return_value=False)
++def _safe_download_result(raw_bytes: bytes):
++    return SimpleNamespace(content=raw_bytes)
+ 
+-    session = AsyncMock()
+-    session.get = MagicMock(return_value=resp)
+-    session.__aenter__ = AsyncMock(return_value=session)
+-    session.__aexit__ = AsyncMock(return_value=False)
+ 
+-    return patch("aiohttp.ClientSession", return_value=session)
++def _mock_safe_download(raw_bytes: bytes):
++    """Return a patch context manager that makes Safe HTTP return raw_bytes."""
++    return patch(
++        "plugins.platforms.discord.adapter.safe_download_bytes",
++        new_callable=AsyncMock,
++        return_value=_safe_download_result(raw_bytes),
++    )
++
++
++def _mock_safe_download_sequence(raw_bytes: list[bytes]):
++    """Return Safe HTTP results in order for multiple attachments."""
++    return patch(
++        "plugins.platforms.discord.adapter.safe_download_bytes",
++        new_callable=AsyncMock,
++        side_effect=[_safe_download_result(data) for data in raw_bytes],
++    )
+ 
+ 
+ # ---------------------------------------------------------------------------
+@@ -164,7 +170,7 @@ class TestIncomingDocumentHandling:
+         """A PDF attachment should be downloaded, cached, typed as DOCUMENT."""
+         pdf_bytes = b"%PDF-1.4 fake content"
+ 
+-        with _mock_aiohttp_download(pdf_bytes):
++        with _mock_safe_download(pdf_bytes):
+             msg = make_message([make_attachment(filename="report.pdf", content_type="application/pdf")])
+             await adapter._handle_message(msg)
+ 
+@@ -180,7 +186,7 @@ class TestIncomingDocumentHandling:
+         """.txt file under 100KB should have its content injected into event.text."""
+         file_content = b"Hello from a text file"
+ 
+-        with _mock_aiohttp_download(file_content):
++        with _mock_safe_download(file_content):
+             msg = make_message(
+                 attachments=[make_attachment(filename="notes.txt", content_type="text/plain")],
+                 content="summarize this",
+@@ -199,7 +205,7 @@ class TestIncomingDocumentHandling:
+         """.md file under 100KB should have its content injected."""
+         file_content = b"# Title\nSome markdown content"
+ 
+-        with _mock_aiohttp_download(file_content):
++        with _mock_safe_download(file_content):
+             msg = make_message(
+                 attachments=[make_attachment(filename="readme.md", content_type="text/markdown")],
+                 content="",
+@@ -215,7 +221,7 @@ class TestIncomingDocumentHandling:
+         """.log file under 100KB should be treated as text/plain and injected."""
+         file_content = b"BLE trace line 1\nBLE trace line 2"
+ 
+-        with _mock_aiohttp_download(file_content):
++        with _mock_safe_download(file_content):
+             msg = make_message(
+                 attachments=[make_attachment(filename="btsnoop_hci.log", content_type="text/plain")],
+                 content="please inspect this",
+@@ -255,7 +261,7 @@ class TestIncomingDocumentHandling:
+             )
+         ])
+ 
+-        with _mock_aiohttp_download(b"PK\x03\x04test"):
++        with _mock_safe_download(b"PK\x03\x04test"):
+             await adapter._handle_message(msg)
+ 
+         event = adapter.handle_message.call_args[0][0]
+@@ -269,7 +275,7 @@ class TestIncomingDocumentHandling:
+             make_attachment(filename="archive.zip", content_type="application/zip")
+         ])
+ 
+-        with _mock_aiohttp_download(b"PK\x03\x04test"):
++        with _mock_safe_download(b"PK\x03\x04test"):
+             await adapter._handle_message(msg)
+ 
+         event = adapter.handle_message.call_args[0][0]
+@@ -280,16 +286,11 @@ class TestIncomingDocumentHandling:
+     @pytest.mark.asyncio
+     async def test_download_error_handled(self, adapter):
+         """If the HTTP download raises, the handler should not crash."""
+-        resp = AsyncMock()
+-        resp.__aenter__ = AsyncMock(side_effect=RuntimeError("connection reset"))
+-        resp.__aexit__ = AsyncMock(return_value=False)
+-
+-        session = AsyncMock()
+-        session.get = MagicMock(return_value=resp)
+-        session.__aenter__ = AsyncMock(return_value=session)
+-        session.__aexit__ = AsyncMock(return_value=False)
+-
+-        with patch("aiohttp.ClientSession", return_value=session):
++        with patch(
++            "plugins.platforms.discord.adapter.safe_download_bytes",
++            new_callable=AsyncMock,
++            side_effect=RuntimeError("connection reset"),
++        ):
+             msg = make_message([
+                 make_attachment(filename="report.pdf", content_type="application/pdf")
+             ])
+@@ -305,7 +306,7 @@ class TestIncomingDocumentHandling:
+         """.txt over 100KB should be cached but NOT injected into event.text."""
+         large_content = b"x" * (200 * 1024)
+ 
+-        with _mock_aiohttp_download(large_content):
++        with _mock_safe_download(large_content):
+             msg = make_message(
+                 attachments=[make_attachment(filename="big.txt", content_type="text/plain", size=len(large_content))],
+                 content="",
+@@ -323,34 +324,7 @@ class TestIncomingDocumentHandling:
+         content1 = b"First file content"
+         content2 = b"Second file content"
+ 
+-        call_count = 0
+-        responses = [content1, content2]
+-
+-        def make_session(_responses):
+-            idx = 0
+-
+-            class FakeSession:
+-                async def __aenter__(self):
+-                    return self
+-
+-                async def __aexit__(self, *_):
+-                    pass
+-
+-                def get(self, url, **kwargs):
+-                    nonlocal idx
+-                    data = _responses[idx % len(_responses)]
+-                    idx += 1
+-
+-                    resp = AsyncMock()
+-                    resp.status = 200
+-                    resp.read = AsyncMock(return_value=data)
+-                    resp.__aenter__ = AsyncMock(return_value=resp)
+-                    resp.__aexit__ = AsyncMock(return_value=False)
+-                    return resp
+-
+-            return FakeSession()
+-
+-        with patch("aiohttp.ClientSession", return_value=make_session([content1, content2])):
++        with _mock_safe_download_sequence([content1, content2]):
+             msg = make_message(
+                 attachments=[
+                     make_attachment(filename="file1.txt", content_type="text/plain"),
+@@ -403,7 +377,7 @@ class TestAllowAnyAttachment:
+         to dispatch the event at all, so we don't assert on call_args here —
+         we just verify the file wasn't cached.
+         """
+-        with _mock_aiohttp_download(b"should not be cached"):
++        with _mock_safe_download(b"should not be cached"):
+             msg = make_message([
+                 make_attachment(filename="weird.xyz", content_type="application/x-custom")
+             ])
+@@ -418,7 +392,7 @@ class TestAllowAnyAttachment:
+         """Flag on: unknown extension is cached as application/octet-stream."""
+         adapter.config.extra["allow_any_attachment"] = True
+ 
+-        with _mock_aiohttp_download(b"\x00\x01\x02 binary payload"):
++        with _mock_safe_download(b"\x00\x01\x02 binary payload"):
+             msg = make_message([
+                 make_attachment(filename="weird.xyz", content_type="application/x-custom")
+             ])
+@@ -439,7 +413,7 @@ class TestAllowAnyAttachment:
+         """Flag on + no content_type from discord: MIME falls back to octet-stream."""
+         adapter.config.extra["allow_any_attachment"] = True
+ 
+-        with _mock_aiohttp_download(b"raw bytes"):
++        with _mock_safe_download(b"raw bytes"):
+             msg = make_message([
+                 make_attachment(filename="mystery.bin", content_type=None)
+             ])
+@@ -474,7 +448,7 @@ class TestAllowAnyAttachment:
+         adapter.config.extra["max_attachment_bytes"] = 0
+ 
+         # 64 MiB — would normally exceed the historical 32 MiB hardcoded cap.
+-        with _mock_aiohttp_download(b"x" * 16):
++        with _mock_safe_download(b"x" * 16):
+             msg = make_message([
+                 make_attachment(
+                     filename="huge.xyz",
+@@ -498,7 +472,7 @@ class TestAllowAnyAttachment:
+         adapter.config.extra["allow_any_attachment"] = True
+         file_content = b"still a text file"
+ 
+-        with _mock_aiohttp_download(file_content):
++        with _mock_safe_download(file_content):
+             msg = make_message(
+                 attachments=[make_attachment(filename="notes.txt", content_type="text/plain")],
+                 content="check this",
+@@ -528,4 +502,3 @@ class TestAllowAnyAttachment:
+         """Garbage in max_attachment_bytes config falls back to 32 MiB."""
+         adapter.config.extra["max_attachment_bytes"] = "not-a-number"
+         assert adapter._discord_max_attachment_bytes() == 32 * 1024 * 1024
+-

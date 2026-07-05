@@ -1,0 +1,48 @@
+diff --git a/tests/gateway/test_telegram_thread_fallback.py b/tests/gateway/test_telegram_thread_fallback.py
+index 3f5b7da..64f639f 100644
+--- a/tests/gateway/test_telegram_thread_fallback.py
++++ b/tests/gateway/test_telegram_thread_fallback.py
+@@ -988,34 +988,18 @@ async def test_send_image_upload_dm_topic_reply_not_found_retry_drops_thread_id(
+             raise FakeBadRequest("Message to be replied not found")
+         return SimpleNamespace(message_id=785)
+ 
+-    class _FakeResponse:
+-        content = b"image-data"
+-
+-        def raise_for_status(self):
+-            return None
+-
+-    class _FakeAsyncClient:
+-        def __init__(self, *args, **kwargs):
+-            pass
+-
+-        async def __aenter__(self):
+-            return self
+-
+-        async def __aexit__(self, *args):
+-            return None
++    adapter._bot = SimpleNamespace(send_photo=mock_send_photo)
+ 
+-        async def get(self, _url):
+-            return _FakeResponse()
++    async def fake_safe_download(url, **kwargs):
++        assert url == "https://example.com/photo.png"
++        assert kwargs["source_type"] == "telegram_fallback_image"
++        assert kwargs["max_bytes"] == 10 * 1024 * 1024
++        return SimpleNamespace(content=b"image-data")
+ 
+-    monkeypatch.setitem(
+-        sys.modules,
+-        "httpx",
+-        SimpleNamespace(AsyncClient=_FakeAsyncClient),
++    monkeypatch.setattr(
++        "plugins.platforms.telegram.adapter.safe_download_bytes",
++        fake_safe_download,
+     )
+-    adapter._bot = SimpleNamespace(send_photo=mock_send_photo)
+-    import tools.url_safety as url_safety
+-
+-    monkeypatch.setattr(url_safety, "is_safe_url", lambda _url: True)
+ 
+     result = await adapter.send_image(
+         chat_id="123",

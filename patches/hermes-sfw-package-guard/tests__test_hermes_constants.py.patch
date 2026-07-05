@@ -1,0 +1,85 @@
+diff --git a/tests/test_hermes_constants.py b/tests/test_hermes_constants.py
+index 46ff5a3..c9b2eec 100644
+--- a/tests/test_hermes_constants.py
++++ b/tests/test_hermes_constants.py
+@@ -23,6 +23,7 @@ from hermes_constants import (
+     parse_reasoning_effort,
+     secure_parent_dir,
+     with_hermes_node_path,
++    wrap_package_manager_command_for_sfw,
+ )
+ 
+ 
+@@ -208,6 +209,72 @@ class TestHermesManagedNode:
+         assert parts[-1] == "system-node"
+ 
+ 
++class TestSocketFirewallPackageShim:
++    def test_missing_shim_keeps_original_command(self, tmp_path, monkeypatch):
++        monkeypatch.setattr(Path, "home", lambda: tmp_path)
++        monkeypatch.setattr(hermes_constants.sys, "platform", "darwin")
++
++        cmd, env = wrap_package_manager_command_for_sfw(
++            tmp_path / "hermes" / "bin" / "uv",
++            ["self", "update"],
++            env={"PATH": "system-bin"},
++        )
++
++        assert cmd == [str(tmp_path / "hermes" / "bin" / "uv"), "self", "update"]
++        assert env == {"PATH": "system-bin"}
++
++    def test_wraps_managed_uv_with_shim_and_real_tool_path(self, tmp_path, monkeypatch):
++        home = tmp_path / "home"
++        shim = home / ".local" / "bin" / "sfw-package-shim"
++        shim.parent.mkdir(parents=True)
++        shim.write_text("#!/bin/sh\n")
++        shim.chmod(0o755)
++        uv = tmp_path / "hermes" / "bin" / "uv"
++        uv.parent.mkdir(parents=True)
++        uv.write_text("#!/bin/sh\n")
++        uv.chmod(0o755)
++        monkeypatch.setattr(Path, "home", lambda: home)
++        monkeypatch.setattr(hermes_constants.sys, "platform", "darwin")
++
++        cmd, env = wrap_package_manager_command_for_sfw(
++            uv,
++            ["self", "update"],
++            env={"PATH": "system-bin"},
++        )
++
++        assert cmd == [str(shim), "uv", "self", "update"]
++        assert env is not None
++        assert env["PATH"].split(os.pathsep) == [
++            str(shim.parent),
++            str(uv.parent),
++            "system-bin",
++        ]
++
++    def test_force_sets_sfw_force_for_npm_run(self, tmp_path, monkeypatch):
++        home = tmp_path / "home"
++        shim = home / ".local" / "bin" / "sfw-package-shim"
++        shim.parent.mkdir(parents=True)
++        shim.write_text("#!/bin/sh\n")
++        shim.chmod(0o755)
++        npm = tmp_path / "node" / "bin" / "npm"
++        npm.parent.mkdir(parents=True)
++        npm.write_text("#!/bin/sh\n")
++        npm.chmod(0o755)
++        monkeypatch.setattr(Path, "home", lambda: home)
++        monkeypatch.setattr(hermes_constants.sys, "platform", "darwin")
++
++        cmd, env = wrap_package_manager_command_for_sfw(
++            npm,
++            ["run", "build"],
++            env={"PATH": "system-bin"},
++            force=True,
++        )
++
++        assert cmd == [str(shim), "npm", "run", "build"]
++        assert env is not None
++        assert env["SFW_FORCE"] == "1"
++
++
+ @pytest.mark.skipif(os.name == "nt", reason="POSIX shell stubs; Windows uses .cmd shims")
+ class TestNodeToolRunnable:
+     """node_tool_runnable() rejects broken Hermes-managed npm/node wrappers."""

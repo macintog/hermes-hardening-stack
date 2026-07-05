@@ -1,0 +1,108 @@
+diff --git a/tests/agent/test_evidence_ledgers.py b/tests/agent/test_evidence_ledgers.py
+new file mode 100644
+index 000000000..de9248053
+--- /dev/null
++++ b/tests/agent/test_evidence_ledgers.py
+@@ -0,0 +1,102 @@
++import hashlib
++
++from agent.evidence_ledgers import (
++    LEDGER_SCHEMA,
++    attach_evidence_ledger,
++    build_evidence_item,
++    build_operational_artifact,
++    build_tool_invocation,
++    file_byte_count,
++    file_sha256,
++    redact_args,
++    redact_source_uri,
++    text_byte_count,
++    text_sha256,
++)
++
++
++def test_file_sha256_streams_and_skips_above_limit(tmp_path):
++    img = tmp_path / "image.png"
++    payload = b"abc123"
++    img.write_bytes(payload)
++
++    assert file_byte_count(img) == len(payload)
++    assert file_sha256(img) == (hashlib.sha256(payload).hexdigest(), "ok")
++    assert file_sha256(img, max_bytes=len(payload) - 1) == (None, "skipped")
++
++
++def test_redaction_hides_url_query_fragments_absolute_paths_and_sensitive_args(tmp_path):
++    assert redact_source_uri("https://example.test/a.png?token=secret#frag") == "https://example.test/a.png"
++    assert redact_source_uri("https://user:pass@example.test/download/secret-token-abc12345678901234567890/report.pdf?sig=secret#frag") == "https://example.test/download/<redacted>/report.pdf"
++    assert redact_source_uri(str(tmp_path / "secret.png")) == "file:secret.png"
++
++    redacted = redact_args({
++        "api_key": "secret",
++        "image_url": str(tmp_path / "secret.png"),
++        "urls": ["https://example.test/path?token=***#frag"],
++        "question": "copy this prompt",
++        "annotate": False,
++    })
++    assert redacted["api_key"] == "<redacted>"
++    assert redacted["image_url"] == "file:secret.png"
++    assert redacted["urls"] == ["https://example.test/path"]
++    assert redacted["question"] == "<omitted>"
++    assert redacted["annotate"] is False
++
++
++def test_text_hash_helpers_are_bounded():
++    assert text_byte_count("é") == len("é".encode("utf-8"))
++    assert text_sha256("abc") == (hashlib.sha256(b"abc").hexdigest(), "ok")
++    assert text_sha256("abc", max_bytes=2) == (None, "skipped")
++
++
++def test_builders_and_attach_preserve_existing_result_fields(tmp_path):
++    screenshot = tmp_path / "browser_screenshot.png"
++    screenshot.write_bytes(b"png")
++    sha, _ = file_sha256(screenshot)
++    evidence = build_evidence_item(
++        kind="browser_screenshot_observation",
++        source_type="browser_screenshot",
++        extraction_layer="browser_vision_analysis",
++        source_uri=str(screenshot),
++        sha256=sha,
++        byte_count=file_byte_count(screenshot),
++    )
++    artifact = build_operational_artifact(
++        kind="screenshot",
++        path=screenshot,
++        content_type="image/png",
++        sha256=sha,
++        byte_count=file_byte_count(screenshot),
++    )
++    invocation = build_tool_invocation(name="browser_vision", args={"question": "secret text"})
++    result = attach_evidence_ledger(
++        {"success": True, "analysis": "ok", "screenshot_path": str(screenshot)},
++        tool_name="browser_vision",
++        evidence_items=[evidence],
++        tool_invocation=invocation,
++        operational_artifacts=[artifact],
++    )
++
++    assert result["success"] is True
++    assert result["analysis"] == "ok"
++    ledger = result["evidence_ledger"]
++    assert ledger["schema"] == LEDGER_SCHEMA
++    assert ledger["ledger_origin"] == "native_tool"
++    assert ledger["read_only"] is True
++    assert ledger["trust_boundary"] == "untrusted_external"
++    item = ledger["evidence_items"][0]
++    assert item["id"].startswith("ev_")
++    assert item["evidence_only"] is True
++    assert item["instruction_authority"] == "none"
++    assert item["trust_boundary"] == "untrusted_external"
++    assert item["can_inform_response"] is True
++    assert item["can_authorize_action"] is False
++    assert item["side_effect_use_policy"] == "requires_independent_trusted_intent"
++    assert item["verbatim"] is False
++    assert item["text_ref"] == "analysis"
++    assert item["text"] is None
++    assert ledger["operational_artifacts"][0]["kind"] == "screenshot"
++    assert ledger["side_effects"] == []
++    assert ledger["action_decisions"] == []
++    assert ledger["metadata"]["ledgers_exposed"] is True

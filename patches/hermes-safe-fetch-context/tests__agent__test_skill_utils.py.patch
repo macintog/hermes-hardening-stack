@@ -1,0 +1,32 @@
+diff --git a/tests/agent/test_skill_utils.py b/tests/agent/test_skill_utils.py
+--- a/tests/agent/test_skill_utils.py
++++ b/tests/agent/test_skill_utils.py
+@@ -143,9 +143,9 @@ skills:
+     getattr(skill_utils, "_raw_config_cache_clear", lambda: None)()
+     monkeypatch.setattr(skill_utils, "yaml_load", counting_yaml_load)
+ 
+-    assert get_disabled_skill_names() == {"hidden-skill"}
+-    assert get_external_skills_dirs() == [external.resolve()]
+-    assert resolve_skill_config_values([
++    assert skill_utils.get_disabled_skill_names() == {"hidden-skill"}
++    assert skill_utils.get_external_skills_dirs() == [external.resolve()]
++    assert skill_utils.resolve_skill_config_values([
+         {"key": "wiki.path", "description": "Wiki path"}
+     ])["wiki.path"].endswith("/wiki")
+     assert parse_count == 1
+@@ -162,13 +162,13 @@ def test_skill_config_raw_cache_invalidates_on_config_edit(tmp_path, monkeypatch
+ 
+     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+     skill_utils._external_dirs_cache_clear()
+-    assert get_disabled_skill_names() == {"old-skill"}
++    assert skill_utils.get_disabled_skill_names() == {"old-skill"}
+ 
+     config_path.write_text("skills:\n  disabled: [new-skill]\n", encoding="utf-8")
+     import os
+     os.utime(config_path, None)
+ 
+-    assert get_disabled_skill_names() == {"new-skill"}
++    assert skill_utils.get_disabled_skill_names() == {"new-skill"}
+ 
+ 
+ def test_is_external_skill_path_matches_configured_external_dir(tmp_path, monkeypatch):

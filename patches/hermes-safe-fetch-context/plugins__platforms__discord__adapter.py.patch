@@ -1,0 +1,328 @@
+diff --git a/plugins/platforms/discord/adapter.py b/plugins/platforms/discord/adapter.py
+index bfe472450..97812d92c 100644
+--- a/plugins/platforms/discord/adapter.py
++++ b/plugins/platforms/discord/adapter.py
+@@ -119,9 +119,23 @@ from gateway.platforms.base import (
+     _TEXT_INJECT_EXTENSIONS,
+     validate_inbound_media_size,
+ )
++from tools.safe_http import SafeHTTPError, safe_download_bytes
+ from tools.url_safety import is_safe_url
+ 
+ 
++_DISCORD_IMAGE_MAX_BYTES = 10 * 1024 * 1024
++_DISCORD_ANIMATION_MAX_BYTES = 25 * 1024 * 1024
++_DISCORD_DOCUMENT_MAX_BYTES = 32 * 1024 * 1024
++_DISCORD_IMAGE_CONTENT_TYPES = (
++    "image/png",
++    "image/jpeg",
++    "image/gif",
++    "image/webp",
++)
++_DISCORD_ANIMATION_CONTENT_TYPES = ("image/gif",)
++_DISCORD_DOCUMENT_CONTENT_TYPES = tuple(set(SUPPORTED_DOCUMENT_TYPES.values()))
++
++
+ async def _wait_for_ready_or_bot_exit(
+     ready_event: asyncio.Event,
+     bot_task: asyncio.Task,
+@@ -2388,7 +2402,6 @@ class DiscordAdapter(BasePlatformAdapter):
+ 
+             files: List[Any] = []
+             captions: List[str] = []
+-            aiohttp_session = None
+             try:
+                 for image_url, alt_text in chunk:
+                     if alt_text:
+@@ -2400,36 +2413,38 @@ class DiscordAdapter(BasePlatformAdapter):
+                             continue
+                         files.append(_discord_mod.File(local_path, filename=os.path.basename(local_path)))
+                     else:
+-                        if not is_safe_url(image_url):
+-                            logger.warning("[%s] Blocked unsafe image URL in batch", self.name)
+-                            continue
+                         # Download to BytesIO so it renders inline
+                         try:
+-                            import aiohttp as _aiohttp
+-                            from gateway.platforms.base import resolve_proxy_url, proxy_kwargs_for_aiohttp
+-                            _proxy = resolve_proxy_url(platform_env_var="DISCORD_PROXY")
+-                            _sess_kw, _req_kw = proxy_kwargs_for_aiohttp(_proxy)
+-                            if aiohttp_session is None:
+-                                aiohttp_session = _aiohttp.ClientSession(**_sess_kw)
+-                            async with aiohttp_session.get(
+-                                image_url, timeout=_aiohttp.ClientTimeout(total=30), **_req_kw,
+-                            ) as resp:
+-                                if resp.status != 200:
+-                                    logger.warning(
+-                                        "[%s] Failed to download image (HTTP %d) in batch: %s",
+-                                        self.name, resp.status, image_url[:80],
+-                                    )
+-                                    continue
+-                                data = await resp.read()
+-                                ct = resp.headers.get("content-type", "image/png")
+-                                ext = "png"
+-                                if "jpeg" in ct or "jpg" in ct:
+-                                    ext = "jpg"
+-                                elif "gif" in ct:
+-                                    ext = "gif"
+-                                elif "webp" in ct:
+-                                    ext = "webp"
+-                                files.append(_discord_mod.File(_io.BytesIO(data), filename=f"image_{len(files)}.{ext}"))
++                            result = await safe_download_bytes(
++                                image_url,
++                                max_bytes=_DISCORD_IMAGE_MAX_BYTES,
++                                source_type="gateway:discord-outbound-image",
++                                policy={"redirect_credentials": "no-credentials"},
++                                headers={"User-Agent": "HermesAgent/1.0", "Accept": "image/*,*/*;q=0.8"},
++                                timeout=30.0,
++                                allowed_content_types=_DISCORD_IMAGE_CONTENT_TYPES,
++                            )
++                            data = result.content
++                            ct = result.content_type or "image/png"
++                            ext = "png"
++                            if "jpeg" in ct or "jpg" in ct:
++                                ext = "jpg"
++                            elif "gif" in ct:
++                                ext = "gif"
++                            elif "webp" in ct:
++                                ext = "webp"
++                            files.append(
++                                _discord_mod.File(
++                                    _io.BytesIO(data),
++                                    filename=f"image_{len(files)}.{ext}",
++                                )
++                            )
++                        except SafeHTTPError as dl_err:
++                            logger.warning(
++                                "[%s] Safe image download blocked for %s: %s",
++                                self.name, image_url[:80], dl_err,
++                            )
++                            continue
+                         except Exception as dl_err:
+                             logger.warning("[%s] Download failed for %s: %s", self.name, image_url[:80], dl_err)
+                             continue
+@@ -2459,12 +2474,6 @@ class DiscordAdapter(BasePlatformAdapter):
+                     exc_info=True,
+                 )
+                 await super().send_multiple_images(chat_id, chunk, metadata, human_delay=human_delay)
+-            finally:
+-                if aiohttp_session is not None:
+-                    try:
+-                        await aiohttp_session.close()
+-                    except Exception:
+-                        pass
+ 
+     async def play_tts(
+         self,
+@@ -3490,8 +3499,6 @@ class DiscordAdapter(BasePlatformAdapter):
+             return await super().send_image(chat_id, image_url, caption, reply_to, metadata=metadata)
+ 
+         try:
+-            import aiohttp
+-
+             channel = self._client.get_channel(int(chat_id))
+             if not channel:
+                 channel = await self._client.fetch_channel(int(chat_id))
+@@ -3500,49 +3507,52 @@ class DiscordAdapter(BasePlatformAdapter):
+ 
+             # Download the image and send as a Discord file attachment
+             # (Discord renders attachments inline, unlike plain URLs)
+-            from gateway.platforms.base import resolve_proxy_url, proxy_kwargs_for_aiohttp
+-            _proxy = resolve_proxy_url(platform_env_var="DISCORD_PROXY")
+-            _sess_kw, _req_kw = proxy_kwargs_for_aiohttp(_proxy)
+-            async with aiohttp.ClientSession(**_sess_kw) as session:
+-                async with session.get(image_url, timeout=aiohttp.ClientTimeout(total=30), **_req_kw) as resp:
+-                    if resp.status != 200:
+-                        raise Exception(f"Failed to download image: HTTP {resp.status}")
+-
+-                    image_data = await resp.read()
+-
+-                    # Determine filename from URL or content type
+-                    content_type = resp.headers.get("content-type", "image/png")
+-                    ext = "png"
+-                    if "jpeg" in content_type or "jpg" in content_type:
+-                        ext = "jpg"
+-                    elif "gif" in content_type:
+-                        ext = "gif"
+-                    elif "webp" in content_type:
+-                        ext = "webp"
+-
+-                    import io
+-                    file = discord.File(io.BytesIO(image_data), filename=f"image.{ext}")
+-
+-                    if self._is_forum_parent(channel):
+-                        return await self._forum_post_file(
+-                            channel,
+-                            content=(caption or "").strip(),
+-                            file=file,
+-                        )
++            result = await safe_download_bytes(
++                image_url,
++                max_bytes=_DISCORD_IMAGE_MAX_BYTES,
++                source_type="gateway:discord-outbound-image",
++                policy={"redirect_credentials": "no-credentials"},
++                headers={"User-Agent": "HermesAgent/1.0", "Accept": "image/*,*/*;q=0.8"},
++                timeout=30.0,
++                allowed_content_types=_DISCORD_IMAGE_CONTENT_TYPES,
++            )
++            image_data = result.content
++
++            # Determine filename from URL or content type
++            content_type = result.content_type or "image/png"
++            ext = "png"
++            if "jpeg" in content_type or "jpg" in content_type:
++                ext = "jpg"
++            elif "gif" in content_type:
++                ext = "gif"
++            elif "webp" in content_type:
++                ext = "webp"
+ 
+-                    msg = await channel.send(
+-                        content=caption if caption else None,
+-                        file=file,
+-                    )
+-                    return SendResult(success=True, message_id=str(msg.id))
++            import io
++            file = discord.File(io.BytesIO(image_data), filename=f"image.{ext}")
+ 
+-        except ImportError:
++            if self._is_forum_parent(channel):
++                return await self._forum_post_file(
++                    channel,
++                    content=(caption or "").strip(),
++                    file=file,
++                )
++
++            msg = await channel.send(
++                content=caption if caption else None,
++                file=file,
++            )
++            return SendResult(success=True, message_id=str(msg.id))
++
++        except SafeHTTPError as e:
+             logger.warning(
+-                "[%s] aiohttp not installed, falling back to URL. Run: pip install aiohttp",
++                "[%s] Blocked Discord image attachment download; URL fallback not sent: %s",
+                 self.name,
++                e,
+                 exc_info=True,
+             )
+-            return await super().send_image(chat_id, image_url, caption, reply_to)
++            return SendResult(success=False, error=str(e))
++
+         except Exception as e:  # pragma: no cover - defensive logging
+             logger.error(
+                 "[%s] Failed to send image attachment, falling back to URL: %s",
+@@ -3569,8 +3579,6 @@ class DiscordAdapter(BasePlatformAdapter):
+             return await super().send_animation(chat_id, animation_url, caption, reply_to, metadata=metadata)
+ 
+         try:
+-            import aiohttp
+-
+             channel = self._client.get_channel(int(chat_id))
+             if not channel:
+                 channel = await self._client.fetch_channel(int(chat_id))
+@@ -3579,39 +3587,41 @@ class DiscordAdapter(BasePlatformAdapter):
+ 
+             # Download the GIF and send as a Discord file attachment
+             # (Discord renders .gif attachments as auto-playing animations inline)
+-            from gateway.platforms.base import resolve_proxy_url, proxy_kwargs_for_aiohttp
+-            _proxy = resolve_proxy_url(platform_env_var="DISCORD_PROXY")
+-            _sess_kw, _req_kw = proxy_kwargs_for_aiohttp(_proxy)
+-            async with aiohttp.ClientSession(**_sess_kw) as session:
+-                async with session.get(animation_url, timeout=aiohttp.ClientTimeout(total=30), **_req_kw) as resp:
+-                    if resp.status != 200:
+-                        raise Exception(f"Failed to download animation: HTTP {resp.status}")
+-
+-                    animation_data = await resp.read()
+-
+-                    import io
+-                    file = discord.File(io.BytesIO(animation_data), filename="animation.gif")
+-
+-                    if self._is_forum_parent(channel):
+-                        return await self._forum_post_file(
+-                            channel,
+-                            content=(caption or "").strip(),
+-                            file=file,
+-                        )
++            result = await safe_download_bytes(
++                animation_url,
++                max_bytes=_DISCORD_ANIMATION_MAX_BYTES,
++                source_type="gateway:discord-outbound-animation",
++                policy={"redirect_credentials": "no-credentials"},
++                headers={"User-Agent": "HermesAgent/1.0", "Accept": "image/gif,image/*,*/*;q=0.8"},
++                timeout=30.0,
++                allowed_content_types=_DISCORD_ANIMATION_CONTENT_TYPES,
++            )
+ 
+-                    msg = await channel.send(
+-                        content=caption if caption else None,
+-                        file=file,
+-                    )
+-                    return SendResult(success=True, message_id=str(msg.id))
++            import io
++            file = discord.File(io.BytesIO(result.content), filename="animation.gif")
+ 
+-        except ImportError:
++            if self._is_forum_parent(channel):
++                return await self._forum_post_file(
++                    channel,
++                    content=(caption or "").strip(),
++                    file=file,
++                )
++
++            msg = await channel.send(
++                content=caption if caption else None,
++                file=file,
++            )
++            return SendResult(success=True, message_id=str(msg.id))
++
++        except SafeHTTPError as e:
+             logger.warning(
+-                "[%s] aiohttp not installed, falling back to URL. Run: pip install aiohttp",
++                "[%s] Blocked Discord animation attachment download; URL fallback not sent: %s",
+                 self.name,
++                e,
+                 exc_info=True,
+             )
+-            return await super().send_animation(chat_id, animation_url, caption, reply_to, metadata=metadata)
++            return SendResult(success=False, error=str(e))
++
+         except Exception as e:  # pragma: no cover - defensive logging
+             logger.error(
+                 "[%s] Failed to send animation attachment, falling back to URL: %s",
+@@ -5730,24 +5740,16 @@ class DiscordAdapter(BasePlatformAdapter):
+         if raw_bytes is not None:
+             return raw_bytes
+ 
+-        # Fallback: SSRF-gated URL download.
+-        if not is_safe_url(att.url):
+-            raise ValueError(
+-                f"Blocked unsafe attachment URL (SSRF protection): {att.url}"
+-            )
+-        import aiohttp
+-        from gateway.platforms.base import resolve_proxy_url, proxy_kwargs_for_aiohttp
+-        _proxy = resolve_proxy_url(platform_env_var="DISCORD_PROXY")
+-        _sess_kw, _req_kw = proxy_kwargs_for_aiohttp(_proxy)
+-        async with aiohttp.ClientSession(**_sess_kw) as session:
+-            async with session.get(
+-                att.url,
+-                timeout=aiohttp.ClientTimeout(total=30),
+-                **_req_kw,
+-            ) as resp:
+-                if resp.status != 200:
+-                    raise Exception(f"HTTP {resp.status}")
+-                return await resp.read()
++        result = await safe_download_bytes(
++            att.url,
++            max_bytes=_DISCORD_DOCUMENT_MAX_BYTES,
++            source_type="gateway:discord-attachment-document",
++            policy={"redirect_credentials": "no-credentials"},
++            headers={"User-Agent": "HermesAgent/1.0", "Accept": "*/*"},
++            timeout=30.0,
++            allowed_content_types=_DISCORD_DOCUMENT_CONTENT_TYPES,
++        )
++        return result.content
+ 
+     async def _handle_message(self, message: DiscordMessage, role_authorized: bool = False) -> None:
+         """Handle incoming Discord messages."""

@@ -1,0 +1,52 @@
+diff --git a/tests/plugins/browser/test_browser_provider_plugins.py b/tests/plugins/browser/test_browser_provider_plugins.py
+index 5e851bfae..f66d06430 100644
+--- a/tests/plugins/browser/test_browser_provider_plugins.py
++++ b/tests/plugins/browser/test_browser_provider_plugins.py
+@@ -81,6 +81,47 @@ class TestBundledPluginsRegister:
+         names = sorted(p.name for p in list_providers())
+         assert names == ["browser-use", "browserbase", "firecrawl"]
+ 
++    def test_bundled_provider_registers_across_duplicate_abc_identity(self) -> None:
++        """Docker/plugin import state can duplicate the BrowserProvider ABC."""
++        from agent.browser_registry import (
++            _reset_for_tests,
++            get_provider,
++            register_provider,
++        )
++
++        class DuplicateAbcBrowserUseProvider:
++            __module__ = "plugins.browser.browser_use.provider"
++
++            @property
++            def name(self) -> str:
++                return "browser-use"
++
++            @property
++            def display_name(self) -> str:
++                return "Browser Use"
++
++            def is_available(self) -> bool:
++                return False
++
++            def create_session(self, task_id: str) -> dict[str, object]:
++                raise NotImplementedError
++
++            def close_session(self, session_id: str) -> bool:
++                return True
++
++            def emergency_cleanup(self, session_id: str) -> None:
++                return None
++
++        _reset_for_tests()
++        try:
++            provider = DuplicateAbcBrowserUseProvider()
++            register_provider(provider)
++            registered = get_provider("browser-use")
++            assert registered is provider
++            assert registered.display_name == "Browser Use"
++        finally:
++            _reset_for_tests()
++
+     @pytest.mark.parametrize(
+         "plugin_name,expected_display",
+         [

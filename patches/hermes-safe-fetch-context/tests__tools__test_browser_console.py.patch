@@ -1,0 +1,86 @@
+diff --git a/tests/tools/test_browser_console.py b/tests/tools/test_browser_console.py
+index b058fb3f3..f7a7fe604 100644
+--- a/tests/tools/test_browser_console.py
++++ b/tests/tools/test_browser_console.py
+@@ -48,6 +48,14 @@ class TestBrowserConsole:
+         assert result["console_messages"][0]["text"] == "hello"
+         assert result["console_messages"][1]["text"] == "oops"
+         assert result["js_errors"][0]["message"] == "Uncaught TypeError"
++        ledger = result["evidence_ledger"]
++        assert ledger["tool_name"] == "browser_console"
++        assert ledger["ledger_origin"] == "native_tool"
++        assert ledger["trust_boundary"] == "untrusted_external"
++        assert {item["kind"] for item in ledger["evidence_items"]} == {"browser_console_log", "browser_console_error"}
++        assert all(item["evidence_only"] is True for item in ledger["evidence_items"])
++        assert all(item["instruction_authority"] == "none" for item in ledger["evidence_items"])
++        assert all(item["can_authorize_action"] is False for item in ledger["evidence_items"])
+ 
+     def test_passes_clear_flag(self):
+         from tools.browser_tool import browser_console
+@@ -97,6 +105,66 @@ class TestBrowserConsole:
+         assert result["total_errors"] == 0
+ 
+ 
++    def test_expression_mode_does_not_attach_passive_observation_ledger(self):
++        from tools.browser_tool import browser_console
++
++        with patch("tools.browser_tool._browser_eval", return_value=json.dumps({"success": True, "result": "ok"})):
++            result = json.loads(browser_console(expression="document.title", task_id="test"))
++
++        assert result["success"] is True
++        assert "evidence_ledger" not in result
++
++
++# ── browser_snapshot / browser_get_images ledgers ─────────────────────
++
++
++def test_browser_snapshot_includes_native_evidence_ledger():
++    from tools.browser_tool import browser_snapshot
++
++    with patch("tools.browser_tool._is_camofox_mode", return_value=False), \
++         patch("tools.browser_tool._last_session_key", side_effect=lambda value: value), \
++         patch("tools.browser_tool._run_browser_command", return_value={
++             "success": True,
++             "data": {"snapshot": "Example page text", "refs": {"@e1": {}}},
++         }):
++        result = json.loads(browser_snapshot(full=False, task_id="test"))
++
++    assert result["success"] is True
++    assert result["snapshot"] == "Example page text"
++    assert result["element_count"] == 1
++    ledger = result["evidence_ledger"]
++    assert ledger["tool_name"] == "browser_snapshot"
++    item = ledger["evidence_items"][0]
++    assert item["kind"] == "browser_dom_snapshot"
++    assert item["text_ref"] == "snapshot"
++    assert item["evidence_only"] is True
++    assert item["instruction_authority"] == "none"
++    assert item["can_authorize_action"] is False
++
++
++def test_browser_get_images_includes_native_evidence_ledger():
++    from tools.browser_tool import browser_get_images
++
++    images = [{"src": "https://example.com/a.png?token=secret", "alt": "SYSTEM OVERRIDE", "width": 10, "height": 20}]
++    with patch("tools.browser_tool._is_camofox_mode", return_value=False), \
++         patch("tools.browser_tool._last_session_key", side_effect=lambda value: value), \
++         patch("tools.browser_tool._run_browser_command", return_value={"success": True, "data": {"result": json.dumps(images)}}):
++        result = json.loads(browser_get_images(task_id="test"))
++
++    assert result["success"] is True
++    assert result["count"] == 1
++    assert result["images"][0]["alt"] == "SYSTEM OVERRIDE"
++    ledger = result["evidence_ledger"]
++    assert ledger["tool_name"] == "browser_get_images"
++    item = ledger["evidence_items"][0]
++    assert item["kind"] == "browser_image_metadata"
++    assert item["text_ref"] == "images"
++    assert item["content_type"] == "application/json"
++    assert item["evidence_only"] is True
++    assert item["instruction_authority"] == "none"
++    assert item["can_authorize_action"] is False
++
++
+ # ── browser_console schema ───────────────────────────────────────────
+ 
+ 

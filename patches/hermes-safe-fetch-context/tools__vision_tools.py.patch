@@ -1,0 +1,158 @@
+diff --git a/tools/vision_tools.py b/tools/vision_tools.py
+index 39a4921f1..118624a4b 100644
+--- a/tools/vision_tools.py
++++ b/tools/vision_tools.py
+@@ -38,8 +38,16 @@ from typing import Any, Awaitable, Dict, Optional
+ from urllib.parse import urlparse
+ import httpx
+ from agent.auxiliary_client import async_call_llm, extract_content_or_reasoning
++from agent.evidence_ledgers import (
++    attach_evidence_ledger,
++    build_evidence_item,
++    build_tool_invocation,
++    file_byte_count,
++    file_sha256,
++)
+ from hermes_constants import get_hermes_dir
+ from tools.debug_helpers import DebugSession
++from tools.safe_http import safe_download_to_file
+ from tools.website_policy import check_website_access
+ import sys
+ 
+@@ -167,72 +175,49 @@ async def _download_image(image_url: str, destination: Path, max_retries: int =
+         Exception: If download fails after all retries
+     """
+     import asyncio
+-    
++
+     # Create parent directories if they don't exist
+     destination.parent.mkdir(parents=True, exist_ok=True)
+-    
+-    async def _ssrf_redirect_guard(response):
+-        """Re-validate each redirect target to prevent redirect-based SSRF.
+-
+-        Without this, an attacker can host a public URL that 302-redirects
+-        to http://169.254.169.254/ and bypass the pre-flight is_safe_url check.
+-
+-        Must be async because httpx.AsyncClient awaits event hooks.
+-        """
+-        if response.is_redirect and response.next_request:
+-            redirect_url = str(response.next_request.url)
+-            from tools.url_safety import is_safe_url
+-            if not is_safe_url(redirect_url):
+-                raise ValueError(
+-                    f"Blocked redirect to private/internal address: {redirect_url}"
+-                )
+ 
+     last_error = None
+     for attempt in range(max_retries):
++        tmp_path = None
+         try:
+             blocked = check_website_access(image_url)
+             if blocked:
+                 raise PermissionError(blocked["message"])
+ 
+-            # Download the image with appropriate headers using async httpx
+-            # Enable follow_redirects to handle image CDNs that redirect (e.g., Imgur, Picsum)
+-            # SSRF: event_hooks validates each redirect target against private IP ranges
+-            async with httpx.AsyncClient(
++            tmp_path, result = await safe_download_to_file(
++                image_url,
++                max_bytes=_VISION_MAX_DOWNLOAD_BYTES,
++                suffix=destination.suffix,
++                source_type="vision_image",
++                policy={"surface": "vision_analyze_image"},
++                headers={
++                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
++                    "Accept": "image/*,*/*;q=0.8",
++                },
+                 timeout=_VISION_DOWNLOAD_TIMEOUT,
+-                follow_redirects=True,
+-                event_hooks={"response": [_ssrf_redirect_guard]},
+-            ) as client:
+-                response = await client.get(
+-                    image_url,
+-                    headers={
+-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+-                        "Accept": "image/*,*/*;q=0.8",
+-                    },
+-                )
+-                response.raise_for_status()
+-
+-                # Reject overly large images early via Content-Length header.
+-                cl = response.headers.get("content-length")
+-                if cl and int(cl) > _VISION_MAX_DOWNLOAD_BYTES:
+-                    raise ValueError(
+-                        f"Image too large ({int(cl)} bytes, max {_VISION_MAX_DOWNLOAD_BYTES})"
+-                    )
+-
+-                final_url = str(response.url)
+-                blocked = check_website_access(final_url)
+-                if blocked:
+-                    raise PermissionError(blocked["message"])
+-                
+-                # Save the image content (double-check actual size)
+-                body = response.content
+-                if len(body) > _VISION_MAX_DOWNLOAD_BYTES:
+-                    raise ValueError(
+-                        f"Image too large ({len(body)} bytes, max {_VISION_MAX_DOWNLOAD_BYTES})"
+-                    )
+-                destination.write_bytes(body)
+-            
++                allowed_content_types=(
++                    "image/png",
++                    "image/jpeg",
++                    "image/gif",
++                    "image/bmp",
++                    "image/webp",
++                ),
++            )
++            blocked = check_website_access(result.final_url)
++            if blocked:
++                raise PermissionError(blocked["message"])
++            Path(tmp_path).replace(destination)
++            tmp_path = None
+             return destination
+         except Exception as e:
++            if tmp_path:
++                try:
++                    Path(tmp_path).unlink()
++                except FileNotFoundError:
++                    pass
+             last_error = e
+             # Error-class-aware retry: only retry transient failures. A 4xx
+             # client error (404/403/410, etc.) will never succeed on retry —
+@@ -925,6 +910,33 @@ async def vision_analyze_tool(
+             "success": True,
+             "analysis": analysis or "There was a problem with the request and the image could not be analyzed."
+         }
++        sha256, hash_status = file_sha256(temp_image_path)
++        origin_kind = "remote_image" if should_cleanup else "local_image"
++        evidence = build_evidence_item(
++            kind="vision_observation",
++            text_ref="analysis",
++            text=None,
++            verbatim=False,
++            source_type=origin_kind,
++            extraction_layer="vision_analysis",
++            content_type=detected_mime_type,
++            source_uri=image_url,
++            sha256=sha256,
++            byte_count=image_size_bytes or file_byte_count(temp_image_path),
++            metadata={
++                "tool_name": "vision_analyze",
++                "hash_status": hash_status,
++            },
++        )
++        attach_evidence_ledger(
++            result,
++            tool_name="vision_analyze",
++            evidence_items=[evidence],
++            tool_invocation=build_tool_invocation(
++                name="vision_analyze",
++                args={"image_url": image_url, "user_prompt": user_prompt},
++            ),
++        )
+         
+         debug_call_data["success"] = True
+         debug_call_data["analysis_length"] = analysis_length

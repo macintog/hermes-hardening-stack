@@ -1,0 +1,28 @@
+diff --git a/tests/security/test_cli_argument_normalization.py b/tests/security/test_cli_argument_normalization.py
+new file mode 100644
+index 000000000..1c86388ee
+--- /dev/null
++++ b/tests/security/test_cli_argument_normalization.py
+@@ -0,0 +1,22 @@
++from __future__ import annotations
++
++
++def test_direct_cli_short_quiet_flag_is_normalized_before_fire_parse():
++    import cli
++
++    argv = [
++        "cli.py",
++        "-Q",
++        "--toolsets",
++        "terminal",
++        "-q",
++        "Say OK only.",
++    ]
++    assert cli._normalize_fire_argv(argv) == [
++        "cli.py",
++        "--quiet",
++        "--toolsets",
++        "terminal",
++        "-q",
++        "Say OK only.",
++    ]

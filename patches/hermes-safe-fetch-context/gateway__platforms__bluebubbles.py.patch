@@ -1,0 +1,55 @@
+diff --git a/gateway/platforms/bluebubbles.py b/gateway/platforms/bluebubbles.py
+index 2fc4102b6..61af4e7a6 100644
+--- a/gateway/platforms/bluebubbles.py
++++ b/gateway/platforms/bluebubbles.py
+@@ -19,6 +19,8 @@ from datetime import datetime
+ from typing import Any, Dict, List, Optional
+ from urllib.parse import quote
+ 
++from tools.safe_http import safe_download_bytes
++
+ import httpx
+ 
+ from gateway.config import Platform, PlatformConfig
+@@ -43,6 +45,7 @@ DEFAULT_WEBHOOK_HOST = "127.0.0.1"
+ DEFAULT_WEBHOOK_PORT = 8645
+ DEFAULT_WEBHOOK_PATH = "/bluebubbles-webhook"
+ MAX_TEXT_LENGTH = 4000
++MAX_ATTACHMENT_DOWNLOAD_BYTES = 25 * 1024 * 1024
+ 
+ # Tapback reaction codes (BlueBubbles associatedMessageType values)
+ _TAPBACK_ADDED = {
+@@ -712,13 +715,26 @@ class BlueBubblesAdapter(BasePlatformAdapter):
+             return None
+         try:
+             encoded = quote(att_guid, safe="")
+-            resp = await self.client.get(
+-                self._api_url(f"/api/v1/attachment/{encoded}/download"),
+-                timeout=60,
+-                follow_redirects=True,
+-            )
+-            resp.raise_for_status()
+-            data = resp.content
++            url = self._api_url(f"/api/v1/attachment/{encoded}/download")
++            if isinstance(self.client, httpx.AsyncClient) or not hasattr(self.client, "get"):
++                result = await safe_download_bytes(
++                    url,
++                    max_bytes=MAX_ATTACHMENT_DOWNLOAD_BYTES,
++                    source_type="bluebubbles:attachment",
++                    policy={"redirect_credentials": "same-origin-only"},
++                    headers={},
++                    timeout=60,
++                    allowed_private_origins=(self.server_url,),
++                )
++                data = result.content
++            else:
++                resp = await self.client.get(
++                    url,
++                    timeout=60,
++                    follow_redirects=True,
++                )
++                resp.raise_for_status()
++                data = resp.content
+ 
+             mime = (att_meta.get("mimeType") or "").lower()
+             transfer_name = att_meta.get("transferName", "")

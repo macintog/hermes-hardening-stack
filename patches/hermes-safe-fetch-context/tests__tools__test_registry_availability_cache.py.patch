@@ -1,0 +1,71 @@
+diff --git a/tests/tools/test_registry_availability_cache.py b/tests/tools/test_registry_availability_cache.py
+new file mode 100644
+index 000000000..0bd16c0e1
+--- /dev/null
++++ b/tests/tools/test_registry_availability_cache.py
+@@ -0,0 +1,65 @@
++"""Regression tests for tool availability cache invalidation."""
++
++TOOL_NAME = "availability_cache_probe"
++TOOLSET_NAME = "availability-cache-probe"
++
++
++def _schema():
++    return {
++        "name": TOOL_NAME,
++        "description": "Probe tool for availability-cache tests.",
++        "parameters": {
++            "type": "object",
++            "properties": {},
++            "additionalProperties": False,
++        },
++    }
++
++
++def _tool_names():
++    from model_tools import get_tool_definitions
++
++    return {
++        tool["function"]["name"]
++        for tool in get_tool_definitions(
++            enabled_toolsets=[TOOLSET_NAME],
++            quiet_mode=True,
++        )
++    }
++
++
++def test_registered_tool_availability_cache_tracks_env_fingerprint(monkeypatch):
++    import os
++
++    import model_tools
++    from tools.registry import invalidate_check_fn_cache, registry
++
++    def available_only_for_local_terminal():
++        return os.environ.get("TERMINAL_ENV") == "local"
++
++    registry.register(
++        name=TOOL_NAME,
++        toolset=TOOLSET_NAME,
++        schema=_schema(),
++        handler=lambda: None,
++        check_fn=available_only_for_local_terminal,
++    )
++    model_tools._clear_tool_defs_cache()
++    invalidate_check_fn_cache()
++
++    try:
++        # Populate both the registry check_fn cache and the outer quiet-mode
++        # schema cache while the tool is unavailable.
++        monkeypatch.setenv("TERMINAL_ENV", "vercel_sandbox")
++        assert _tool_names() == set()
++        assert _tool_names() == set()
++
++        # Restoring local execution in the same process must not reuse either
++        # stale negative cache result.
++        monkeypatch.setenv("TERMINAL_ENV", "local")
++        assert _tool_names() == {TOOL_NAME}
++        assert _tool_names() == {TOOL_NAME}
++    finally:
++        registry.deregister(TOOL_NAME)
++        model_tools._clear_tool_defs_cache()
++        invalidate_check_fn_cache()

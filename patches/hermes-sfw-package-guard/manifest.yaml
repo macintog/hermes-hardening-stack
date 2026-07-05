@@ -1,0 +1,21 @@
+name: hermes-sfw-package-guard
+series: patches/hermes-sfw-package-guard/series
+base_ref: patches/hermes-sfw-package-guard/base.ref
+packaging_rule: current_base_final_state_by_target_file
+
+payload:
+  owns:
+  - hermes_constants.py
+  - hermes_cli/main.py
+  - hermes_cli/managed_uv.py
+  - tests/test_hermes_constants.py
+  - tests/hermes_cli/test_managed_uv.py
+  - tests/hermes_cli/test_update_autostash.py
+  - tests/hermes_cli/test_uv_tool_update.py
+  - tests/hermes_cli/test_web_ui_build.py
+  required_tests:
+  - tests/test_hermes_constants.py
+  - tests/hermes_cli/test_managed_uv.py
+  - tests/hermes_cli/test_update_autostash.py
+  - tests/hermes_cli/test_uv_tool_update.py
+  - tests/hermes_cli/test_web_ui_build.py

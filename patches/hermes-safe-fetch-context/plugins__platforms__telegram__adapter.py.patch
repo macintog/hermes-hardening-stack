@@ -1,0 +1,49 @@
+diff --git a/plugins/platforms/telegram/adapter.py b/plugins/platforms/telegram/adapter.py
+index ae7116040..35a3f99ac 100644
+--- a/plugins/platforms/telegram/adapter.py
++++ b/plugins/platforms/telegram/adapter.py
+@@ -91,6 +91,7 @@ from plugins.platforms.telegram.telegram_network import (
+     discover_fallback_ips,
+     parse_fallback_ip_env,
+ )
++from tools.safe_http import SafeHTTPError, safe_download_bytes
+ from utils import atomic_replace, env_float, env_int
+ 
+ _TELEGRAM_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+@@ -5580,11 +5581,16 @@ class TelegramAdapter(BasePlatformAdapter):
+             )
+             # Fallback: download and upload as file (supports up to 10MB)
+             try:
+-                import httpx
+-                async with httpx.AsyncClient(timeout=30.0) as client:
+-                    resp = await client.get(image_url)
+-                    resp.raise_for_status()
+-                    image_data = resp.content
++                result = await safe_download_bytes(
++                    image_url,
++                    max_bytes=10 * 1024 * 1024,
++                    source_type="telegram_fallback_image",
++                    policy={"platform": "telegram", "caller": "send_image_fallback", "redirect_credentials": "no-credentials"},
++                    headers={"User-Agent": "HermesAgent/1.0", "Accept": "image/*,*/*;q=0.8"},
++                    timeout=30.0,
++                    allowed_content_types=("image/png", "image/jpeg", "image/gif", "image/webp", "application/octet-stream", "binary/octet-stream"),
++                )
++                image_data = result.content
+ 
+                 upload_thread_kwargs = self._thread_kwargs_for_send(
+                     chat_id,
+@@ -5608,6 +5614,14 @@ class TelegramAdapter(BasePlatformAdapter):
+                     "uploaded photo",
+                 )
+                 return SendResult(success=True, message_id=str(msg.message_id))
++            except SafeHTTPError as e2:
++                logger.error(
++                    "[%s] File upload send_photo blocked by safe download policy; URL fallback not sent: %s",
++                    self.name,
++                    e2,
++                    exc_info=True,
++                )
++                return SendResult(success=False, error=str(e2))
+             except Exception as e2:
+                 logger.error(
+                     "[%s] File upload send_photo also failed: %s",

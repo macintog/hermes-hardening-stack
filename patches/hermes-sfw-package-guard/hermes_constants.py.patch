@@ -1,0 +1,86 @@
+diff --git a/hermes_constants.py b/hermes_constants.py
+index 274bed4..aac1553 100644
+--- a/hermes_constants.py
++++ b/hermes_constants.py
+@@ -528,6 +528,81 @@ def with_hermes_node_path(env: dict[str, str] | None = None) -> dict[str, str]:
+     return merged
+ 
+ 
++_SFW_PACKAGE_SHIM_TOOLS = {
++    "cargo",
++    "npm",
++    "npx",
++    "pip",
++    "pip3",
++    "pipx",
++    "pnpm",
++    "uv",
++    "uvx",
++}
++
++
++def find_socket_firewall_package_shim() -> str | None:
++    """Return the operator-account Socket Firewall package shim, if present."""
++    if sys.platform == "win32":
++        return None
++    shim = Path.home() / ".local" / "bin" / "sfw-package-shim"
++    if shim.is_file() and os.access(shim, os.X_OK):
++        return str(shim)
++    return None
++
++
++def _package_tool_name(command: str) -> str:
++    name = Path(command).name.lower()
++    for suffix in (".exe", ".cmd", ".bat", ".ps1"):
++        if name.endswith(suffix):
++            return name[: -len(suffix)]
++    return name
++
++
++def _prepend_path_dirs(env: dict[str, str], dirs: list[str]) -> dict[str, str]:
++    existing = [part for part in env.get("PATH", "").split(os.pathsep) if part]
++    next_parts: list[str] = []
++    for directory in dirs:
++        if directory and directory not in next_parts:
++            next_parts.append(directory)
++    for directory in existing:
++        if directory not in next_parts:
++            next_parts.append(directory)
++    env["PATH"] = os.pathsep.join(next_parts)
++    return env
++
++
++def wrap_package_manager_command_for_sfw(
++    command: str | Path,
++    args: list[str] | tuple[str, ...],
++    *,
++    env: dict[str, str] | None = None,
++    force: bool = False,
++) -> tuple[list[str], dict[str, str] | None]:
++    """Wrap supported package-manager commands through Socket Firewall.
++
++    Hermes often resolves managed package tools to absolute paths, which bypasses
++    operator-account shell functions and PATH shims. When the local SFW package
++    shim exists, call it explicitly and put the resolved tool's directory behind
++    the shim on PATH so the shim still executes the Hermes-owned binary.
++    """
++    command_str = str(command)
++    tool = _package_tool_name(command_str)
++    shim = find_socket_firewall_package_shim()
++    if not shim or tool not in _SFW_PACKAGE_SHIM_TOOLS:
++        return [command_str, *args], env
++
++    run_env = dict(os.environ if env is None else env)
++    front_dirs = [str(Path(shim).parent)]
++    command_path = Path(command_str)
++    if command_path.parent != Path("."):
++        front_dirs.append(str(command_path.parent))
++    _prepend_path_dirs(run_env, front_dirs)
++    if force:
++        run_env["SFW_FORCE"] = "1"
++    return [shim, tool, *args], run_env
++
++
+ def agent_browser_runnable(path: str | None) -> bool:
+     """Return True only when *path* is an agent-browser CLI that actually runs.
+ 

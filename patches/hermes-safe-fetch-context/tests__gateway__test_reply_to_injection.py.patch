@@ -1,0 +1,34 @@
+diff --git a/tests/gateway/test_reply_to_injection.py b/tests/gateway/test_reply_to_injection.py
+index f75ec6d68..d231c4622 100644
+--- a/tests/gateway/test_reply_to_injection.py
++++ b/tests/gateway/test_reply_to_injection.py
+@@ -54,9 +54,8 @@ async def test_reply_prefix_injected_when_text_absent_from_history():
+     )
+ 
+     assert result is not None
+-    assert result.startswith(
+-        '[Replying to: "Japan is great for culture, food, and efficiency."]'
+-    )
++    assert 'source="gateway_reply"' in result
++    assert '[Replying to: "Japan is great for culture, food, and efficiency."]' in result
+     assert result.endswith("What's the best time to go?")
+ 
+ 
+@@ -95,7 +94,8 @@ async def test_reply_prefix_still_injected_when_text_in_history():
+     )
+ 
+     assert result is not None
+-    assert result.startswith(f'[Replying to: "{quoted}"]')
++    assert 'source="gateway_reply"' in result
++    assert f'[Replying to: "{quoted}"]' in result
+     assert result.endswith("What's the best time to go?")
+ 
+ 
+@@ -155,5 +155,6 @@ async def test_reply_snippet_truncated_to_500_chars():
+     )
+ 
+     assert result is not None
+-    assert result.startswith('[Replying to: "' + "x" * 500 + '"]')
++    assert 'source="gateway_reply"' in result
++    assert '[Replying to: "' + "x" * 500 + '"]' in result
+     assert "x" * 501 not in result

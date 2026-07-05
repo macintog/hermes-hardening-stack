@@ -1,0 +1,246 @@
+diff --git a/tools/web_tools.py b/tools/web_tools.py
+index e5b83c77a..6bf343203 100644
+--- a/tools/web_tools.py
++++ b/tools/web_tools.py
+@@ -103,6 +103,134 @@ import sys
+ logger = logging.getLogger(__name__)
+ 
+ 
++def _attach_web_search_evidence_ledger(response_data: Dict[str, Any], *, query: str, limit: int, backend: str) -> Dict[str, Any]:
++    """Attach compact native evidence provenance for untrusted search metadata."""
++    try:
++        from agent.evidence_ledgers import (
++            attach_evidence_ledger,
++            build_evidence_item,
++            build_tool_invocation,
++            text_byte_count,
++            text_sha256,
++        )
++
++        evidence_items = []
++        for idx, result in enumerate(response_data.get("data", {}).get("web", []) or []):
++            title = str(result.get("title") or "")
++            description = str(result.get("description") or "")
++            combined = "\n".join(part for part in (title, description) if part)
++            sha, status = text_sha256(combined) if combined else (None, "missing")
++            evidence_items.append(build_evidence_item(
++                kind="web_search_snippet",
++                source_type="web_search_result",
++                extraction_layer=f"web_search:{backend}",
++                text_ref=f"data.web[{idx}].title_description",
++                text=None,
++                verbatim=True,
++                content_type="text/plain",
++                source_uri=result.get("url"),
++                sha256=sha,
++                byte_count=text_byte_count(combined),
++                char_count=len(combined),
++                metadata={
++                    "position": result.get("position", idx + 1),
++                    "hash_status": status,
++                    "has_title": bool(title),
++                    "has_description": bool(description),
++                },
++            ))
++        return attach_evidence_ledger(
++            response_data,
++            tool_name="web_search",
++            evidence_items=evidence_items,
++            tool_invocation=build_tool_invocation(
++                name="web_search",
++                args={"query": query, "limit": limit},
++                read_only=True,
++                metadata={"backend": backend},
++            ),
++            metadata={"backend": backend},
++        )
++    except Exception as ledger_error:
++        logger.debug("Failed to attach web_search evidence ledger: %s", ledger_error)
++        return response_data
++
++
++def _attach_web_extract_evidence_ledger(
++    response_data: Dict[str, Any],
++    *,
++    urls: List[str],
++    format: str | None,
++    use_llm_processing: bool,
++    model: Optional[str],
++    min_length: int,
++    backend: str,
++    processed_urls: set[str] | None = None,
++    blocked: bool = False,
++    metadata: Dict[str, Any] | None = None,
++) -> Dict[str, Any]:
++    """Attach compact native evidence provenance for untrusted downloaded web text."""
++    try:
++        from agent.evidence_ledgers import (
++            attach_evidence_ledger,
++            build_evidence_item,
++            build_tool_invocation,
++            text_byte_count,
++            text_sha256,
++        )
++
++        processed_urls = processed_urls or set()
++        evidence_items = []
++        for idx, result in enumerate(response_data.get("results", []) or []):
++            content = str(result.get("content") or "")
++            url = str(result.get("url") or "")
++            processed = url in processed_urls
++            sha, status = text_sha256(content) if content else (None, "missing")
++            evidence_items.append(build_evidence_item(
++                kind="web_extract_summary" if processed else "downloaded_web_text",
++                source_type="downloaded_web_text",
++                extraction_layer=f"web_extract:{backend}",
++                text_ref=f"results[{idx}].content",
++                text=None,
++                verbatim=not processed,
++                content_type="text/markdown" if format in (None, "markdown") else "text/html",
++                source_uri=url,
++                sha256=sha,
++                byte_count=text_byte_count(content),
++                char_count=len(content),
++                metadata={
++                    "title_present": bool(result.get("title")),
++                    "error_present": bool(result.get("error")),
++                    "blocked_by_policy": bool(result.get("blocked_by_policy")),
++                    "hash_status": status,
++                    "llm_processing_requested": bool(use_llm_processing),
++                    "llm_processed": bool(processed),
++                },
++            ))
++        return attach_evidence_ledger(
++            response_data,
++            tool_name="web_extract",
++            evidence_items=evidence_items,
++            tool_invocation=build_tool_invocation(
++                name="web_extract",
++                args={
++                    "urls": urls,
++                    "format": format,
++                    "use_llm_processing": use_llm_processing,
++                    "model": model,
++                    "min_length": min_length,
++                },
++                read_only=True,
++                blocked=blocked,
++                metadata={"backend": backend},
++            ),
++            metadata={"backend": backend, **dict(metadata or {})},
++        )
++    except Exception as ledger_error:
++        logger.debug("Failed to attach web_extract evidence ledger: %s", ledger_error)
++        return response_data
++
++
+ # ─── Backend Selection ────────────────────────────────────────────────────────
+ 
+ def _env_value(name: str) -> str:
+@@ -591,6 +719,12 @@ def web_search_tool(query: str, limit: int = 5) -> str:
+             )
+             response_data = provider.search(query, limit)
+ 
++        response_data = _attach_web_search_evidence_ledger(
++            response_data,
++            query=query,
++            limit=limit,
++            backend=backend,
++        )
+         debug_call_data["results_count"] = len(response_data.get("data", {}).get("web", []))
+         result_json = json.dumps(response_data, indent=2, ensure_ascii=False)
+         debug_call_data["final_response_size"] = len(result_json)
+@@ -613,6 +747,9 @@ async def web_extract_tool(
+     urls: List[str],
+     format: str = None,
+     char_limit: Optional[int] = None,
++    use_llm_processing: bool = False,
++    model: Optional[str] = None,
++    min_length: int = 1000,
+ ) -> str:
+     """
+     Extract content from specific web pages using available extraction API backend.
+@@ -654,11 +791,23 @@ async def web_extract_tool(
+             or _PREFIX_RE.search(normalized_url)
+             or _PREFIX_RE.search(unquote(normalized_url))
+         ):
+-            return json.dumps({
++            blocked_response = {
+                 "success": False,
+                 "error": "Blocked: URL contains what appears to be an API key or token. "
+                          "Secrets must not be sent in URLs.",
+-            })
++            }
++            blocked_response = _attach_web_extract_evidence_ledger(
++                blocked_response,
++                urls=urls,
++                format=format,
++                use_llm_processing=use_llm_processing,
++                model=model,
++                min_length=min_length,
++                backend="preflight",
++                blocked=True,
++                metadata={"blocked_reason": "url_contains_secret"},
++            )
++            return json.dumps(blocked_response, ensure_ascii=False)
+         normalized_urls.append(normalized_url)
+ 
+     debug_call_data = {
+@@ -677,7 +826,9 @@ async def web_extract_tool(
+     }
+     
+     try:
+-        logger.info("Extracting content from %d URL(s)", len(normalized_urls))
++        logger.info("Extracting content from %d URL(s)", len(urls))
++        backend = _get_extract_backend()
++        processed_urls: set[str] = set()
+ 
+         # ── SSRF protection — filter out private/internal URLs before any backend ──
+         safe_urls = []
+@@ -695,8 +846,6 @@ async def web_extract_tool(
+         if not safe_urls:
+             results = []
+         else:
+-            backend = _get_extract_backend()
+-
+             # All seven providers (brave-free, ddgs, searxng, exa, parallel,
+             # tavily, firecrawl) now live as plugins. The dispatcher is a
+             # registry lookup + delegation. Some providers' extract() is
+@@ -766,7 +915,7 @@ async def web_extract_tool(
+             results = ssrf_blocked + results
+ 
+         response = {"results": results}
+-        
++
+         pages_extracted = len(response.get('results', []))
+         logger.info("Extracted content from %d pages", pages_extracted)
+         
+@@ -779,6 +928,10 @@ async def web_extract_tool(
+         except (TypeError, ValueError):
+             effective_char_limit = DEFAULT_EXTRACT_CHAR_LIMIT
+ 
++        if use_llm_processing:
++            logger.warning("LLM processing requested but this build returns truncate-and-store web extracts")
++            debug_call_data["processing_applied"].append("llm_processing_unavailable")
++
+         # Truncate-and-store: no LLM. For each result, convert inline base64
+         # images to labeled placeholders (keeping alt text + real image URLs),
+         # then return the clean content directly if within budget, or a
+@@ -817,6 +970,17 @@ async def web_extract_tool(
+             for r in response.get("results", [])
+         ]
+         trimmed_response = {"results": trimmed_results}
++        trimmed_response = _attach_web_extract_evidence_ledger(
++            trimmed_response,
++            urls=urls,
++            format=format,
++            use_llm_processing=use_llm_processing,
++            model=model,
++            min_length=min_length,
++            backend=backend,
++            processed_urls=processed_urls,
++            metadata={"safe_url_count": len(safe_urls), "requested_url_count": len(urls)},
++        )
+ 
+         if trimmed_response.get("results") == []:
+             result_json = tool_error("Content was inaccessible or not found")

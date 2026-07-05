@@ -1,0 +1,154 @@
+diff --git a/tools/approval.py b/tools/approval.py
+index 78fb48178..ac6f5e8bb 100644
+--- a/tools/approval.py
++++ b/tools/approval.py
+@@ -505,6 +505,149 @@ def is_approved(session_key: str, pattern_key: str) -> bool:
+         return any(alias in session_approvals for alias in aliases)
+ 
+ 
++def request_scoped_approval(
++    pattern_key: str,
++    subject: str,
++    description: str,
++    *,
++    timeout_seconds: int | None = None,
++    allow_permanent: bool = True,
++    approval_callback=None,
++) -> dict:
++    """Request once/session/always approval for a non-pattern authority gate.
++
++    This uses the same CLI and gateway queues as dangerous-command approvals,
++    but keys the approval to an exact action-authority scope instead of a broad
++    regex pattern.
++    """
++    session_key = get_current_session_key()
++    if is_approved(session_key, pattern_key):
++        return {"approved": True, "message": None, "source": "existing_scoped_approval"}
++
++    is_cli = os.getenv("HERMES_INTERACTIVE")
++    is_gateway = os.getenv("HERMES_GATEWAY_SESSION")
++    is_ask = os.getenv("HERMES_EXEC_ASK")
++    if not is_cli and not is_gateway and not is_ask:
++        return {
++            "approved": False,
++            "pattern_key": pattern_key,
++            "description": description,
++            "message": "BLOCKED: action requires interactive user approval.",
++        }
++
++    if is_gateway or is_ask:
++        notify_cb = None
++        with _lock:
++            notify_cb = _gateway_notify_cbs.get(session_key)
++
++        approval_data = {
++            "command": subject,
++            "pattern_key": pattern_key,
++            "pattern_keys": [pattern_key],
++            "description": description,
++        }
++        if notify_cb is None:
++            submit_pending(session_key, approval_data)
++            return {
++                "approved": False,
++                "pattern_key": pattern_key,
++                "status": "approval_required",
++                "command": subject,
++                "description": description,
++                "message": f"⚠️ {description}. Asking the user for approval.\n\n**Action:**\n```\n{subject}\n```",
++            }
++
++        entry = _ApprovalEntry(approval_data)
++        with _lock:
++            _gateway_queues.setdefault(session_key, []).append(entry)
++        try:
++            notify_cb(approval_data)
++        except Exception as exc:
++            logger.warning("Gateway scoped approval notify failed: %s", exc)
++            with _lock:
++                queue = _gateway_queues.get(session_key, [])
++                if entry in queue:
++                    queue.remove(entry)
++                if not queue:
++                    _gateway_queues.pop(session_key, None)
++            return {
++                "approved": False,
++                "pattern_key": pattern_key,
++                "description": description,
++                "message": "BLOCKED: Failed to send approval request to user. Do NOT retry.",
++            }
++
++        timeout = timeout_seconds if timeout_seconds is not None else _get_approval_config().get("gateway_timeout", 300)
++        try:
++            timeout = int(timeout)
++        except (ValueError, TypeError):
++            timeout = 300
++        try:
++            from tools.environments.base import touch_activity_if_due
++        except Exception:  # pragma: no cover
++            touch_activity_if_due = None
++
++        now = time.monotonic()
++        deadline = now + max(timeout, 0)
++        activity_state = {"last_touch": now, "start": now}
++        resolved = False
++        while True:
++            remaining = deadline - time.monotonic()
++            if remaining <= 0:
++                break
++            if entry.event.wait(timeout=min(1.0, remaining)):
++                resolved = True
++                break
++            if touch_activity_if_due is not None:
++                touch_activity_if_due(activity_state, "waiting for user approval")
++
++        with _lock:
++            queue = _gateway_queues.get(session_key, [])
++            if entry in queue:
++                queue.remove(entry)
++            if not queue:
++                _gateway_queues.pop(session_key, None)
++
++        choice = entry.result
++        if not resolved or choice is None or choice == "deny":
++            reason = "timed out" if not resolved else "denied by user"
++            return {
++                "approved": False,
++                "pattern_key": pattern_key,
++                "description": description,
++                "message": f"BLOCKED: Action {reason}. Do NOT retry this action.",
++            }
++        if choice == "session" or (choice == "always" and not allow_permanent):
++            approve_session(session_key, pattern_key)
++        elif choice == "always":
++            approve_session(session_key, pattern_key)
++            approve_permanent(pattern_key)
++            save_permanent_allowlist(_permanent_approved)
++        return {"approved": True, "message": None, "source": f"user_approved_{choice}"}
++
++    choice = prompt_dangerous_approval(
++        subject,
++        description,
++        timeout_seconds=timeout_seconds,
++        allow_permanent=allow_permanent,
++        approval_callback=approval_callback,
++    )
++    if choice == "deny":
++        return {
++            "approved": False,
++            "pattern_key": pattern_key,
++            "description": description,
++            "message": "BLOCKED: User denied this action. Do NOT retry.",
++        }
++    if choice == "session" or (choice == "always" and not allow_permanent):
++        approve_session(session_key, pattern_key)
++    elif choice == "always":
++        approve_session(session_key, pattern_key)
++        approve_permanent(pattern_key)
++        save_permanent_allowlist(_permanent_approved)
++    return {"approved": True, "message": None, "source": f"user_approved_{choice}"}
++
++
+ def approve_permanent(pattern_key: str):
+     """Add a pattern to the permanent allowlist."""
+     with _lock:

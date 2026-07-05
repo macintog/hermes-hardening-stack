@@ -1,0 +1,52 @@
+diff --git a/tests/hermes_cli/test_managed_uv.py b/tests/hermes_cli/test_managed_uv.py
+index e0a3310..fa798fb 100644
+--- a/tests/hermes_cli/test_managed_uv.py
++++ b/tests/hermes_cli/test_managed_uv.py
+@@ -209,6 +209,10 @@ class TestUpdateManagedUv:
+     def test_self_update_success(self, tmp_path):
+         _make_executable(tmp_path / "bin" / "uv")
+         with patch("hermes_cli.managed_uv.get_hermes_home", return_value=tmp_path), \
++             patch(
++                 "hermes_cli.managed_uv.wrap_package_manager_command_for_sfw",
++                 return_value=([str(tmp_path / "bin" / "uv"), "self", "update"], None),
++             ), \
+              patch("hermes_cli.managed_uv.subprocess.run") as mock_run:
+             # uv self update succeeds
+             mock_run.return_value = MagicMock(returncode=0, stdout="uv 0.2.0")
+@@ -222,6 +226,10 @@ class TestUpdateManagedUv:
+     def test_self_update_failure_non_fatal(self, tmp_path):
+         _make_executable(tmp_path / "bin" / "uv")
+         with patch("hermes_cli.managed_uv.get_hermes_home", return_value=tmp_path), \
++             patch(
++                 "hermes_cli.managed_uv.wrap_package_manager_command_for_sfw",
++                 return_value=([str(tmp_path / "bin" / "uv"), "self", "update"], None),
++             ), \
+              patch("hermes_cli.managed_uv.subprocess.run") as mock_run:
+             mock_run.return_value = MagicMock(returncode=1, stderr="nope")
+             from hermes_cli.managed_uv import update_managed_uv
+@@ -229,6 +237,25 @@ class TestUpdateManagedUv:
+             # Still returns the path — failure is non-fatal
+             assert result == str(tmp_path / "bin" / "uv")
+ 
++    def test_self_update_uses_socket_firewall_wrapper(self, tmp_path):
++        _make_executable(tmp_path / "bin" / "uv")
++        wrapped_env = {"PATH": "shim-path"}
++        with patch("hermes_cli.managed_uv.get_hermes_home", return_value=tmp_path), \
++             patch(
++                 "hermes_cli.managed_uv.wrap_package_manager_command_for_sfw",
++                 return_value=(["/shim/sfw-package-shim", "uv", "self", "update"], wrapped_env),
++             ) as mock_wrap, \
++             patch("hermes_cli.managed_uv.subprocess.run") as mock_run:
++            mock_run.return_value = MagicMock(returncode=1, stderr="nope")
++            from hermes_cli.managed_uv import update_managed_uv
++            result = update_managed_uv()
++
++        assert result == str(tmp_path / "bin" / "uv")
++        mock_wrap.assert_called_once_with(str(tmp_path / "bin" / "uv"), ["self", "update"])
++        mock_run.assert_called_once()
++        assert mock_run.call_args[0][0] == ["/shim/sfw-package-shim", "uv", "self", "update"]
++        assert mock_run.call_args.kwargs["env"] == wrapped_env
++
+ 
+ # ---------------------------------------------------------------------------
+ # _install_uv internals

@@ -1,0 +1,223 @@
+diff --git a/tools/browser_tool.py b/tools/browser_tool.py
+index 482f4e178..8dfe04a0a 100644
+--- a/tools/browser_tool.py
++++ b/tools/browser_tool.py
+@@ -2486,6 +2486,54 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
+         }, ensure_ascii=False)
+ 
+ 
++def _attach_browser_text_evidence_ledger(
++    response: Dict[str, Any],
++    *,
++    tool_name: str,
++    items: List[Dict[str, Any]],
++    args: Optional[Dict[str, Any]] = None,
++    metadata: Optional[Dict[str, Any]] = None,
++) -> Dict[str, Any]:
++    """Attach compact native evidence provenance for passive browser observations."""
++    try:
++        from agent.evidence_ledgers import (
++            attach_evidence_ledger,
++            build_evidence_item,
++            build_tool_invocation,
++            text_byte_count,
++            text_sha256,
++        )
++
++        evidence_items = []
++        for item in items:
++            text = item.get("text")
++            sha, status = text_sha256(text) if text else (None, "missing")
++            evidence_items.append(build_evidence_item(
++                kind=item["kind"],
++                source_type=item["source_type"],
++                extraction_layer=item.get("extraction_layer", tool_name),
++                text_ref=item.get("text_ref"),
++                text=None,
++                verbatim=True,
++                content_type=item.get("content_type", "text/plain"),
++                source_uri=item.get("source_uri"),
++                sha256=sha,
++                byte_count=text_byte_count(text),
++                char_count=len(text or ""),
++                metadata={"hash_status": status, **dict(item.get("metadata") or {})},
++            ))
++        return attach_evidence_ledger(
++            response,
++            tool_name=tool_name,
++            evidence_items=evidence_items,
++            tool_invocation=build_tool_invocation(name=tool_name, args=args or {}, read_only=True),
++            metadata=metadata or {},
++        )
++    except Exception as ledger_error:
++        logger.debug("Failed to attach %s evidence ledger: %s", tool_name, ledger_error)
++        return response
++
++
+ def browser_snapshot(
+     full: bool = False,
+     task_id: Optional[str] = None,
+@@ -2546,6 +2594,22 @@ def browser_snapshot(
+         except Exception as _sv_exc:
+             logger.debug("supervisor snapshot merge failed: %s", _sv_exc)
+ 
++        response = _attach_browser_text_evidence_ledger(
++            response,
++            tool_name="browser_snapshot",
++            items=[{
++                "kind": "browser_dom_snapshot",
++                "source_type": "browser_accessibility_tree",
++                "extraction_layer": "browser_snapshot",
++                "text_ref": "snapshot",
++                "text": snapshot_text,
++                "content_type": "text/plain",
++                "metadata": {"full": bool(full), "element_count": response["element_count"]},
++            }],
++            args={"full": full},
++            metadata={"passive_observation": True},
++        )
++
+         return json.dumps(response, ensure_ascii=False)
+     else:
+         response = {
+@@ -2807,6 +2871,32 @@ def browser_console(clear: bool = False, expression: Optional[str] = None, task_
+     _copy_fallback_warning(response, console_result)
+     if errors_result.get("fallback_warning") and not response.get("fallback_warning"):
+         _copy_fallback_warning(response, errors_result)
++    response = _attach_browser_text_evidence_ledger(
++        response,
++        tool_name="browser_console",
++        items=[
++            {
++                "kind": "browser_console_log",
++                "source_type": "browser_console",
++                "extraction_layer": "browser_console",
++                "text_ref": "console_messages",
++                "text": json.dumps(messages, ensure_ascii=False, sort_keys=True),
++                "content_type": "application/json",
++                "metadata": {"clear": bool(clear), "total_messages": len(messages)},
++            },
++            {
++                "kind": "browser_console_error",
++                "source_type": "browser_exception_buffer",
++                "extraction_layer": "browser_console_errors",
++                "text_ref": "js_errors",
++                "text": json.dumps(errors, ensure_ascii=False, sort_keys=True),
++                "content_type": "application/json",
++                "metadata": {"clear": bool(clear), "total_errors": len(errors)},
++            },
++        ],
++        args={"clear": clear},
++        metadata={"passive_observation": True},
++    )
+     return json.dumps(response, ensure_ascii=False)
+ 
+ 
+@@ -3043,7 +3133,23 @@ def browser_get_images(task_id: Optional[str] = None) -> str:
+                 "images": images,
+                 "count": len(images)
+             }
+-            return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
++            _copy_fallback_warning(response, result)
++            response = _attach_browser_text_evidence_ledger(
++                response,
++                tool_name="browser_get_images",
++                items=[{
++                    "kind": "browser_image_metadata",
++                    "source_type": "browser_dom_images",
++                    "extraction_layer": "browser_get_images",
++                    "text_ref": "images",
++                    "text": json.dumps(images, ensure_ascii=False, sort_keys=True),
++                    "content_type": "application/json",
++                    "metadata": {"count": len(images)},
++                }],
++                args={},
++                metadata={"passive_observation": True},
++            )
++            return json.dumps(response, ensure_ascii=False)
+         except json.JSONDecodeError:
+             response = {
+                 "success": True,
+@@ -3051,7 +3157,23 @@ def browser_get_images(task_id: Optional[str] = None) -> str:
+                 "count": 0,
+                 "warning": "Could not parse image data"
+             }
+-            return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
++            _copy_fallback_warning(response, result)
++            response = _attach_browser_text_evidence_ledger(
++                response,
++                tool_name="browser_get_images",
++                items=[{
++                    "kind": "browser_image_metadata",
++                    "source_type": "browser_dom_images",
++                    "extraction_layer": "browser_get_images",
++                    "text_ref": "images",
++                    "text": "[]",
++                    "content_type": "application/json",
++                    "metadata": {"count": 0, "warning": response["warning"]},
++                }],
++                args={},
++                metadata={"passive_observation": True, "parse_warning": True},
++            )
++            return json.dumps(response, ensure_ascii=False)
+     else:
+         response = {
+             "success": False,
+@@ -3308,6 +3430,14 @@ def browser_vision(question: str, annotate: bool = False, task_id: Optional[str]
+         analysis = (response.choices[0].message.content or "").strip()
+         # Redact secrets the vision LLM may have read from the screenshot.
+         from agent.redact import redact_sensitive_text
++        from agent.evidence_ledgers import (
++            attach_evidence_ledger,
++            build_evidence_item,
++            build_operational_artifact,
++            build_tool_invocation,
++            file_byte_count,
++            file_sha256,
++        )
+         analysis = redact_sensitive_text(analysis)
+         response_data = {
+             "success": True,
+@@ -3318,6 +3448,42 @@ def browser_vision(question: str, annotate: bool = False, task_id: Optional[str]
+         # Include annotation data if annotated screenshot was taken
+         if annotate and result.get("data", {}).get("annotations"):
+             response_data["annotations"] = result["data"]["annotations"]
++        sha256, hash_status = file_sha256(screenshot_path)
++        byte_count = file_byte_count(screenshot_path)
++        artifact = build_operational_artifact(
++            kind="screenshot",
++            path=screenshot_path,
++            content_type="image/png",
++            sha256=sha256,
++            byte_count=byte_count,
++        )
++        evidence = build_evidence_item(
++            kind="browser_screenshot_observation",
++            text_ref="analysis",
++            text=None,
++            verbatim=False,
++            source_type="browser_screenshot",
++            extraction_layer="browser_vision_analysis",
++            content_type="image/png",
++            source_uri=str(screenshot_path),
++            sha256=sha256,
++            byte_count=byte_count,
++            metadata={
++                "tool_name": "browser_vision",
++                "annotate": bool(annotate),
++                "hash_status": hash_status,
++            },
++        )
++        attach_evidence_ledger(
++            response_data,
++            tool_name="browser_vision",
++            evidence_items=[evidence],
++            tool_invocation=build_tool_invocation(
++                name="browser_vision",
++                args={"question": question, "annotate": annotate},
++            ),
++            operational_artifacts=[artifact],
++        )
+         return json.dumps(response_data, ensure_ascii=False)
+ 
+     except Exception as e:

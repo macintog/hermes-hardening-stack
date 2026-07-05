@@ -1,0 +1,201 @@
+diff --git a/tests/gateway/test_mattermost.py b/tests/gateway/test_mattermost.py
+index cafe5ad68..baec86063 100644
+--- a/tests/gateway/test_mattermost.py
++++ b/tests/gateway/test_mattermost.py
+@@ -6,6 +6,7 @@ import pytest
+ from unittest.mock import MagicMock, patch, AsyncMock
+ 
+ from gateway.config import Platform, PlatformConfig
++from tools.safe_http import SafeHTTPError
+ 
+ 
+ # ---------------------------------------------------------------------------
+@@ -499,13 +500,11 @@ class TestMattermostFileUpload:
+     @patch("tools.url_safety.is_safe_url", return_value=True)
+     async def test_send_image_downloads_and_uploads(self, _mock_safe):
+         """send_image should download the URL, upload via /api/v4/files, then post."""
+-        # Mock the download (GET)
+-        mock_dl_resp = AsyncMock()
+-        mock_dl_resp.status = 200
+-        mock_dl_resp.read = AsyncMock(return_value=b"\x89PNG\x00fake-image-data")
+-        mock_dl_resp.content_type = "image/png"
+-        mock_dl_resp.__aenter__ = AsyncMock(return_value=mock_dl_resp)
+-        mock_dl_resp.__aexit__ = AsyncMock(return_value=False)
++        class DownloadResult:
++            content = b"\x89PNG\x00fake-image-data"
++            content_type = "image/png"
++
++        mock_download = AsyncMock(return_value=DownloadResult())
+ 
+         # Mock the upload (POST to /files)
+         mock_upload_resp = AsyncMock()
+@@ -525,8 +524,7 @@ class TestMattermostFileUpload:
+         mock_post_resp.__aenter__ = AsyncMock(return_value=mock_post_resp)
+         mock_post_resp.__aexit__ = AsyncMock(return_value=False)
+ 
+-        # Route calls: first GET (download), then POST (upload), then POST (create post)
+-        self.adapter._session.get = MagicMock(return_value=mock_dl_resp)
++        # Route calls: first POST uploads, then POST creates post.
+         post_call_count = 0
+         original_post_returns = [mock_upload_resp, mock_post_resp]
+ 
+@@ -538,12 +536,93 @@ class TestMattermostFileUpload:
+ 
+         self.adapter._session.post = MagicMock(side_effect=post_side_effect)
+ 
+-        result = await self.adapter.send_image(
+-            "channel_1", "https://img.example.com/cat.png", caption="A cat"
+-        )
++        with patch("plugins.platforms.mattermost.adapter.safe_download_bytes", mock_download):
++            result = await self.adapter.send_image(
++                "channel_1", "https://img.example.com/cat.png", caption="A cat"
++            )
+ 
+         assert result.success is True
+         assert result.message_id == "post_with_file"
++        mock_download.assert_awaited_once()
++
++    @pytest.mark.asyncio
++    async def test_send_image_blocks_unsafe_safe_http_target_without_raw_url_send(self):
++        """SafeHTTP policy blocks should fail closed instead of sending the raw URL."""
++        blocked = SafeHTTPError("Blocked unsafe URL target: http://127.0.0.1/image.png")
++        mock_download = AsyncMock(side_effect=blocked)
++        self.adapter.send = AsyncMock()
++
++        with patch("plugins.platforms.mattermost.adapter.safe_download_bytes", mock_download):
++            result = await self.adapter.send_image(
++                "channel_1", "http://127.0.0.1/image.png", caption="A cat"
++            )
++
++        assert result.success is False
++        assert "Blocked unsafe URL target" in result.error
++        self.adapter.send.assert_not_called()
++        mock_download.assert_awaited_once()
++
++    @pytest.mark.asyncio
++    async def test_send_image_blocks_disallowed_content_type_without_raw_url_send(self):
++        """SafeHTTP content policy blocks should not fall back to a raw URL message."""
++        blocked = SafeHTTPError("Blocked disallowed content type text/html")
++        mock_download = AsyncMock(side_effect=blocked)
++        self.adapter.send = AsyncMock()
++
++        with patch("plugins.platforms.mattermost.adapter.safe_download_bytes", mock_download):
++            result = await self.adapter.send_image(
++                "channel_1", "https://img.example.com/cat.html", caption="A cat"
++            )
++
++        assert result.success is False
++        assert "Blocked disallowed content type text/html" in result.error
++        self.adapter.send.assert_not_called()
++        mock_download.assert_awaited_once()
++
++    @pytest.mark.asyncio
++    async def test_send_multiple_images_uses_safe_download_bytes(self):
++        class DownloadResult:
++            content = b"\x89PNG\x00fake-image-data"
++            content_type = "image/png"
++
++        mock_download = AsyncMock(return_value=DownloadResult())
++        self.adapter._upload_file = AsyncMock(return_value="file_abc123")
++        self.adapter._api_post = AsyncMock(return_value={"id": "post_with_files"})
++
++        with patch("plugins.platforms.mattermost.adapter.safe_download_bytes", mock_download):
++            await self.adapter.send_multiple_images(
++                "channel_1",
++                [("https://img.example.com/cat.png", "A cat")],
++            )
++
++        mock_download.assert_awaited_once()
++        kwargs = mock_download.await_args.kwargs
++        assert kwargs["source_type"] == "gateway:mattermost-url-file"
++        assert kwargs["policy"]["redirect_credentials"] == "no-credentials"
++        self.adapter._upload_file.assert_awaited_once_with(
++            "channel_1",
++            DownloadResult.content,
++            "cat.png",
++            "image/png",
++        )
++        self.adapter._api_post.assert_awaited_once()
++
++    @pytest.mark.asyncio
++    async def test_send_multiple_images_blocks_safe_http_redirect_without_upload(self):
++        blocked = SafeHTTPError("Blocked unsafe URL target: http://169.254.169.254/latest")
++        mock_download = AsyncMock(side_effect=blocked)
++        self.adapter._upload_file = AsyncMock(return_value="file_abc123")
++        self.adapter._api_post = AsyncMock(return_value={"id": "post_with_files"})
++
++        with patch("plugins.platforms.mattermost.adapter.safe_download_bytes", mock_download):
++            await self.adapter.send_multiple_images(
++                "channel_1",
++                [("https://public.example/redirect.png", "A cat")],
++            )
++
++        mock_download.assert_awaited_once()
++        self.adapter._upload_file.assert_not_awaited()
++        self.adapter._api_post.assert_not_awaited()
+ 
+ 
+ # ---------------------------------------------------------------------------
+@@ -690,15 +769,12 @@ class TestMattermostMediaTypes:
+         file_info = {"name": "photo.png", "mime_type": "image/png"}
+         self.adapter._api_get = AsyncMock(return_value=file_info)
+ 
+-        mock_resp = AsyncMock()
+-        mock_resp.status = 200
+-        mock_resp.read = AsyncMock(return_value=b"\x89PNG fake")
+-        mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+-        mock_resp.__aexit__ = AsyncMock(return_value=False)
+-        self.adapter._session = MagicMock()
+-        self.adapter._session.get = MagicMock(return_value=mock_resp)
++        class DownloadResult:
++            content = b"\x89PNG fake"
++            content_type = "image/png"
+ 
+-        with patch("gateway.platforms.base.cache_image_from_bytes", return_value="/tmp/photo.png"):
++        with patch("plugins.platforms.mattermost.adapter.safe_download_bytes", AsyncMock(return_value=DownloadResult())), \
++             patch("gateway.platforms.base.cache_image_from_bytes", return_value="/tmp/photo.png"):
+             await self.adapter._handle_ws_event(self._make_event(["file1"]))
+ 
+         msg = self.adapter.handle_message.call_args[0][0]
+@@ -711,15 +787,12 @@ class TestMattermostMediaTypes:
+         file_info = {"name": "voice.ogg", "mime_type": "audio/ogg"}
+         self.adapter._api_get = AsyncMock(return_value=file_info)
+ 
+-        mock_resp = AsyncMock()
+-        mock_resp.status = 200
+-        mock_resp.read = AsyncMock(return_value=b"OGG fake")
+-        mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+-        mock_resp.__aexit__ = AsyncMock(return_value=False)
+-        self.adapter._session = MagicMock()
+-        self.adapter._session.get = MagicMock(return_value=mock_resp)
++        class DownloadResult:
++            content = b"OGG fake"
++            content_type = "audio/ogg"
+ 
+-        with patch("gateway.platforms.base.cache_audio_from_bytes", return_value="/tmp/voice.ogg"), \
++        with patch("plugins.platforms.mattermost.adapter.safe_download_bytes", AsyncMock(return_value=DownloadResult())), \
++             patch("gateway.platforms.base.cache_audio_from_bytes", return_value="/tmp/voice.ogg"), \
+              patch("gateway.platforms.base.cache_image_from_bytes"), \
+              patch("gateway.platforms.base.cache_document_from_bytes"):
+             await self.adapter._handle_ws_event(self._make_event(["file2"]))
+@@ -734,15 +807,12 @@ class TestMattermostMediaTypes:
+         file_info = {"name": "report.pdf", "mime_type": "application/pdf"}
+         self.adapter._api_get = AsyncMock(return_value=file_info)
+ 
+-        mock_resp = AsyncMock()
+-        mock_resp.status = 200
+-        mock_resp.read = AsyncMock(return_value=b"PDF fake")
+-        mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+-        mock_resp.__aexit__ = AsyncMock(return_value=False)
+-        self.adapter._session = MagicMock()
+-        self.adapter._session.get = MagicMock(return_value=mock_resp)
++        class DownloadResult:
++            content = b"PDF fake"
++            content_type = "application/pdf"
+ 
+-        with patch("gateway.platforms.base.cache_document_from_bytes", return_value="/tmp/report.pdf"), \
++        with patch("plugins.platforms.mattermost.adapter.safe_download_bytes", AsyncMock(return_value=DownloadResult())), \
++             patch("gateway.platforms.base.cache_document_from_bytes", return_value="/tmp/report.pdf"), \
+              patch("gateway.platforms.base.cache_image_from_bytes"):
+             await self.adapter._handle_ws_event(self._make_event(["file3"]))
+ 

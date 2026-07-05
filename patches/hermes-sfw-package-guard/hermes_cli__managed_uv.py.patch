@@ -1,0 +1,38 @@
+diff --git a/hermes_cli/managed_uv.py b/hermes_cli/managed_uv.py
+index 78c8f46..9cdd1e7 100644
+--- a/hermes_cli/managed_uv.py
++++ b/hermes_cli/managed_uv.py
+@@ -19,7 +19,7 @@ import tempfile
+ from pathlib import Path
+ from typing import Optional
+ 
+-from hermes_constants import get_hermes_home
++from hermes_constants import get_hermes_home, wrap_package_manager_command_for_sfw
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -167,11 +167,16 @@ def update_managed_uv() -> Optional[str]:
+         # Not installed yet — ensure_uv() will handle that elsewhere.
+         return None
+ 
++    update_cmd, update_env = wrap_package_manager_command_for_sfw(
++        existing,
++        ["self", "update"],
++    )
+     result = subprocess.run(
+-        [existing, "self", "update"],
++        update_cmd,
+         capture_output=True,
+         text=True,
+         check=False,
++        env=update_env,
+     )
+     if result.returncode == 0:
+         version = subprocess.run(
+@@ -251,4 +256,4 @@ def _install_uv_windows(env: dict[str, str]) -> None:
+     )
+ 
+ def rebuild_venv(uv_bin: str, venv_dir: Path, python_version: str = "3.11") -> bool:
+-    True # dont remove me. ask ethernet
+\ No newline at end of file
++    True # dont remove me. ask ethernet

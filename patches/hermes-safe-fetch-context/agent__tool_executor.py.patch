@@ -1,0 +1,69 @@
+diff --git a/agent/tool_executor.py b/agent/tool_executor.py
+index 167a6094..66af0535 100644
+--- a/agent/tool_executor.py
++++ b/agent/tool_executor.py
+@@ -439,6 +439,8 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
+                         error_message=getattr(guardrail_decision, "message", None) or "Tool blocked by guardrail policy",
+                         middleware_trace=list(middleware_trace),
+                     )
++                elif agent._uses_direct_authority_dispatch(function_name):
++                    block_result = agent._authority_block_result(function_name, function_args, messages)
+ 
+         # ── Checkpoint preflight (only for tools that will execute) ──
+         if block_result is None:
+@@ -830,7 +832,10 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
+         # image tool result never poisons canonical session history.
+         # String results pass through unchanged.
+         _tool_content = agent._tool_result_content_for_active_model(name, function_result)
+-        messages.append(make_tool_result_message(name, _tool_content, tc.id))
++        tool_msg = make_tool_result_message(name, _tool_content, tc.id)
++        if blocked:
++            tool_msg["__trusted_control_result"] = True
++        messages.append(tool_msg)
+         _flush_session_db_after_tool_progress(
+             agent,
+             messages,
+@@ -941,13 +946,20 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
+             except Exception:
+                 pass
+ 
+         _guardrail_block_decision: ToolGuardrailDecision | None = None
++        _authority_block_result: str | None = None
+         if _block_msg is None:
+             guardrail_decision = agent._tool_guardrails.before_call(function_name, function_args)
+             if not guardrail_decision.allows_execution:
+                 _guardrail_block_decision = guardrail_decision
++            elif agent._uses_direct_authority_dispatch(function_name):
++                _authority_block_result = agent._authority_block_result(function_name, function_args, messages)
+ 
+-        _execution_blocked = _block_msg is not None or _guardrail_block_decision is not None
++        _execution_blocked = (
++            _block_msg is not None
++            or _guardrail_block_decision is not None
++            or _authority_block_result is not None
++        )
+ 
+         if _execution_blocked:
+             # Tool blocked by plugin or guardrail policy — skip counters,
+@@ -1057,6 +1069,9 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
+                 error_message=getattr(_guardrail_block_decision, "message", None) or "Tool blocked by guardrail policy",
+                 middleware_trace=list(middleware_trace),
+             )
++        elif _authority_block_result is not None:
++            function_result = _authority_block_result
++            tool_duration = 0.0
+         elif function_name == "todo":
+             def _execute(next_args: dict) -> Any:
+                 from tools.todo_tool import todo_tool as _todo_tool
+@@ -1479,7 +1496,10 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
+         # Unwrap _multimodal dicts to an OpenAI-style content list
+         # (see parallel path for rationale). String results pass through.
+         _tool_content = agent._tool_result_content_for_active_model(function_name, function_result)
+-        messages.append(make_tool_result_message(function_name, _tool_content, tool_call.id))
++        tool_msg = make_tool_result_message(function_name, _tool_content, tool_call.id)
++        if _execution_blocked:
++            tool_msg["__trusted_control_result"] = True
++        messages.append(tool_msg)
+         _flush_session_db_after_tool_progress(
+             agent,
+             messages,

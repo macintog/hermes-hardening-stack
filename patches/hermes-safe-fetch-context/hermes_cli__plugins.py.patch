@@ -1,0 +1,325 @@
+diff --git a/hermes_cli/plugins.py b/hermes_cli/plugins.py
+index b904b8a01..752301550 100644
+--- a/hermes_cli/plugins.py
++++ b/hermes_cli/plugins.py
+@@ -170,6 +170,37 @@ ENTRY_POINTS_GROUP = "hermes_agent.plugins"
+ 
+ _NS_PARENT = "hermes_plugins"
+ 
++OBSERVE_ONLY_HOOK_POLICY = "observe_only"
++BLOCK_ONLY_HOOK_POLICY = "block_only"
++TRANSFORM_RESULT_HOOK_POLICY = "transform_result"
++SIDE_EFFECT_CAPABLE_HOOK_POLICY = "side_effect_capable"
++
++HOOK_POLICY_DEFAULTS: Dict[str, str] = {
++    "pre_tool_call": BLOCK_ONLY_HOOK_POLICY,
++    "post_tool_call": OBSERVE_ONLY_HOOK_POLICY,
++    "transform_terminal_output": TRANSFORM_RESULT_HOOK_POLICY,
++    "transform_tool_result": TRANSFORM_RESULT_HOOK_POLICY,
++    "pre_llm_call": OBSERVE_ONLY_HOOK_POLICY,
++    "post_llm_call": OBSERVE_ONLY_HOOK_POLICY,
++    "pre_api_request": OBSERVE_ONLY_HOOK_POLICY,
++    "post_api_request": OBSERVE_ONLY_HOOK_POLICY,
++    "on_session_start": OBSERVE_ONLY_HOOK_POLICY,
++    "on_session_end": OBSERVE_ONLY_HOOK_POLICY,
++    "on_session_finalize": OBSERVE_ONLY_HOOK_POLICY,
++    "on_session_reset": OBSERVE_ONLY_HOOK_POLICY,
++    "subagent_stop": OBSERVE_ONLY_HOOK_POLICY,
++    "pre_gateway_dispatch": BLOCK_ONLY_HOOK_POLICY,
++    "pre_approval_request": OBSERVE_ONLY_HOOK_POLICY,
++    "post_approval_response": OBSERVE_ONLY_HOOK_POLICY,
++}
++
++VALID_HOOK_POLICIES: Set[str] = {
++    OBSERVE_ONLY_HOOK_POLICY,
++    BLOCK_ONLY_HOOK_POLICY,
++    TRANSFORM_RESULT_HOOK_POLICY,
++    SIDE_EFFECT_CAPABLE_HOOK_POLICY,
++}
++
+ 
+ def _env_enabled(name: str) -> bool:
+     """Return True when an env var is set to a truthy opt-in value."""
+@@ -222,6 +253,40 @@ def _get_enabled_plugins() -> Optional[set]:
+         return None
+ 
+ 
++def _normalize_hook_policy(value: Any, default: str) -> str:
++    if not isinstance(value, str):
++        return default
++    normalized = value.strip().lower().replace("-", "_")
++    return normalized if normalized in VALID_HOOK_POLICIES else default
++
++
++def _configured_hook_policy(manifest: "PluginManifest", hook_name: str) -> str:
++    return _normalize_hook_policy(
++        manifest.hook_authority.get(hook_name),
++        HOOK_POLICY_DEFAULTS.get(hook_name, OBSERVE_ONLY_HOOK_POLICY),
++    )
++
++
++def _audit_plugin_hook_alteration(
++    manifest: "PluginManifest",
++    hook_name: str,
++    policy: str,
++    callback: Callable,
++    result: Any,
++) -> None:
++    logger.info(
++        "Trusted plugin hook altered Hermes execution/model-visible output: "
++        "plugin=%s key=%s source=%s hook=%s policy=%s callback=%s result_type=%s",
++        manifest.name,
++        manifest.key or manifest.name,
++        manifest.source,
++        hook_name,
++        policy,
++        getattr(callback, "__name__", repr(callback)),
++        type(result).__name__,
++    )
++
++
+ # ---------------------------------------------------------------------------
+ # Data classes
+ # ---------------------------------------------------------------------------
+@@ -240,6 +305,7 @@ class PluginManifest:
+     requires_env: List[Union[str, Dict[str, Any]]] = field(default_factory=list)
+     provides_tools: List[str] = field(default_factory=list)
+     provides_hooks: List[str] = field(default_factory=list)
++    hook_authority: Dict[str, str] = field(default_factory=dict)
+     source: str = ""        # "user", "project", or "entrypoint"
+     path: Optional[str] = None
+     # Plugin kind — see plugins.py module docstring for semantics.
+@@ -777,19 +843,24 @@ class PluginContext:
+         Mirrors :meth:`register_web_search_provider` exactly — same
+         registration shape, same gating, same logging. The browser
+         subsystem's dispatcher (:func:`tools.browser_tool._get_cloud_provider`)
+-        consults the registry built up by these calls.
++        consults the registry built up by these calls. Registry validation owns
++        the final type check so bundled providers survive duplicate ABC imports.
+         """
+-        from agent.browser_provider import BrowserProvider
+         from agent.browser_registry import register_provider as _register_browser_provider
+ 
+-        if not isinstance(provider, BrowserProvider):
++        try:
++            _register_browser_provider(provider)
++        except TypeError:
++            from agent.browser_provider import BrowserProvider
++
++            if isinstance(provider, BrowserProvider):
++                raise
+             logger.warning(
+                 "Plugin '%s' tried to register a browser provider that does "
+                 "not inherit from BrowserProvider. Ignoring.",
+                 self.manifest.name,
+             )
+             return
+-        _register_browser_provider(provider)
+         logger.info(
+             "Plugin '%s' registered browser provider: %s",
+             self.manifest.name, provider.name,
+@@ -819,8 +885,6 @@ class PluginContext:
+ 
+     # -- hook registration --------------------------------------------------
+ 
+-    # -- auxiliary task registration ---------------------------------------
+-
+     def register_auxiliary_task(
+         self,
+         key: str,
+@@ -835,44 +899,7 @@ class PluginContext:
+         compression, smart-approval, etc.) that route through ``auxiliary_client.py``.
+         Each task has its own ``auxiliary.<key>`` config block where users can
+         pin a provider/model independent of the main chat model.
+-
+-        Plugins use this to declare their own auxiliary tasks without touching
+-        core files. After registration, the task:
+-
+-          - Appears in the ``hermes model → Configure auxiliary models`` picker
+-          - Has its provider/model/base_url/api_key bridged from config.yaml to
+-            ``AUXILIARY_<KEY_UPPER>_*`` env vars at gateway startup
+-          - Gets default routing fields (provider="auto", model="", etc.) merged
+-            into loaded configs so ``cfg.get("auxiliary", {}).get(key)`` works
+-
+-        Args:
+-            key: stable task key (snake_case). Used in config ``auxiliary.<key>``
+-                and env vars ``AUXILIARY_<KEY_UPPER>_*``. Must not shadow a
+-                built-in task key (vision, compression, web_extract, approval,
+-                mcp, title_generation, skills_hub, curator).
+-            display_name: human-readable name shown in the picker.
+-            description: short one-line description shown next to the name.
+-            defaults: optional dict of default routing fields. Recognized keys:
+-                ``provider`` (default "auto"), ``model`` (default ""),
+-                ``base_url`` (default ""), ``api_key`` (default ""),
+-                ``timeout`` (default 60), ``extra_body`` (default {}),
+-                plus any task-specific extras (e.g. ``download_timeout``).
+-                Unknown keys are preserved verbatim — the plugin owns the
+-                schema for its own task.
+-
+-        Raises:
+-            ValueError: if *key* is empty, contains invalid characters, or
+-                shadows a built-in auxiliary task key.
+-
+-        Example:
+-            ctx.register_auxiliary_task(
+-                key="memory_retain_filter",
+-                display_name="Memory retain filter",
+-                description="hindsight pre-retain dedup/extract",
+-                defaults={"provider": "auto", "timeout": 30},
+-            )
+         """
+-        # Validate key shape
+         if not key or not isinstance(key, str):
+             raise ValueError(
+                 f"Plugin '{self.manifest.name}' tried to register auxiliary task "
+@@ -884,28 +911,24 @@ class PluginContext:
+                 f"must contain only alphanumeric characters and underscores"
+             )
+ 
+-        # Lazy import to avoid circular: hermes_cli.main imports plugins indirectly
+         from hermes_cli.main import _AUX_TASKS as _BUILTIN_AUX_TASKS
+ 
+         builtin_keys = {k for k, _name, _desc in _BUILTIN_AUX_TASKS}
+         if key in builtin_keys:
+             raise ValueError(
+                 f"Plugin '{self.manifest.name}' cannot register auxiliary task "
+-                f"{key!r} — that key is reserved for a built-in task. "
++                f"{key!r} - that key is reserved for a built-in task. "
+                 f"Pick a plugin-namespaced key (e.g. '{self.manifest.name}_{key}')."
+             )
+ 
+-        # Reject duplicate registrations across plugins
+         existing = self._manager._aux_tasks.get(key)
+         if existing is not None and existing.get("plugin") != self.manifest.name:
+             raise ValueError(
+                 f"Plugin '{self.manifest.name}' cannot register auxiliary task "
+-                f"{key!r} — already registered by plugin "
++                f"{key!r} - already registered by plugin "
+                 f"'{existing.get('plugin')}'"
+             )
+ 
+-        # Normalize defaults — plugin owns the schema, but we ensure routing
+-        # fields exist with sensible types so consumers don't crash.
+         merged_defaults: Dict[str, Any] = {
+             "provider": "auto",
+             "model": "",
+@@ -932,11 +955,25 @@ class PluginContext:
+             display_name,
+         )
+ 
+-    def register_hook(self, hook_name: str, callback: Callable) -> None:
++    def register_hook(
++        self,
++        hook_name: str,
++        callback: Callable,
++        *,
++        authority: str | None = None,
++    ) -> None:
+         """Register a lifecycle hook callback.
+ 
+         Unknown hook names produce a warning but are still stored so
+         forward-compatible plugins don't break.
++
++        Hook callbacks run as trusted local code in the Hermes process.
++        Their returned data does not automatically become user authority:
++        ``pre_tool_call`` returns are still collected for upstream-compatible
++        observer/directive plumbing, but only valid block directives affect
++        behavior. ``post_tool_call`` is observational, and result transforms
++        remain evidence subject to context-safety downgrade unless the plugin
++        declares explicit hook authority in ``plugin.yaml``.
+         """
+         if hook_name not in VALID_HOOKS:
+             logger.warning(
+@@ -946,8 +982,29 @@ class PluginContext:
+                 hook_name,
+                 ", ".join(sorted(VALID_HOOKS)),
+             )
++        default_policy = _configured_hook_policy(self.manifest, hook_name)
++        policy = _normalize_hook_policy(authority, default_policy)
++        if policy == SIDE_EFFECT_CAPABLE_HOOK_POLICY and default_policy != SIDE_EFFECT_CAPABLE_HOOK_POLICY:
++            logger.warning(
++                "Plugin '%s' requested side-effect-capable hook '%s' without "
++                "plugin.yaml hook_authority opt-in; using %s policy.",
++                self.manifest.name,
++                hook_name,
++                default_policy,
++            )
++            policy = default_policy
+         self._manager._hooks.setdefault(hook_name, []).append(callback)
+-        logger.debug("Plugin %s registered hook: %s", self.manifest.name, hook_name)
++        self._manager._hook_policies[id(callback)] = {
++            "plugin": self.manifest,
++            "hook": hook_name,
++            "policy": policy,
++        }
++        logger.debug(
++            "Plugin %s registered hook: %s policy=%s",
++            self.manifest.name,
++            hook_name,
++            policy,
++        )
+ 
+     # -- skill registration -------------------------------------------------
+ 
+@@ -1012,6 +1069,7 @@ class PluginManager:
+         self._cli_commands: Dict[str, dict] = {}
+         self._context_engine = None  # Set by a plugin via register_context_engine()
+         self._plugin_commands: Dict[str, dict] = {}  # Slash commands registered by plugins
++        self._hook_policies: Dict[int, Dict[str, Any]] = {}
+         self._discovered: bool = False
+         self._cli_ref = None  # Set by CLI after plugin discovery
+         # Plugin skill registry: qualified name → metadata dict.
+@@ -1039,6 +1097,7 @@ class PluginManager:
+             self._plugin_tool_names.clear()
+             self._cli_commands.clear()
+             self._plugin_commands.clear()
++            self._hook_policies.clear()
+             self._plugin_skills.clear()
+             self._aux_tasks.clear()
+             self._context_engine = None
+@@ -1308,6 +1367,17 @@ class PluginManager:
+                 )
+                 kind = "standalone"
+ 
++            raw_hook_authority = data.get("hook_authority", {})
++            hook_authority: Dict[str, str] = {}
++            if isinstance(raw_hook_authority, dict):
++                for hook_name, raw_policy in raw_hook_authority.items():
++                    if not isinstance(hook_name, str):
++                        continue
++                    hook_authority[hook_name] = _normalize_hook_policy(
++                        raw_policy,
++                        HOOK_POLICY_DEFAULTS.get(hook_name, OBSERVE_ONLY_HOOK_POLICY),
++                    )
++
+             # Auto-coerce user-installed memory providers to kind="exclusive"
+             # so they're routed to plugins/memory discovery instead of being
+             # loaded by the general PluginManager (which has no
+@@ -1357,6 +1427,7 @@ class PluginManager:
+                 requires_env=data.get("requires_env", []),
+                 provides_tools=data.get("provides_tools", []),
+                 provides_hooks=data.get("provides_hooks", []),
++                hook_authority=hook_authority,
+                 source=source,
+                 path=str(plugin_dir),
+                 kind=kind,
+@@ -1557,6 +1628,19 @@ class PluginManager:
+             try:
+                 ret = cb(**kwargs)
+                 if ret is not None:
++                    policy_entry = self._hook_policies.get(id(cb)) or {}
++                    manifest = policy_entry.get("plugin")
++                    policy = policy_entry.get("policy") or HOOK_POLICY_DEFAULTS.get(hook_name, OBSERVE_ONLY_HOOK_POLICY)
++                    if hook_name == "post_tool_call" and policy == OBSERVE_ONLY_HOOK_POLICY:
++                        logger.warning(
++                            "Ignoring post_tool_call return from observe-only plugin hook: "
++                            "plugin=%s hook=%s",
++                            getattr(manifest, "name", "<unknown>"),
++                            hook_name,
++                        )
++                        continue
++                    if manifest is not None and policy in {SIDE_EFFECT_CAPABLE_HOOK_POLICY, TRANSFORM_RESULT_HOOK_POLICY}:
++                        _audit_plugin_hook_alteration(manifest, hook_name, policy, cb, ret)
+                     results.append(ret)
+             except Exception as exc:
+                 logger.warning(

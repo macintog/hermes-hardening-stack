@@ -1,0 +1,24 @@
+diff --git a/tests/tools/test_modal_sandbox_fixes.py b/tests/tools/test_modal_sandbox_fixes.py
+index 9113c892d..ee4a85494 100644
+--- a/tests/tools/test_modal_sandbox_fixes.py
++++ b/tests/tools/test_modal_sandbox_fixes.py
+@@ -34,6 +34,19 @@ except ImportError:
+ class TestToolResolution:
+     """Verify get_tool_definitions returns all expected tools for eval."""
+ 
++    @pytest.fixture(autouse=True)
++    def _local_terminal_backend(self, monkeypatch):
++        monkeypatch.setenv("TERMINAL_ENV", "local")
++        for name in ("VERCEL_OIDC_TOKEN", "VERCEL_TOKEN", "VERCEL_PROJECT_ID", "VERCEL_TEAM_ID"):
++            monkeypatch.delenv(name, raising=False)
++        try:
++            from tools.registry import invalidate_check_fn_cache
++            invalidate_check_fn_cache()
++            import model_tools
++            model_tools._clear_tool_defs_cache()
++        except Exception:
++            pass
++
+     def test_terminal_and_file_toolsets_resolve_all_tools(self):
+         """enabled_toolsets=['terminal', 'file'] should produce 6 tools."""
+         from model_tools import get_tool_definitions

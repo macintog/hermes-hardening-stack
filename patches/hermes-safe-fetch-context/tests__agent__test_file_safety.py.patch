@@ -1,0 +1,40 @@
+diff --git a/tests/agent/test_file_safety.py b/tests/agent/test_file_safety.py
+index 6b6afaf97..b1a86b5c1 100644
+--- a/tests/agent/test_file_safety.py
++++ b/tests/agent/test_file_safety.py
+@@ -101,6 +101,35 @@ class TestCacheFileReadBlocking:
+             assert error is not None
+             assert "internal Hermes cache" in error
+ 
++    def test_hub_index_cache_blocked_with_string_resolver_paths(self, tmp_path):
++        """Hub cache blocking works when Hermes path helpers return strings."""
++        hermes_home = tmp_path / ".hermes"
++        hermes_root = tmp_path / "hermes-root"
++        cache = hermes_home / "skills" / ".hub" / "index-cache" / "data.json"
++        cache.parent.mkdir(parents=True)
++        cache.write_text("{}")
++
++        with patch("agent.file_safety._hermes_home_path", return_value=str(hermes_home)), \
++             patch("agent.file_safety._hermes_root_path", return_value=str(hermes_root)):
++            error = get_read_block_error(str(cache))
++            assert error is not None
++            assert "internal Hermes cache" in error
++
++    def test_hub_index_cache_blocked_with_relative_string_resolver_path(self, tmp_path, monkeypatch):
++        """Hub cache blocking works when Hermes path helpers return relative strings."""
++        monkeypatch.chdir(tmp_path)
++        hermes_home = tmp_path / ".hermes"
++        hermes_root = tmp_path / "hermes-root"
++        cache = hermes_home / "skills" / ".hub" / "index-cache" / "data.json"
++        cache.parent.mkdir(parents=True)
++        cache.write_text("{}")
++
++        with patch("agent.file_safety._hermes_home_path", return_value=".hermes"), \
++             patch("agent.file_safety._hermes_root_path", return_value=str(hermes_root)):
++            error = get_read_block_error(str(cache))
++            assert error is not None
++            assert "internal Hermes cache" in error
++
+     def test_hub_directory_blocked(self, tmp_path):
+         """Hub directory reads are blocked."""
+         hermes_home = tmp_path / ".hermes"

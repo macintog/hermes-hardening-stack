@@ -1,0 +1,14 @@
+diff --git a/tests/agent/test_memory_provider.py b/tests/agent/test_memory_provider.py
+index c516e408f..75621f423 100644
+--- a/tests/agent/test_memory_provider.py
++++ b/tests/agent/test_memory_provider.py
+@@ -405,7 +405,8 @@ class TestMemoryManager:
+         mgr.add_provider(p2)
+ 
+         result = mgr.build_system_prompt()
+-        assert result == "works fine"
++        assert "works fine" in result
++        assert "<untrusted-context " in result
+ 
+ 
+ class TestPluginMemoryDiscovery:

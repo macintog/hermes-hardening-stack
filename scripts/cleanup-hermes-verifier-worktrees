@@ -1,0 +1,144 @@
+#!/usr/bin/env python3
+"""List or remove Hermes verifier temp worktrees for this patch repo."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+
+DEFAULT_CHECKOUT = "<hermes-checkout>"
+JSON_PREFIX = "HERMES_VERIFIER_WORKTREES_JSON "
+DEFAULT_PREFIXES = ("hermes-safe-fetch-context-verify-",)
+EXTRA_PROOF_PREFIXES = (
+    "hermes-current-base-rebase-",
+    "hermes-conversation-loop-fix-",
+)
+TEMP_ROOTS = (
+    "/tmp/",
+    "/private/tmp/",
+    "/var/folders/",
+    "/private/var/folders/",
+)
+
+
+def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+
+
+def parse_worktrees(text: str) -> list[dict[str, object]]:
+    entries: list[dict[str, object]] = []
+    current: dict[str, object] | None = None
+    for raw in text.splitlines():
+        if raw.startswith("worktree "):
+            if current:
+                entries.append(current)
+            current = {"path": raw.removeprefix("worktree "), "detached": False}
+        elif current is None:
+            continue
+        elif raw.startswith("HEAD "):
+            current["head"] = raw.removeprefix("HEAD ")
+        elif raw.startswith("branch "):
+            current["branch"] = raw.removeprefix("branch ")
+        elif raw == "detached":
+            current["detached"] = True
+    if current:
+        entries.append(current)
+    return entries
+
+
+def is_temp_path(path: str) -> bool:
+    return any(path.startswith(root) for root in TEMP_ROOTS)
+
+
+def is_candidate(entry: dict[str, object], checkout: str, prefixes: tuple[str, ...]) -> bool:
+    path = str(entry.get("path", ""))
+    if not path or path == checkout:
+        return False
+    if not entry.get("detached"):
+        return False
+    if not is_temp_path(path):
+        return False
+    name = Path(path).name
+    return any(name.startswith(prefix) for prefix in prefixes)
+
+
+def load_candidates(checkout: str, include_extra_proof_prefixes: bool) -> list[dict[str, object]]:
+    prefixes = DEFAULT_PREFIXES + (EXTRA_PROOF_PREFIXES if include_extra_proof_prefixes else ())
+    result = run(["git", "-C", checkout, "worktree", "list", "--porcelain"])
+    if result.returncode != 0:
+        raise SystemExit(result.stderr or result.stdout or f"git worktree list failed for {checkout}")
+    return [
+        entry
+        for entry in parse_worktrees(result.stdout)
+        if is_candidate(entry, checkout, prefixes)
+    ]
+
+
+def emit_json(candidates: list[dict[str, object]], removed: list[str]) -> None:
+    payload: dict[str, object] = {}
+    if candidates:
+        payload["candidates"] = candidates
+    if removed:
+        payload["removed"] = removed
+    print(JSON_PREFIX + json.dumps(payload, sort_keys=True, separators=(",", ":")))
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--checkout", default=DEFAULT_CHECKOUT, help=f"Hermes checkout path. Default: {DEFAULT_CHECKOUT}")
+    parser.add_argument("--json", action="store_true", help="Emit compact machine-readable candidate data.")
+    parser.add_argument("--remove", action="store_true", help="Remove matching temp worktrees.")
+    parser.add_argument("--force", action="store_true", help="Required with --remove because applied verifier worktrees are dirty by design.")
+    parser.add_argument(
+        "--include-extra-proof-prefixes",
+        action="store_true",
+        help="Also match older ad hoc proof prefixes used by this repo's past cleanup lanes.",
+    )
+    args = parser.parse_args()
+
+    checkout = str(Path(args.checkout).resolve())
+    candidates = load_candidates(checkout, args.include_extra_proof_prefixes)
+    removed: list[str] = []
+
+    if args.remove and not args.force:
+        print("ERROR: --remove requires --force; this discards dirty applied verifier worktrees", file=sys.stderr)
+        return 2
+
+    if args.remove:
+        for entry in candidates:
+            path = str(entry["path"])
+            print(f"removing {path}")
+            result = run(["git", "-C", checkout, "worktree", "remove", "--force", path])
+            if result.returncode != 0:
+                print(result.stderr or result.stdout or f"failed to remove {path}", file=sys.stderr)
+                return result.returncode or 1
+            removed.append(path)
+        prune = run(["git", "-C", checkout, "worktree", "prune", "-v"])
+        if prune.returncode != 0:
+            print(prune.stderr or prune.stdout or "git worktree prune failed", file=sys.stderr)
+            return prune.returncode or 1
+
+    if args.json:
+        emit_json(candidates, removed)
+        return 0
+
+    if args.remove:
+        print(f"PASS: removed {len(removed)} verifier temp worktree(s)")
+        return 0
+    if candidates:
+        print("ATTENTION: verifier temp worktrees are still registered")
+        for entry in candidates:
+            print(str(entry["path"]))
+        print("Run: ./scripts/cleanup-hermes-verifier-worktrees --remove --force")
+        return 1
+
+    print("PASS: no verifier temp worktrees found")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

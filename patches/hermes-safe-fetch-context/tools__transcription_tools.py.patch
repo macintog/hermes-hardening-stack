@@ -1,0 +1,103 @@
+diff --git a/tools/transcription_tools.py b/tools/transcription_tools.py
+index 663345eb7..85102724d 100644
+--- a/tools/transcription_tools.py
++++ b/tools/transcription_tools.py
+@@ -786,6 +786,52 @@ def _transcribe_xai(file_path: str, model_name: str) -> Dict[str, Any]:
+ # ---------------------------------------------------------------------------
+ 
+ 
++def _attach_transcript_evidence_ledger(result: Dict[str, Any], *, file_path: str, model: Optional[str]) -> Dict[str, Any]:
++    """Attach compact provenance for untrusted audio-derived transcript text."""
++    if not result.get("success"):
++        return result
++    try:
++        from agent.evidence_ledgers import (
++            attach_evidence_ledger,
++            build_evidence_item,
++            build_tool_invocation,
++            file_byte_count,
++            file_sha256,
++        )
++
++        sha, status = file_sha256(file_path)
++        transcript = str(result.get("transcript") or "")
++        provider = str(result.get("provider") or "unknown")
++        return attach_evidence_ledger(
++            result,
++            tool_name="transcribe_audio",
++            evidence_items=[build_evidence_item(
++                kind="transcript_text",
++                source_type="audio_file",
++                extraction_layer=f"stt:{provider}",
++                text_ref="transcript",
++                text=None,
++                verbatim=True,
++                content_type="text/plain",
++                source_uri=file_path,
++                sha256=sha,
++                byte_count=file_byte_count(file_path),
++                char_count=len(transcript),
++                metadata={"provider": provider, "model": model, "hash_status": status},
++            )],
++            tool_invocation=build_tool_invocation(
++                name="transcribe_audio",
++                args={"path": file_path, "model": model},
++                read_only=True,
++                metadata={"provider": provider},
++            ),
++            metadata={"provider": provider},
++        )
++    except Exception as ledger_error:
++        logger.debug("Failed to attach transcription evidence ledger: %s", ledger_error)
++        return result
++
++
+ def transcribe_audio(file_path: str, model: Optional[str] = None) -> Dict[str, Any]:
+     """
+     Transcribe an audio file using the configured STT provider.
+@@ -826,33 +872,39 @@ def transcribe_audio(file_path: str, model: Optional[str] = None) -> Dict[str, A
+         model_name = _normalize_local_model(
+             model or local_cfg.get("model", DEFAULT_LOCAL_MODEL)
+         )
+-        return _transcribe_local(file_path, model_name)
++        result = _transcribe_local(file_path, model_name)
++        return _attach_transcript_evidence_ledger(result, file_path=file_path, model=model_name)
+ 
+     if provider == "local_command":
+         local_cfg = stt_config.get("local", {})
+         model_name = _normalize_local_command_model(
+             model or local_cfg.get("model", DEFAULT_LOCAL_MODEL)
+         )
+-        return _transcribe_local_command(file_path, model_name)
++        result = _transcribe_local_command(file_path, model_name)
++        return _attach_transcript_evidence_ledger(result, file_path=file_path, model=model_name)
+ 
+     if provider == "groq":
+         model_name = model or DEFAULT_GROQ_STT_MODEL
+-        return _transcribe_groq(file_path, model_name)
++        result = _transcribe_groq(file_path, model_name)
++        return _attach_transcript_evidence_ledger(result, file_path=file_path, model=model_name)
+ 
+     if provider == "openai":
+         openai_cfg = stt_config.get("openai", {})
+         model_name = model or openai_cfg.get("model", DEFAULT_STT_MODEL)
+-        return _transcribe_openai(file_path, model_name)
++        result = _transcribe_openai(file_path, model_name)
++        return _attach_transcript_evidence_ledger(result, file_path=file_path, model=model_name)
+ 
+     if provider == "mistral":
+         mistral_cfg = stt_config.get("mistral", {})
+         model_name = model or mistral_cfg.get("model", DEFAULT_MISTRAL_STT_MODEL)
+-        return _transcribe_mistral(file_path, model_name)
++        result = _transcribe_mistral(file_path, model_name)
++        return _attach_transcript_evidence_ledger(result, file_path=file_path, model=model_name)
+ 
+     if provider == "xai":
+         # xAI Grok STT doesn't use a model parameter — pass through for logging
+         model_name = model or "grok-stt"
+-        return _transcribe_xai(file_path, model_name)
++        result = _transcribe_xai(file_path, model_name)
++        return _attach_transcript_evidence_ledger(result, file_path=file_path, model=model_name)
+ 
+     # No provider available
+     return {

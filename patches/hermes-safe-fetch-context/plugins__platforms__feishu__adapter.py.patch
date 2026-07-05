@@ -1,0 +1,86 @@
+diff --git a/plugins/platforms/feishu/adapter.py b/plugins/platforms/feishu/adapter.py
+index 9b92d2d86..7380196bc 100644
+--- a/plugins/platforms/feishu/adapter.py
++++ b/plugins/platforms/feishu/adapter.py
+@@ -143,6 +143,7 @@ from gateway.platforms.base import (
+ )
+ from gateway.status import acquire_scoped_lock, release_scoped_lock
+ from hermes_constants import get_hermes_home
++from tools.safe_http import safe_download_bytes
+ from utils import atomic_json_write, env_float, env_int
+ 
+ logger = logging.getLogger(__name__)
+@@ -190,6 +191,8 @@ _FEISHU_DOC_UPLOAD_TYPES = {
+ # ---------------------------------------------------------------------------
+ 
+ _MAX_TEXT_INJECT_BYTES = 100 * 1024
++_FEISHU_REMOTE_FILE_MAX_BYTES = 32 * 1024 * 1024
++_FEISHU_SDK_RESOURCE_MAX_BYTES = 32 * 1024 * 1024
+ _FEISHU_CONNECT_ATTEMPTS = 3
+ _FEISHU_SEND_ATTEMPTS = 3
+ _FEISHU_APP_LOCK_SCOPE = "feishu-app-id"
+@@ -3335,33 +3338,25 @@ class FeishuAdapter(BasePlatformAdapter):
+         default_ext: str,
+         preferred_name: str,
+     ) -> tuple[str, str]:
+-        from tools.url_safety import is_safe_url
+-        if not is_safe_url(file_url):
+-            raise ValueError(f"Blocked unsafe URL (SSRF protection): {file_url[:80]}")
+-
+-        import httpx
+-
+-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+-            response = await client.get(
+-                file_url,
+-                headers={
+-                    "User-Agent": "Mozilla/5.0 (compatible; HermesAgent/1.0)",
+-                    "Accept": "*/*",
+-                },
+-            )
+-            response.raise_for_status()
+-            # Snapshot Content-Type and body while the client context is
+-            # still active so pooled connections fully release on exit.
+-            # See #18451.
+-            content_type_hdr = str(response.headers.get("Content-Type", ""))
+-            body = response.content
++        result = await safe_download_bytes(
++            file_url,
++            max_bytes=_FEISHU_REMOTE_FILE_MAX_BYTES,
++            source_type="gateway:feishu-remote-document",
++            policy={"redirect_credentials": "no-credentials"},
++            headers={
++                "User-Agent": "Mozilla/5.0 (compatible; HermesAgent/1.0)",
++                "Accept": "*/*",
++            },
++            timeout=30.0,
++            allowed_content_types=tuple(SUPPORTED_DOCUMENT_TYPES.values()),
++        )
+         filename = self._derive_remote_filename(
+             file_url,
+-            content_type=content_type_hdr,
++            content_type=result.content_type,
+             default_name=preferred_name,
+             default_ext=default_ext,
+         )
+-        cached_path = cache_document_from_bytes(body, filename)
++        cached_path = cache_document_from_bytes(result.content, filename)
+         return cached_path, filename
+ 
+     @staticmethod
+@@ -3890,8 +3885,14 @@ class FeishuAdapter(BasePlatformAdapter):
+         if file_obj is None:
+             return b""
+         if hasattr(file_obj, "getvalue"):
+-            return bytes(file_obj.getvalue())
+-        return bytes(file_obj.read())
++            data = bytes(file_obj.getvalue())
++        else:
++            data = bytes(file_obj.read())
++        if len(data) > _FEISHU_SDK_RESOURCE_MAX_BYTES:
++            raise ValueError(
++                f"Feishu SDK resource too large: {len(data)} bytes exceeds {_FEISHU_SDK_RESOURCE_MAX_BYTES}"
++            )
++        return data
+ 
+     @staticmethod
+     def _get_response_header(response: Any, name: str) -> str:

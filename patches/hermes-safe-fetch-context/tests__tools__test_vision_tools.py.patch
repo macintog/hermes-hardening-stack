@@ -1,0 +1,193 @@
+diff --git a/tests/tools/test_vision_tools.py b/tests/tools/test_vision_tools.py
+index 7a50a4b46..cd00ca4e2 100644
+--- a/tests/tools/test_vision_tools.py
++++ b/tests/tools/test_vision_tools.py
+@@ -1,5 +1,6 @@
+ """Tests for tools/vision_tools.py — URL validation, type hints, error logging."""
+ 
++import asyncio
+ import json
+ import logging
+ import os
+@@ -20,6 +21,7 @@ from tools.vision_tools import (
+     _RESIZE_TARGET_BYTES,
+     vision_analyze_tool,
+     check_vision_requirements,
++    _download_image,
+ )
+ 
+ 
+@@ -164,6 +166,68 @@ class TestImageToBase64DataUrl:
+             _image_to_base64_data_url(tmp_path / "nonexistent.png")
+ 
+ 
++def test_download_image_uses_safe_download_to_file(tmp_path, monkeypatch):
++    source = tmp_path / "downloaded-safe-http.png"
++    source.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
++    destination = tmp_path / "image.png"
++    calls = []
++
++    class Result:
++        final_url = "https://example.com/image.png"
++
++    async def fake_safe_download_to_file(url, **kwargs):
++        calls.append((url, kwargs))
++        return str(source), Result()
++
++    monkeypatch.setattr("tools.vision_tools.safe_download_to_file", fake_safe_download_to_file)
++    monkeypatch.setattr("tools.vision_tools.check_website_access", lambda _url: None)
++
++    result = asyncio.run(_download_image("https://example.com/image.png", destination, max_retries=1))
++
++    assert result == destination
++    assert destination.read_bytes().startswith(b"\x89PNG")
++    assert calls[0][1]["max_bytes"] == 50 * 1024 * 1024
++    assert calls[0][1]["source_type"] == "vision_image"
++    assert "image/png" in calls[0][1]["allowed_content_types"]
++    assert "image/svg+xml" not in calls[0][1]["allowed_content_types"]
++
++
++def test_vision_analyze_result_includes_native_evidence_ledger(tmp_path, monkeypatch):
++    img = tmp_path / "fixture.png"
++    img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
++
++    class _Response:
++        choices = [MagicMock(message=MagicMock(content="A harmless image."))]
++
++    async def _fake_call_llm(**kwargs):
++        return _Response()
++
++    monkeypatch.setattr("tools.vision_tools.async_call_llm", _fake_call_llm)
++    monkeypatch.setattr("tools.interrupt.is_interrupted", lambda: False)
++
++    result = json.loads(asyncio.run(vision_analyze_tool(str(img), "What is this?")))
++
++    assert result["success"] is True
++    assert result["analysis"] == "A harmless image."
++    ledger = result["evidence_ledger"]
++    assert ledger["schema"] == "hermes.tool_result_ledger.v1"
++    assert ledger["ledger_origin"] == "native_tool"
++    assert ledger["tool_name"] == "vision_analyze"
++    assert ledger["read_only"] is True
++    item = ledger["evidence_items"][0]
++    assert item["kind"] == "vision_observation"
++    assert item["text_ref"] == "analysis"
++    assert item["text"] is None
++    assert item["evidence_only"] is True
++    assert item["verbatim"] is False
++    assert item["source_type"] == "local_image"
++    assert item["content_type"] == "image/png"
++    assert item["byte_count"] == img.stat().st_size
++    assert ledger["side_effects"] == []
++    assert ledger["action_decisions"] == []
++    assert ledger["metadata"]["ledgers_exposed"] is True
++
++
+ # ---------------------------------------------------------------------------
+ # _handle_vision_analyze — type signature & behavior
+ # ---------------------------------------------------------------------------
+@@ -270,13 +334,10 @@ class TestErrorLoggingExcInfo:
+         """After max retries, the download error should include exc_info."""
+         from tools.vision_tools import _download_image
+ 
+-        with patch("tools.vision_tools.httpx.AsyncClient") as mock_client_cls:
+-            mock_client = AsyncMock()
+-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+-            mock_client.__aexit__ = AsyncMock(return_value=False)
+-            mock_client.get = AsyncMock(side_effect=ConnectionError("network down"))
+-            mock_client_cls.return_value = mock_client
++        async def fake_safe_download_to_file(*args, **kwargs):
++            raise ConnectionError("network down")
+ 
++        with patch("tools.vision_tools.safe_download_to_file", side_effect=fake_safe_download_to_file):
+             dest = tmp_path / "image.jpg"
+             with (
+                 caplog.at_level(logging.ERROR, logger="tools.vision_tools"),
+@@ -474,28 +535,24 @@ class TestVisionSafetyGuards:
+                 }
+             raise AssertionError(f"unexpected URL checked: {url}")
+ 
+-        class FakeResponse:
+-            url = "https://blocked.test/final.png"
+-            headers = {"content-length": "24"}
+-            content = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
++        source = tmp_path / "safe-http-download.png"
++        source.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
+ 
+-            def raise_for_status(self):
+-                return None
++        class Result:
++            final_url = "https://blocked.test/final.png"
++
++        async def fake_safe_download_to_file(*args, **kwargs):
++            return str(source), Result()
+ 
+         with (
+             patch("tools.vision_tools.check_website_access", side_effect=fake_check),
+-            patch("tools.vision_tools.httpx.AsyncClient") as mock_client_cls,
++            patch("tools.vision_tools.safe_download_to_file", side_effect=fake_safe_download_to_file),
+             pytest.raises(PermissionError, match="Blocked by website policy"),
+         ):
+-            mock_client = AsyncMock()
+-            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+-            mock_client.__aexit__ = AsyncMock(return_value=False)
+-            mock_client.get = AsyncMock(return_value=FakeResponse())
+-            mock_client_cls.return_value = mock_client
+-
+             await _download_image("https://allowed.test/cat.png", tmp_path / "cat.png", max_retries=1)
+ 
+         assert not (tmp_path / "cat.png").exists()
++        assert not source.exists()
+ 
+ 
+ # ---------------------------------------------------------------------------
+@@ -965,9 +1022,14 @@ class TestDownloadRetryClassification:
+         import httpx
+         from tools.vision_tools import _download_image
+ 
+-        mock_client = self._make_client_raising_status(404)
++        attempts = []
++
++        async def fake_safe_download_to_file(url, **kwargs):
++            attempts.append((url, kwargs))
++            raise self._status_error(404)
++
+         with (
+-            patch("tools.vision_tools.httpx.AsyncClient", return_value=mock_client),
++            patch("tools.vision_tools.safe_download_to_file", side_effect=fake_safe_download_to_file),
+             patch("tools.vision_tools.check_website_access", return_value=None),
+             patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+             pytest.raises(httpx.HTTPStatusError),
+@@ -976,7 +1038,7 @@ class TestDownloadRetryClassification:
+                 "https://example.com/missing.jpg", tmp_path / "x.jpg", max_retries=3
+             )
+         # Exactly one attempt, zero backoff sleeps.
+-        assert mock_client.get.await_count == 1
++        assert len(attempts) == 1
+         mock_sleep.assert_not_called()
+ 
+     @pytest.mark.asyncio
+@@ -985,9 +1047,14 @@ class TestDownloadRetryClassification:
+         import httpx
+         from tools.vision_tools import _download_image
+ 
+-        mock_client = self._make_client_raising_status(503)
++        attempts = []
++
++        async def fake_safe_download_to_file(url, **kwargs):
++            attempts.append((url, kwargs))
++            raise self._status_error(503)
++
+         with (
+-            patch("tools.vision_tools.httpx.AsyncClient", return_value=mock_client),
++            patch("tools.vision_tools.safe_download_to_file", side_effect=fake_safe_download_to_file),
+             patch("tools.vision_tools.check_website_access", return_value=None),
+             patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+             pytest.raises(httpx.HTTPStatusError),
+@@ -996,5 +1063,5 @@ class TestDownloadRetryClassification:
+                 "https://example.com/flaky.jpg", tmp_path / "y.jpg", max_retries=3
+             )
+         # All three attempts used, two backoff sleeps between them.
+-        assert mock_client.get.await_count == 3
++        assert len(attempts) == 3
+         assert mock_sleep.await_count == 2

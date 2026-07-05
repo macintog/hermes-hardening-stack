@@ -1,0 +1,847 @@
+diff --git a/gateway/platforms/base.py b/gateway/platforms/base.py
+index 1025964dc..22be3cc71 100644
+--- a/gateway/platforms/base.py
++++ b/gateway/platforms/base.py
+@@ -566,6 +566,50 @@ async def _ssrf_redirect_guard(response):
+ # Import-time default. Tests monkeypatch this; the get_*_cache_dir() getters
+ # re-resolve per call so the active profile override is honored.
+ IMAGE_CACHE_DIR = get_hermes_dir("cache/images", "image_cache")
++MEDIA_CACHE_MAX_BYTES = 25 * 1024 * 1024
++TRUSTED_MEDIA_ARTIFACT_MARKER = "[[hermes_trusted_media_artifact_v1]]"
++
++def _media_cache_retry_count(retries: int) -> int:
++    try:
++        return max(0, int(retries))
++    except (TypeError, ValueError):
++        return 0
++
++
++def _is_transient_media_cache_error(exc: Exception) -> bool:
++    text = str(exc)
++    return (
++        "ReadTimeout" in text
++        or "ConnectTimeout" in text
++        or "PoolTimeout" in text
++        or "TimeoutException" in text
++        or re.search(r"HTTP status (429|5\d\d)\b", text) is not None
++    )
++
++
++async def _safe_download_media_with_retries(url: str, *, retries: int, cache_label: str, **kwargs):
++    from tools.safe_http import SafeHTTPError, safe_download_bytes
++
++    retry_count = _media_cache_retry_count(retries)
++    attempts = retry_count + 1
++    _log = logging.getLogger(__name__)
++    for attempt in range(attempts):
++        try:
++            return await safe_download_bytes(url, **kwargs)
++        except SafeHTTPError as exc:
++            if attempt >= retry_count or not _is_transient_media_cache_error(exc):
++                raise
++            wait = min(1.5 * (attempt + 1), 5.0)
++            _log.debug(
++                "%s cache retry %d/%d for %s (%.1fs): %s",
++                cache_label,
++                attempt + 1,
++                retry_count,
++                safe_url_for_log(url),
++                wait,
++                exc,
++            )
++            await asyncio.sleep(wait)
+ 
+ 
+ def _resolve_cache_dir(constant_name: str, new_subpath: str, old_name: str) -> Path:
+@@ -740,49 +785,18 @@ async def cache_image_from_url(url: str, ext: str = ".jpg", retries: int = 2) ->
+     Raises:
+         ValueError: If the URL targets a private/internal network (SSRF protection).
+     """
+-    from tools.url_safety import is_safe_url
+-    if not is_safe_url(url):
+-        raise ValueError(f"Blocked unsafe URL (SSRF protection): {safe_url_for_log(url)}")
+-
+-    import httpx
+-    _log = logging.getLogger(__name__)
+-
+-    async with httpx.AsyncClient(
++    result = await _safe_download_media_with_retries(
++        url,
++        retries=retries,
++        cache_label="Media",
++        max_bytes=10 * 1024 * 1024,
++        source_type="gateway:image-cache",
++        policy={"redirect_credentials": "no-credentials"},
++        headers={"User-Agent": "HermesAgent/1.0", "Accept": "image/*,*/*;q=0.8"},
+         timeout=30.0,
+-        follow_redirects=True,
+-        event_hooks={"response": [_ssrf_redirect_guard]},
+-    ) as client:
+-        for attempt in range(retries + 1):
+-            try:
+-                async with client.stream(
+-                    "GET",
+-                    url,
+-                    headers={
+-                        "User-Agent": "Mozilla/5.0 (compatible; HermesAgent/1.0)",
+-                        "Accept": "image/*,*/*;q=0.8",
+-                    },
+-                ) as response:
+-                    response.raise_for_status()
+-                    content = await _read_httpx_body_with_limit(
+-                        response, media_type="image",
+-                    )
+-                return cache_image_from_bytes(content, ext)
+-            except (httpx.TimeoutException, httpx.HTTPStatusError) as exc:
+-                if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code < 429:
+-                    raise
+-                if attempt < retries:
+-                    wait = 1.5 * (attempt + 1)
+-                    _log.debug(
+-                        "Media cache retry %d/%d for %s (%.1fs): %s",
+-                        attempt + 1,
+-                        retries,
+-                        safe_url_for_log(url),
+-                        wait,
+-                        exc,
+-                    )
+-                    await asyncio.sleep(wait)
+-                    continue
+-                raise
++        allowed_content_types=("image/png", "image/jpeg", "image/gif", "image/webp", "image/heic", "image/heif"),
++    )
++    return cache_image_from_bytes(result.content, ext)
+ 
+ 
+ def cleanup_image_cache(max_age_hours: int = 24) -> int:
+@@ -860,49 +874,18 @@ async def cache_audio_from_url(url: str, ext: str = ".ogg", retries: int = 2) ->
+     Raises:
+         ValueError: If the URL targets a private/internal network (SSRF protection).
+     """
+-    from tools.url_safety import is_safe_url
+-    if not is_safe_url(url):
+-        raise ValueError(f"Blocked unsafe URL (SSRF protection): {safe_url_for_log(url)}")
+-
+-    import httpx
+-    _log = logging.getLogger(__name__)
+-
+-    async with httpx.AsyncClient(
++    result = await _safe_download_media_with_retries(
++        url,
++        retries=retries,
++        cache_label="Audio",
++        max_bytes=MEDIA_CACHE_MAX_BYTES,
++        source_type="gateway:audio-cache",
++        policy={"redirect_credentials": "no-credentials"},
++        headers={"User-Agent": "HermesAgent/1.0", "Accept": "audio/*,*/*;q=0.8"},
+         timeout=30.0,
+-        follow_redirects=True,
+-        event_hooks={"response": [_ssrf_redirect_guard]},
+-    ) as client:
+-        for attempt in range(retries + 1):
+-            try:
+-                async with client.stream(
+-                    "GET",
+-                    url,
+-                    headers={
+-                        "User-Agent": "Mozilla/5.0 (compatible; HermesAgent/1.0)",
+-                        "Accept": "audio/*,*/*;q=0.8",
+-                    },
+-                ) as response:
+-                    response.raise_for_status()
+-                    content = await _read_httpx_body_with_limit(
+-                        response, media_type="audio",
+-                    )
+-                return cache_audio_from_bytes(content, ext)
+-            except (httpx.TimeoutException, httpx.HTTPStatusError) as exc:
+-                if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code < 429:
+-                    raise
+-                if attempt < retries:
+-                    wait = 1.5 * (attempt + 1)
+-                    _log.debug(
+-                        "Audio cache retry %d/%d for %s (%.1fs): %s",
+-                        attempt + 1,
+-                        retries,
+-                        safe_url_for_log(url),
+-                        wait,
+-                        exc,
+-                    )
+-                    await asyncio.sleep(wait)
+-                    continue
+-                raise
++        allowed_content_types=("audio/ogg", "audio/mpeg", "audio/mp3", "audio/wav", "audio/webm", "audio/mp4", "audio/aac"),
++    )
++    return cache_audio_from_bytes(result.content, ext)
+ 
+ 
+ # ---------------------------------------------------------------------------
+@@ -1716,16 +1699,16 @@ class ProcessingOutcome(Enum):
+ class MessageEvent:
+     """
+     Incoming message from a platform.
+-    
++
+     Normalized representation that all adapters produce.
+     """
+     # Message content
+     text: str
+     message_type: MessageType = MessageType.TEXT
+-    
++
+     # Source information
+     source: SessionSource = None
+-    
++
+     # Original platform data
+     raw_message: Any = None
+     message_id: Optional[str] = None
+@@ -1738,19 +1721,19 @@ class MessageEvent:
+     # ("Error while calling `get_updates` one more time to mark all fetched
+     # updates" in gateway.log).
+     platform_update_id: Optional[int] = None
+-    
++
+     # Media attachments
+     # media_urls: local file paths (for vision tool access)
+     media_urls: List[str] = field(default_factory=list)
+     media_types: List[str] = field(default_factory=list)
+-    
++
+     # Reply context
+     reply_to_message_id: Optional[str] = None
+     reply_to_text: Optional[str] = None  # Text of the replied-to message (for context injection)
+     reply_to_author_id: Optional[str] = None
+     reply_to_author_name: Optional[str] = None
+     reply_to_is_own_message: bool = False  # True when the user replied to this bot/assistant's message
+-    
++
+     # Auto-loaded skill(s) for topic/channel bindings (e.g., Telegram DM Topics,
+     # Discord channel_skill_bindings).  A single name or ordered list.
+     auto_skill: Optional[str | list[str]] = None
+@@ -1764,7 +1747,7 @@ class MessageEvent:
+     # from ``text`` so the sender-prefix logic in run.py can operate on the
+     # trigger message alone, then prepend this context afterward.
+     channel_context: Optional[str] = None
+-    
++
+     # Internal flag — set for synthetic events (e.g. background process
+     # completion notifications) that must bypass user authorization checks.
+     internal: bool = False
+@@ -1778,11 +1761,11 @@ class MessageEvent:
+ 
+     # Timestamps
+     timestamp: datetime = field(default_factory=datetime.now)
+-    
++
+     def is_command(self) -> bool:
+         """Check if this is a command message (e.g., /new, /reset)."""
+         return self.text.startswith("/")
+-    
++
+     def get_command(self) -> Optional[str]:
+         """Extract command name if this is a command message."""
+         if not self.is_command():
+@@ -1796,7 +1779,7 @@ class MessageEvent:
+         if raw and "/" in raw:
+             return None
+         return raw
+-    
++
+     def get_command_args(self) -> str:
+         """Get the arguments after a command."""
+         if not self.is_command():
+@@ -2253,7 +2236,7 @@ def _strip_media_directives(text: str) -> str:
+ class BasePlatformAdapter(ABC):
+     """
+     Base class for platform adapters.
+-    
++
+     Subclasses implement platform-specific logic for:
+     - Connecting and authenticating
+     - Receiving messages
+@@ -2335,7 +2257,7 @@ class BasePlatformAdapter(ABC):
+         self._fatal_error_message: Optional[str] = None
+         self._fatal_error_retryable = True
+         self._fatal_error_handler: Optional[Callable[["BasePlatformAdapter"], Awaitable[None] | None]] = None
+-        
++
+         # Track active message handlers per session for interrupt support.
+         # _active_sessions stores the per-session interrupt Event; _session_tasks
+         # maps session → the specific Task currently processing it so that
+@@ -2468,6 +2390,44 @@ class BasePlatformAdapter(ABC):
+         """
+         return False
+ 
++    def set_authorization_check(
++        self,
++        callback: Optional[Callable[[str, Optional[str], Optional[str]], bool]],
++    ) -> None:
++        """Register a platform-bound authorization check.
++
++        The callback signature is ``(user_id, chat_type, chat_id) -> bool``.
++        It is used by adapters that pull external context (e.g. Slack thread
++        replies via ``conversations.replies``) to flag messages from senders
++        that are not on the configured allowlist, so the LLM can treat them
++        as unverified background reference rather than authoritative input.
++        """
++        self._authorization_check = callback
++
++    def _is_sender_authorized(
++        self,
++        user_id: Optional[str],
++        chat_type: Optional[str] = None,
++        chat_id: Optional[str] = None,
++    ) -> Optional[bool]:
++        """Return whether ``user_id`` is on the allowlist, if a check is configured.
++
++        Returns ``True``/``False`` when an authorization check has been
++        registered via :meth:`set_authorization_check`. Returns ``None``
++        when no check is registered (caller should treat as "trust unknown"
++        and preserve legacy behaviour).
++        """
++        if not user_id or self._authorization_check is None:
++            return None
++        try:
++            return bool(self._authorization_check(user_id, chat_type, chat_id))
++        except Exception:
++            logger.warning(
++                "[%s] Authorization check raised for user %s; treating as unknown",
++                self.name, user_id, exc_info=True,
++            )
++            return None
++
+     def supports_draft_streaming(
+         self,
+         chat_type: Optional[str] = None,
+@@ -2759,16 +2719,16 @@ class BasePlatformAdapter(ABC):
+     def name(self) -> str:
+         """Human-readable name for this adapter."""
+         return self.platform.value.title()
+-    
++
+     @property
+     def is_connected(self) -> bool:
+         """Check if adapter is currently connected."""
+         return self._running
+-    
++
+     def set_message_handler(self, handler: MessageHandler) -> None:
+         """
+         Set the handler for incoming messages.
+-        
++
+         The handler receives a MessageEvent and should return
+         an optional response string.
+         """
+@@ -2812,79 +2772,30 @@ class BasePlatformAdapter(ABC):
+         """Set an optional handler for messages arriving during active sessions."""
+         self._busy_session_handler = handler
+ 
+-    def set_authorization_check(
+-        self,
+-        callback: Optional[Callable[[str, Optional[str], Optional[str]], bool]],
+-    ) -> None:
+-        """Register a platform-bound authorization check.
+-
+-        The callback signature is ``(user_id, chat_type, chat_id) -> bool``.
+-        It is used by adapters that pull external context (e.g. Slack thread
+-        replies via ``conversations.replies``) to flag messages from senders
+-        that are not on the configured allowlist, so the LLM can treat them
+-        as unverified background reference rather than authoritative input.
+-        """
+-        self._authorization_check = callback
+-
+-    def _is_sender_authorized(
+-        self,
+-        user_id: Optional[str],
+-        chat_type: Optional[str] = None,
+-        chat_id: Optional[str] = None,
+-    ) -> Optional[bool]:
+-        """Return whether ``user_id`` is on the allowlist, if a check is configured.
+-
+-        Returns ``True``/``False`` when an authorization check has been
+-        registered via :meth:`set_authorization_check`. Returns ``None``
+-        when no check is registered (caller should treat as "trust unknown"
+-        and preserve legacy behaviour).
+-        """
+-        if not user_id or self._authorization_check is None:
+-            return None
+-        try:
+-            return bool(self._authorization_check(user_id, chat_type, chat_id))
+-        except Exception:
+-            logger.warning(
+-                "[%s] Authorization check raised for user %s; treating as unknown",
+-                self.name, user_id, exc_info=True,
+-            )
+-            return None
+-    
+     def set_session_store(self, session_store: Any) -> None:
+         """
+         Set the session store for checking active sessions.
+-        
++
+         Used by adapters that need to check if a thread/conversation
+         has an active session before processing messages (e.g., Slack
+         thread replies without explicit mentions).
+         """
+         self._session_store = session_store
+-    
++
+     @abstractmethod
+     async def connect(self, *, is_reconnect: bool = False) -> bool:
+         """
+         Connect to the platform and start receiving messages.
+ 
+-        Args:
+-            is_reconnect: False on a cold first boot (the gateway is
+-                starting this platform for the first time); True when the
+-                reconnect watcher is re-establishing a platform that was
+-                previously running and dropped after an outage. Adapters
+-                that buffer a server-side update queue (e.g. Telegram's Bot
+-                API) should preserve that queue when ``is_reconnect`` is
+-                True so messages sent during the outage are delivered rather
+-                than silently discarded. Adapters with no such queue may
+-                ignore the flag.
+-
+         Returns True if connection was successful.
+         """
+         pass
+-    
++
+     @abstractmethod
+     async def disconnect(self) -> None:
+         """Disconnect from the platform."""
+         pass
+-    
++
+     @abstractmethod
+     async def send(
+         self,
+@@ -2895,13 +2806,13 @@ class BasePlatformAdapter(ABC):
+     ) -> SendResult:
+         """
+         Send a message to a chat.
+-        
++
+         Args:
+             chat_id: The chat/channel ID to send to
+             content: Message content (may be markdown)
+             reply_to: Optional message ID to reply to
+             metadata: Additional platform-specific options
+-        
++
+         Returns:
+             SendResult with success status and message ID
+         """
+@@ -3165,7 +3076,7 @@ class BasePlatformAdapter(ABC):
+     async def send_typing(self, chat_id: str, metadata=None) -> None:
+         """
+         Send a typing indicator.
+-        
++
+         Override in subclasses if the platform supports it.
+         metadata: optional dict with platform-specific context (e.g. thread_id for Slack).
+         """
+@@ -3246,7 +3157,7 @@ class BasePlatformAdapter(ABC):
+     ) -> SendResult:
+         """
+         Send an image natively via the platform API.
+-        
++
+         Override in subclasses to send images as proper attachments
+         instead of plain-text URLs. Default falls back to sending the
+         URL as a text message.
+@@ -3254,7 +3165,7 @@ class BasePlatformAdapter(ABC):
+         # Fallback: send URL as text (subclasses override for native images)
+         text = f"{caption}\n{image_url}" if caption else image_url
+         return await self.send(chat_id=chat_id, content=text, reply_to=reply_to, metadata=metadata)
+-    
++
+     async def send_animation(
+         self,
+         chat_id: str,
+@@ -3265,13 +3176,13 @@ class BasePlatformAdapter(ABC):
+     ) -> SendResult:
+         """
+         Send an animated GIF natively via the platform API.
+-        
++
+         Override in subclasses to send GIFs as proper animations
+         (e.g., Telegram send_animation) so they auto-play inline.
+         Default falls back to send_image.
+         """
+         return await self.send_image(chat_id=chat_id, image_url=animation_url, caption=caption, reply_to=reply_to, metadata=metadata)
+-    
++
+     @staticmethod
+     def _is_animation_url(url: str) -> bool:
+         """Check if a URL points to an animated GIF (vs a static image)."""
+@@ -3282,21 +3193,21 @@ class BasePlatformAdapter(ABC):
+     def extract_images(content: str) -> Tuple[List[Tuple[str, str]], str]:
+         """
+         Extract image URLs from markdown and HTML image tags in a response.
+-        
++
+         Finds patterns like:
+         - ![alt text](https://example.com/image.png)
+         - <img src="https://example.com/image.png">
+         - <img src="https://example.com/image.png"></img>
+-        
++
+         Args:
+             content: The response text to scan.
+-        
++
+         Returns:
+             Tuple of (list of (url, alt_text) pairs, cleaned content with image tags removed).
+         """
+         images = []
+         cleaned = content
+-        
++
+         # Match markdown images: ![alt](url)
+         md_pattern = r'!\[([^\]]*)\]\((https?://[^\s\)]+)\)'
+         for match in re.finditer(md_pattern, content):
+@@ -3306,13 +3217,13 @@ class BasePlatformAdapter(ABC):
+             if any(url.lower().endswith(ext) or ext in url.lower() for ext in
+                    ['.png', '.jpg', '.jpeg', '.gif', '.webp', 'fal.media', 'fal-cdn', 'replicate.delivery']):
+                 images.append((url, alt_text))
+-        
++
+         # Match HTML img tags: <img src="url"> or <img src="url"></img> or <img src="url"/>
+         html_pattern = r'<img\s+src=["\']?(https?://[^\s"\'<>]+)["\']?\s*/?>\s*(?:</img>)?'
+         for match in re.finditer(html_pattern, content):
+             url = match.group(1)
+             images.append((url, ""))
+-        
++
+         # Remove only the matched image tags from content (not all markdown images)
+         if images:
+             extracted_urls = {url for url, _ in images}
+@@ -3323,9 +3234,9 @@ class BasePlatformAdapter(ABC):
+             cleaned = re.sub(html_pattern, _remove_if_extracted, cleaned)
+             # Clean up leftover blank lines
+             cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
+-        
++
+         return images, cleaned
+-    
++
+     async def send_voice(
+         self,
+         chat_id: str,
+@@ -3579,7 +3490,23 @@ class BasePlatformAdapter(ABC):
+         return ''.join(chars)
+ 
+     @staticmethod
+-    def extract_media(content: str) -> Tuple[List[Tuple[str, bool]], str]:
++    def has_trusted_media_artifact_marker(content: str) -> bool:
++        return TRUSTED_MEDIA_ARTIFACT_MARKER in (content or "")
++
++    @staticmethod
++    def mark_trusted_media_artifact_response(content: str) -> str:
++        if not content:
++            return TRUSTED_MEDIA_ARTIFACT_MARKER
++        if TRUSTED_MEDIA_ARTIFACT_MARKER in content:
++            return content
++        return f"{TRUSTED_MEDIA_ARTIFACT_MARKER}\n{content}"
++
++    @staticmethod
++    def extract_media(
++        content: str,
++        *,
++        require_trusted_marker: bool = False,
++    ) -> Tuple[List[Tuple[str, bool]], str]:
+         """
+         Extract MEDIA:<path> tags and [[audio_as_voice]] directives from response text.
+ 
+@@ -3606,6 +3533,8 @@ class BasePlatformAdapter(ABC):
+         """
+         media = []
+         cleaned = content
++        has_trusted_marker = BasePlatformAdapter.has_trusted_media_artifact_marker(content)
++        cleaned = cleaned.replace(TRUSTED_MEDIA_ARTIFACT_MARKER, "")
+ 
+         # Check for [[audio_as_voice]] directive
+         has_voice_tag = "[[audio_as_voice]]" in content
+@@ -3614,65 +3543,59 @@ class BasePlatformAdapter(ABC):
+         # ``content`` for it (so they can still react to it); here we just
+         # keep it out of the user-visible cleaned text.
+         cleaned = cleaned.replace("[[as_document]]", "")
+-        
++
+         # Extract MEDIA:<path> tags, allowing optional whitespace after the colon
+         # and quoted/backticked paths for LLM-formatted outputs. The extension
+         # set is the shared MEDIA_DELIVERY_EXTS source of truth (built once into
+         # MEDIA_TAG_CLEANUP_RE) so it can never drift from extract_local_files.
+         media_pattern = MEDIA_TAG_CLEANUP_RE
+-        # Mask example/stored MEDIA: paths before scanning so they are never
+-        # delivered as real attachments:
+-        #  - code blocks / inline code / blockquotes hold prose examples (#35695)
+-        #  - serialized JSON string values hold stored tool-result text (#34375)
+-        # Both maskers are offset-preserving (chars -> spaces) so match offsets
+-        # stay valid; chaining them masks the union of both protected regions.
+-        scan_content = BasePlatformAdapter._mask_protected_spans(content)
+-        scan_content = BasePlatformAdapter._mask_json_string_media(scan_content)
+-        for match in media_pattern.finditer(scan_content):
+-            path = _normalize_media_tag_path(match.group("path"))
+-            if path:
+-                try:
+-                    media.append((os.path.expanduser(path), has_voice_tag))
+-                except (OSError, RuntimeError, ValueError):
+-                    # Skip a crafted ~\x00 path rather than aborting extraction
+-                    # and dropping every other attachment in the response.
+-                    continue
++        scan_content = BasePlatformAdapter._mask_protected_spans(content)
++        scan_content = BasePlatformAdapter._mask_json_string_media(scan_content)
++        if not require_trusted_marker or has_trusted_marker:
++            for match in media_pattern.finditer(scan_content):
++                path = _normalize_media_tag_path(match.group("path"))
++                if path:
++                    try:
++                        media.append((os.path.expanduser(path), has_voice_tag))
++                    except (OSError, RuntimeError, ValueError):
++                        # Skip a crafted ~\x00 path rather than aborting extraction
++                        # and dropping every other attachment in the response.
++                        continue
+ 
+-        seen_paths = {p for p, _ in media}
+-        for match in MEDIA_EXTENSIONLESS_TAG_RE.finditer(scan_content):
+-            path = _normalize_media_tag_path(match.group("path"))
+-            if not path or not _path_lacks_deliverable_extension(path):
+-                continue
+-            safe = validate_media_delivery_path(path)
+-            if safe and safe not in seen_paths:
+-                media.append((safe, has_voice_tag))
+-                seen_paths.add(safe)
++        seen_paths = {p for p, _ in media}
++        if not require_trusted_marker or has_trusted_marker:
++            for match in MEDIA_EXTENSIONLESS_TAG_RE.finditer(scan_content):
++                path = _normalize_media_tag_path(match.group("path"))
++                if not path or not _path_lacks_deliverable_extension(path):
++                    continue
++                safe = validate_media_delivery_path(path)
++                if safe and safe not in seen_paths:
++                    media.append((safe, has_voice_tag))
++                    seen_paths.add(safe)
+ 
+-        # Remove the delivered MEDIA tags from the user-visible text. Mask a
+-        # length-equal copy of ``cleaned`` (same union of protected regions) to
+-        # *locate* the real tag spans, then delete exactly those spans from the
+-        # *unmasked* ``cleaned``. Masking is only a locator — protected spans
+-        # (code blocks, quotes, JSON-embedded MEDIA: text) must survive verbatim
+-        # in the delivered text, not be blanked to whitespace. Masking
+-        # ``cleaned`` (not ``content``) keeps offsets valid after the
+-        # [[audio_as_voice]] / [[as_document]] directives are removed.
+-        if media:
+-            masked_cleaned = BasePlatformAdapter._mask_protected_spans(cleaned)
+-            masked_cleaned = BasePlatformAdapter._mask_json_string_media(masked_cleaned)
+-            spans = [m.span() for m in media_pattern.finditer(masked_cleaned)]
+-            for match in MEDIA_EXTENSIONLESS_TAG_RE.finditer(masked_cleaned):
+-                path = _normalize_media_tag_path(match.group("path"))
+-                if not path or not _path_lacks_deliverable_extension(path):
+-                    continue
+-                if validate_media_delivery_path(path):
+-                    spans.append(match.span())
+-            if spans:
+-                chars = list(cleaned)
+-                for start, end in sorted(spans, reverse=True):
+-                    del chars[start:end]
+-                cleaned = "".join(chars)
+-                cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
++        # Remove the delivered MEDIA tags from the user-visible text. Mask a
++        # length-equal copy of ``cleaned`` (same union of protected regions) to
++        # *locate* the real tag spans, then delete exactly those spans from the
++        # *unmasked* ``cleaned``. When delivery requires a trusted marker, strip
++        # unprotected MEDIA tags even without delivery authority, but leave
++        # examples inside code spans, blockquotes, and serialized JSON intact.
++        if media or (require_trusted_marker and "MEDIA:" in content):
++            masked_cleaned = BasePlatformAdapter._mask_protected_spans(cleaned)
++            masked_cleaned = BasePlatformAdapter._mask_json_string_media(masked_cleaned)
++            spans = [m.span() for m in media_pattern.finditer(masked_cleaned)]
++            if media:
++                for match in MEDIA_EXTENSIONLESS_TAG_RE.finditer(masked_cleaned):
++                    path = _normalize_media_tag_path(match.group("path"))
++                    if not path or not _path_lacks_deliverable_extension(path):
++                        continue
++                    if validate_media_delivery_path(path):
++                        spans.append(match.span())
++            if spans:
++                chars = list(cleaned)
++                for start, end in sorted(spans, reverse=True):
++                    del chars[start:end]
++                cleaned = "".join(chars)
++                cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
+-        
+         return media, cleaned
+ 
+     @staticmethod
+@@ -3788,10 +3683,10 @@ class BasePlatformAdapter(ABC):
+     ) -> None:
+         """
+         Continuously send typing indicator until cancelled.
+-        
++
+         Telegram/Discord typing status expires after ~5 seconds, so we refresh every 2
+         to recover quickly after progress messages interrupt it.
+-        
++
+         Skips send_typing when the chat is in ``_typing_paused`` (e.g. while
+         the agent is waiting for dangerous-command approval).  This is critical
+         for Slack's Assistant API where ``assistant_threads_setStatus`` disables
+@@ -4585,7 +4480,7 @@ class BasePlatformAdapter(ABC):
+     async def handle_message(self, event: MessageEvent) -> None:
+         """
+         Process an incoming message.
+-        
++
+         This method returns quickly by spawning background tasks.
+         This allows new messages to be processed even while an agent is running,
+         enabling interruption support.
+@@ -4768,7 +4663,7 @@ class BasePlatformAdapter(ABC):
+                     merge_text=event.message_type == MessageType.TEXT,
+                 )
+             return  # Don't process now - will be handled after current task finishes
+-        
++
+         # Mark session as active BEFORE spawning background task to close
+         # the race window where a second message arriving before the task
+         # starts would also pass the _active_sessions check and spawn a
+@@ -4777,7 +4672,7 @@ class BasePlatformAdapter(ABC):
+         # _start_session_processing installs the guard AND the owner-task
+         # mapping atomically so stale-lock detection works.
+         self._start_session_processing(event, session_key)
+-    
++
+     @staticmethod
+     def _get_human_delay() -> float:
+         """
+@@ -4890,19 +4786,28 @@ class BasePlatformAdapter(ABC):
+             if not response:
+                 logger.debug("[%s] Handler returned empty/None response for %s", self.name, event.source.chat_id)
+             if response:
+                 # Capture [[as_document]] before extract_media strips it, so the
+                 # dispatch partition below can route image-extension files
+                 # through send_document instead of send_multiple_images. Used
+                 # by skills that produce large/lossless images (e.g. info-graph)
+                 # where Telegram's sendPhoto recompression destroys legibility.
+                 force_document_attachments = "[[as_document]]" in response
+ 
+                 # Pre-extract snapshot for the #29346 recovery/invariant below.
+                 _response_pre_extract = response
+ 
+-                # Extract MEDIA:<path> tags (from TTS tool) before other processing
+-                media_files, response = self.extract_media(response)
++                # Extract only trusted local media artifacts before other processing.
++                trusted_media_response = self.has_trusted_media_artifact_marker(response)
++                try:
++                    media_files, response = self.extract_media(
++                        response,
++                        require_trusted_marker=True,
++                    )
++                except TypeError:
++                    media_files, response = self.extract_media(response)
++                    if not trusted_media_response:
++                        media_files = []
+                 media_files = self.filter_media_delivery_paths(media_files)
+ 
+                 # Extract image URLs and send them as native platform attachments
+                 images, text_content = self.extract_images(response)
+@@ -4914,34 +4807,33 @@ class BasePlatformAdapter(ABC):
+                 if images:
+                     logger.info("[%s] extract_images found %d image(s) in response (%d chars)", self.name, len(images), len(response))
+ 
+                 local_files = []
+-                if not is_ephemeral_response:
+-                    # Auto-detect bare local file paths for native media delivery
+-                    # (helps small models that don't use MEDIA: syntax). Skip
+-                    # system/command notices so config paths stay visible text
+-                    # instead of becoming native uploads.
++                # Bare local paths are delivery authority only when attached to
++                # a trusted local media artifact response. Model-authored final
++                # prose is not enough to read or upload local files.
++                if trusted_media_response:
+                     local_files, text_content = self.extract_local_files(text_content)
+                     local_files = self.filter_local_delivery_paths(local_files)
+                     if local_files:
+                         logger.info("[%s] extract_local_files found %d file(s) in response", self.name, len(local_files))
+ 
+                 # A2 (#29346): extraction can reduce a non-empty response to
+                 # empty text with no attachment, and the `if text_content` guard
+                 # below then drops it silently. Recover on every platform (#33842
+                 # was Discord-only); the guard avoids duplicating an attachment.
+                 if not (text_content or images or local_files or media_files):
+                     # Recover from the post-extract_media `response`, not the raw
+                     # snapshot: extract_media already stripped MEDIA (incl. spaced
+                     # paths) with its full grammar, so no fragment can leak.
+                     _recovered = _strip_media_directives(response).strip()
+                     if _recovered:
+                         logger.warning(
+                             "[%s] response_delivery_recovered: extract pipeline "
+                             "reduced a non-empty response (%d chars) to empty with "
+                             "no attachment; delivering recovered original to %s",
+                             self.name, len(_response_pre_extract), event.source.chat_id,
+                         )
+                         text_content = _recovered
+ 
+                 # Final user-visible content (text, TTS, media, files) gets
+                 # the existing notify=True marker. Clone once so typing/status
+@@ -5199,7 +5068,7 @@ class BasePlatformAdapter(ABC):
+                     # Tests stub create_task() with non-hashable sentinels; tolerate.
+                     pass
+                 return  # Drain task owns the session now.
+-                
++
+         except asyncio.CancelledError:
+             current_task = asyncio.current_task()
+             outcome = ProcessingOutcome.CANCELLED
+@@ -5424,11 +5274,11 @@ class BasePlatformAdapter(ABC):
+     def has_pending_interrupt(self, session_key: str) -> bool:
+         """Check if there's a pending interrupt for a session."""
+         return session_key in self._active_sessions and self._active_sessions[session_key].is_set()
+-    
++
+     def get_pending_message(self, session_key: str) -> Optional[MessageEvent]:
+         """Get and clear any pending message for a session."""
+         return self._pending_messages.pop(session_key, None)
+-    
++
+     def build_source(
+         self,
+         chat_id: str,
+@@ -5467,29 +5317,29 @@ class BasePlatformAdapter(ABC):
+             message_id=str(message_id) if message_id else None,
+             role_authorized=role_authorized,
+         )
+-    
++
+     @abstractmethod
+     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
+         """
+         Get information about a chat/channel.
+-        
++
+         Returns dict with at least:
+         - name: Chat name
+         - type: "dm", "group", "channel"
+         """
+         pass
+-    
++
+     def format_message(self, content: str) -> str:
+         """
+         Format a message for this platform.
+-        
++
+         Override in subclasses to handle platform-specific formatting
+         (e.g., Telegram MarkdownV2, Discord markdown).
+-        
++
+         Default implementation returns content as-is.
+         """
+         return content
+-    
++
+     @staticmethod
+     def truncate_message(
+         content: str,

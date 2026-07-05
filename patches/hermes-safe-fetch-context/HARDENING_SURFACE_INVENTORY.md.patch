@@ -1,0 +1,33 @@
+diff --git a/HARDENING_SURFACE_INVENTORY.md b/HARDENING_SURFACE_INVENTORY.md
+new file mode 100644
+index 000000000..1e14756ab
+--- /dev/null
++++ b/HARDENING_SURFACE_INVENTORY.md
+@@ -0,0 +1,27 @@
++# Hardening Surface Inventory
++
++## Safe-fetch completeness notes
++
++Remote-byte ingress paths verified in this workstream:
++
++- tools.safe_http.safe_download_bytes / safe_download_to_file: central untrusted HTTP download helper. Enforces http/https-only URLs, host presence, userinfo blocking by default, initial and redirect URL safety, default-transport DNS/IP preflight and connection peer validation, max redirects, Content-Length and streaming byte caps, optional content-type allowlists, metadata capture, URL redaction, and same-origin binding for Authorization/Cookie-bearing requests.
++- gateway media/document fallback downloads:
++  - Discord outbound image/animation and fallback document paths route through safe_download_bytes with byte caps and content-type allowlists. Primary `att.read()` attachment bytes remain provider-mediated through discord.py.
++  - Telegram outbound image URL fallback routes through safe_download_bytes with a 10 MiB cap and image content-type allowlist; inbound Telegram file downloads use Telegram Bot API file objects rather than user-supplied arbitrary URLs.
++  - Slack private file/document downloads route through safe_download_bytes with bearer-token headers only for Slack file origins, media/document content-type allowlists, and credential-bearing cross-origin redirect blocking.
++  - Mattermost URL-as-file and private file paths route through safe_download_bytes with explicit byte caps, media/document content-type allowlists, and allowed private origin for configured Mattermost server URLs.
++  - Feishu remote document URLs route through safe_download_bytes with a document content-type allowlist. Feishu SDK resource bytes are provider-mediated and capped locally before cache promotion.
++  - QQBot media/STT downloads route through safe_download_bytes with byte caps, known-host auth preservation, and media/audio content-type allowlists.
++  - WeCom outbound media URL downloads now route through safe_download_bytes with explicit caps and redacted error logging. Inbound encrypted WeCom callback media is decrypted from platform payload bytes, not fetched from arbitrary user URLs.
++  - BlueBubbles inbound attachment downloads now route through safe_download_bytes with an explicit 25 MiB cap and allowed_private_origins restricted to the configured BlueBubbles server origin, preserving local-server compatibility while validating redirects.
++- Web extraction/crawl tools: hosted browser/search/extraction API client calls are service API calls rather than direct user URL byte downloads in-process. Returned page content must still be treated as untrusted and is not prompt-injection safe merely because a service fetched it.
++- Vision image URL analysis: tools.vision_tools routes remote image URL downloads through safe_download_to_file with a 50 MiB cap, image content-type allowlist, redirect/peer validation, redaction, and native evidence ledger metadata on analysis output.
++- Skill/community/GitHub/plugin paths: skill_view now attaches context-safety/provenance/authority metadata to main and linked file reads; external and plugin skill content is evidence-only by default. Well-known/community hub and direct URL skill text fetches route through tools.safe_http.safe_download_bytes with URL validation, redirect limits, and byte caps. Plugin pre_llm_call context is fenced as untrusted plugin_context before model visibility.
++- Development/release scripts using requests/httpx are out of live agent/gateway remote-byte ingestion scope unless exposed to user-provided URLs at runtime.
++
++Residual gaps / notes:
++
++- safe_fetch is an ingress control for SSRF, redirects, credentials, caps, and redaction. It does not make fetched content trusted and does not solve prompt injection.
++- Some platform SDK methods perform provider-controlled downloads or return provider-supplied byte objects (for example Telegram file objects, Discord native attachment APIs, and Feishu SDK resources). They are documented here as provider-mediated exceptions, not safe_http call sites.
++- Matrix and Yuanbao arbitrary media URL downloads are owned by this final-series payload: Matrix outbound image URLs and Yuanbao outbound/inbound direct media URLs use safe_download_bytes with byte caps, redirect/peer validation, no-credential redirect policy, redaction, and image/file content-type allowlists. Matrix mxc:// downloads, Matrix upload, Yuanbao sign/resource/COS/WebSocket calls remain provider-mediated platform API paths.
++- The broad repository still contains many HTTP API client calls for model providers, platform REST APIs, OAuth/websocket flows, and scripts. These are not all remote-byte ingestion of user-supplied URLs; direct download paths should continue to be audited as new platforms/plugins are added.

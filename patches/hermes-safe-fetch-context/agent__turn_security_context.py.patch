@@ -1,0 +1,249 @@
+diff --git a/agent/turn_security_context.py b/agent/turn_security_context.py
+new file mode 100644
+index 000000000..1189e468c
+--- /dev/null
++++ b/agent/turn_security_context.py
+@@ -0,0 +1,243 @@
++"""Build trusted and evidence-only context slices for one model turn."""
++
++from __future__ import annotations
++
++import json
++import re
++from dataclasses import dataclass
++from typing import Any, Iterable, Mapping
++
++from agent.context_safety import render_model_visible_tool_result
++
++
++_UNTRUSTED_BLOCK_RE = re.compile(
++    r"<(?P<tag>untrusted_tool_result|untrusted-context)\b(?P<attrs>[^>]*)>"
++    r"(?P<body>[\s\S]*?)</(?P=tag)>",
++    re.IGNORECASE,
++)
++_RENDERED_BY_MARKERS = ("hermes_context_safety_v1", "hermes_gateway_fallback_v1")
++_TRUSTED_SKILL_AUTHORITIES = {"trusted", "trusted_by_local_policy"}
++_TRUSTED_POLICY_FIELDS = ("name", "description", "content", "usage_hint")
++
++
++@dataclass(frozen=True)
++class TurnSecurityContext:
++    trusted_user_intent: str
++    trusted_policy_context: str
++    prior_untrusted_context: str
++    api_context_taint: tuple[str, ...] = ()
++
++    def as_authority_kwargs(self) -> dict[str, str]:
++        """Return kwargs accepted by model_tools.handle_function_call."""
++        kwargs = {
++            "user_task": self.trusted_user_intent,
++            "trusted_policy_context": self.trusted_policy_context,
++            "prior_untrusted_context": self.prior_untrusted_context,
++        }
++        return {key: value for key, value in kwargs.items() if value}
++
++
++def is_upstream_untrusted_tool_result(text: str) -> bool:
++    return bool(re.search(r"<untrusted_tool_result\b[\s\S]*?</untrusted_tool_result>", text or "", re.IGNORECASE))
++
++
++def is_payload_untrusted_context(text: str) -> bool:
++    return bool(re.search(r"<untrusted-context\b[\s\S]*?</untrusted-context>", text or "", re.IGNORECASE))
++
++
++def extract_untrusted_blocks(text: str) -> tuple[str, ...]:
++    """Return known upstream/payload untrusted wrapper blocks in document order."""
++    blocks: list[str] = []
++    seen: set[str] = set()
++    for match in _UNTRUSTED_BLOCK_RE.finditer(text or ""):
++        block = match.group(0)
++        attrs = match.group("attrs") or ""
++        tag = (match.group("tag") or "").lower()
++        if tag == "untrusted-context" and not (
++            any(f'rendered_by="{marker}"' in attrs or f"rendered_by='{marker}'" in attrs for marker in _RENDERED_BY_MARKERS)
++            or "source=" in attrs
++            or "verdict=" in attrs
++        ):
++            continue
++        if block not in seen:
++            seen.add(block)
++            blocks.append(block)
++    return tuple(blocks)
++
++
++def _dedupe_append(chunks: list[str], value: str) -> None:
++    if value and value not in chunks:
++        chunks.append(value)
++
++
++def _strip_untrusted_blocks(text: str) -> str:
++    return _UNTRUSTED_BLOCK_RE.sub(" ", text or "").strip()
++
++
++def _tool_message_name(msg: Mapping[str, Any]) -> str:
++    for key in ("__tool_name", "tool_name", "name"):
++        value = msg.get(key)
++        if isinstance(value, str) and value:
++            return value
++    return ""
++
++
++def _render_model_visible_tool_result_text(tool_name: str, content: str) -> str:
++    rendered = render_model_visible_tool_result(tool_name, content)
++    if isinstance(rendered, str):
++        return rendered
++    return json.dumps(rendered, ensure_ascii=False)
++
++
++def _trusted_skill_payload_from_tool_content(content: str) -> dict[str, Any] | None:
++    try:
++        payload = json.loads(content)
++    except Exception:
++        return None
++    if not isinstance(payload, dict) or payload.get("success") is False:
++        return None
++    authority = str(payload.get("authority") or "").strip().lower()
++    if authority not in _TRUSTED_SKILL_AUTHORITIES:
++        return None
++    return payload
++
++
++def _iter_untrusted_strings(value: Any) -> tuple[str, ...]:
++    chunks: list[str] = []
++    if isinstance(value, str):
++        blocks = extract_untrusted_blocks(value)
++        if blocks:
++            for block in blocks:
++                _dedupe_append(chunks, block)
++        elif (
++            "<untrusted_tool_result" in value
++            or "<untrusted-context" in value
++            or any(f'rendered_by="{marker}"' in value or f"rendered_by='{marker}'" in value for marker in _RENDERED_BY_MARKERS)
++        ):
++            _dedupe_append(chunks, value)
++    elif isinstance(value, Mapping):
++        for nested in value.values():
++            for chunk in _iter_untrusted_strings(nested):
++                _dedupe_append(chunks, chunk)
++    elif isinstance(value, (list, tuple)):
++        for nested in value:
++            for chunk in _iter_untrusted_strings(nested):
++                _dedupe_append(chunks, chunk)
++    return tuple(chunks)
++
++
++def _trusted_policy_text_from_tool_content(content: str) -> str:
++    payload = _trusted_skill_payload_from_tool_content(content)
++    if payload is None:
++        return ""
++    parts: list[str] = []
++    for key in _TRUSTED_POLICY_FIELDS:
++        value = payload.get(key)
++        if isinstance(value, str) and value.strip() and not _iter_untrusted_strings(value):
++            parts.append(value)
++    return "\n\n".join(parts)
++
++
++def collect_trusted_policy_context(messages: list[Mapping[str, Any]]) -> str:
++    """Collect trusted local policy/tool guidance separately from user intent."""
++    chunks: list[str] = []
++    for msg in messages or []:
++        if not isinstance(msg, Mapping) or msg.get("role") != "tool":
++            continue
++        content = msg.get("content")
++        if not isinstance(content, str):
++            continue
++        policy = _trusted_policy_text_from_tool_content(content)
++        if policy:
++            chunks.append(policy)
++    return "\n\n".join(chunks)
++
++
++def _trusted_authority_text_from_user_message(msg: Mapping[str, Any]) -> str:
++    marker = msg.get("__active_user_intent") if isinstance(msg, Mapping) else None
++    if isinstance(marker, dict):
++        active_text = _strip_untrusted_blocks(str(marker.get("active_text") or ""))
++        if active_text:
++            return active_text
++        segments = marker.get("segments")
++        if isinstance(segments, list):
++            return "\n\n".join(
++                text
++                for segment in segments
++                if isinstance(segment, Mapping) and segment.get("trusted_for_authority") is True
++                for text in [_strip_untrusted_blocks(str(segment.get("text") or ""))]
++                if text
++            )
++        return ""
++    if isinstance(marker, str):
++        return _strip_untrusted_blocks(marker)
++    content = msg.get("content") if isinstance(msg, Mapping) else ""
++    return _strip_untrusted_blocks(content) if isinstance(content, str) else ""
++
++
++def latest_trusted_user_intent(messages: list[Mapping[str, Any]]) -> str:
++    for msg in reversed(messages or []):
++        if isinstance(msg, Mapping) and msg.get("role") == "user":
++            return _trusted_authority_text_from_user_message(msg)
++    return ""
++
++
++def collect_prior_untrusted_context(
++    messages: list[Mapping[str, Any]],
++    *,
++    api_context_taint: Iterable[str] | None = (),
++    cached_system_prompt: str | None = None,
++) -> str:
++    """Collect prior model-visible evidence-only content for action gating."""
++    chunks: list[str] = []
++    for msg in messages or []:
++        if not isinstance(msg, Mapping) or msg.get("role") not in {"tool", "user"}:
++            continue
++        content = msg.get("content")
++        if not isinstance(content, str):
++            continue
++        if msg.get("role") == "tool" and msg.get("__trusted_control_result"):
++            for block in extract_untrusted_blocks(content):
++                _dedupe_append(chunks, block)
++            continue
++        trusted_payload = _trusted_skill_payload_from_tool_content(content) if msg.get("role") == "tool" else None
++        if trusted_payload is not None:
++            for block in _iter_untrusted_strings(trusted_payload):
++                _dedupe_append(chunks, block)
++            continue
++        blocks = extract_untrusted_blocks(content)
++        if blocks:
++            for block in blocks:
++                _dedupe_append(chunks, block)
++            continue
++        if msg.get("role") == "tool":
++            tool_name = _tool_message_name(msg)
++            if tool_name:
++                rendered = _render_model_visible_tool_result_text(tool_name, content)
++                for block in _iter_untrusted_strings(rendered):
++                    _dedupe_append(chunks, block)
++    for block in _iter_untrusted_strings(cached_system_prompt or ""):
++        _dedupe_append(chunks, block)
++    for content in api_context_taint or ():
++        if isinstance(content, str) and content:
++            _dedupe_append(chunks, content)
++    return "\n\n".join(chunks)
++
++
++def build_turn_security_context(
++    messages: list[Mapping[str, Any]],
++    *,
++    api_context_taint: Iterable[str] | None = None,
++    cached_system_prompt: str | None = None,
++) -> TurnSecurityContext:
++    taint = tuple(content for content in (api_context_taint or ()) if isinstance(content, str) and content)
++    return TurnSecurityContext(
++        trusted_user_intent=latest_trusted_user_intent(messages),
++        trusted_policy_context=collect_trusted_policy_context(messages),
++        prior_untrusted_context=collect_prior_untrusted_context(
++            messages,
++            api_context_taint=taint,
++            cached_system_prompt=cached_system_prompt,
++        ),
++        api_context_taint=taint,
++    )

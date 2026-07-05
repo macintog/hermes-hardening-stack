@@ -1,0 +1,457 @@
+diff --git a/tests/gateway/test_matrix.py b/tests/gateway/test_matrix.py
+index d239728..de75a54 100644
+--- a/tests/gateway/test_matrix.py
++++ b/tests/gateway/test_matrix.py
+@@ -3383,98 +3383,48 @@ class TestMatrixImageOnlyMediaNormalization:
+ 
+     @pytest.mark.asyncio
+     async def test_external_media_download_rejects_oversized_content_length(self, monkeypatch):
+-        import aiohttp
+-        import tools.url_safety as url_safety
+-
+-        class _Content:
+-            async def iter_chunked(self, _size):
+-                yield b"x"
+-
+-        class _Response:
+-            url = "https://example.com/image.png"
+-            status = 200
+-            headers = {"Content-Length": "11"}
+-            content_type = "image/png"
+-            content = _Content()
+-
+-            async def __aenter__(self):
+-                return self
+-
+-            async def __aexit__(self, *_args):
+-                return None
++        from tools.safe_http import SafeHTTPError
+ 
+-            def raise_for_status(self):
+-                return None
+-
+-        class _Session:
+-            async def __aenter__(self):
+-                return self
+-
+-            async def __aexit__(self, *_args):
+-                return None
++        self.adapter._max_media_bytes = 10
+ 
+-            def get(self, *_args, **_kwargs):
+-                return _Response()
++        async def fake_download(url, **kwargs):
++            assert url == "https://example.com/image.png"
++            assert kwargs["max_bytes"] == 10
++            assert kwargs["source_type"] == "gateway:matrix-outbound-image"
++            assert "image/png" in kwargs["allowed_content_types"]
++            raise SafeHTTPError(
++                "Response too large from https://example.com/image.png: 11 bytes exceeds 10"
++            )
+ 
+-        self.adapter._max_media_bytes = 10
+-        monkeypatch.setattr(aiohttp, "ClientSession", lambda **_kwargs: _Session())
+         monkeypatch.setattr(
+-            url_safety,
+-            "is_safe_url",
+-            lambda candidate, **_kwargs: str(candidate) == "https://example.com/image.png",
++            "plugins.platforms.matrix.adapter.safe_download_bytes",
++            fake_download,
+         )
+ 
+-        with pytest.raises(ValueError, match="exceeds Matrix limit"):
++        with pytest.raises(SafeHTTPError, match="Response too large"):
+             await self.adapter._download_external_media_with_cap(
+                 "https://example.com/image.png"
+             )
+ 
+     @pytest.mark.asyncio
+     async def test_external_media_download_rejects_oversized_stream(self, monkeypatch):
+-        import aiohttp
+-        import tools.url_safety as url_safety
++        from tools.safe_http import SafeHTTPError
+ 
+-        class _Content:
+-            async def iter_chunked(self, _size):
+-                yield b"12345"
+-                yield b"67890"
+-                yield b"!"
+-
+-        class _Response:
+-            url = "https://example.com/image.png"
+-            status = 200
+-            headers = {}
+-            content_type = "image/png"
+-            content = _Content()
+-
+-            async def __aenter__(self):
+-                return self
+-
+-            async def __aexit__(self, *_args):
+-                return None
+-
+-            def raise_for_status(self):
+-                return None
+-
+-        class _Session:
+-            async def __aenter__(self):
+-                return self
+-
+-            async def __aexit__(self, *_args):
+-                return None
++        self.adapter._max_media_bytes = 10
+ 
+-            def get(self, *_args, **_kwargs):
+-                return _Response()
++        async def fake_download(url, **kwargs):
++            assert url == "https://example.com/image.png"
++            assert kwargs["max_bytes"] == 10
++            raise SafeHTTPError(
++                "Response too large from https://example.com/image.png: exceeds 10 bytes"
++            )
+ 
+-        self.adapter._max_media_bytes = 10
+-        monkeypatch.setattr(aiohttp, "ClientSession", lambda **_kwargs: _Session())
+         monkeypatch.setattr(
+-            url_safety,
+-            "is_safe_url",
+-            lambda candidate, **_kwargs: str(candidate) == "https://example.com/image.png",
++            "plugins.platforms.matrix.adapter.safe_download_bytes",
++            fake_download,
+         )
+ 
+-        with pytest.raises(ValueError, match="exceeds Matrix limit"):
++        with pytest.raises(SafeHTTPError, match="Response too large"):
+             await self.adapter._download_external_media_with_cap(
+                 "https://example.com/image.png"
+             )
+@@ -3483,220 +3433,158 @@ class TestMatrixImageOnlyMediaNormalization:
+     async def test_external_media_download_rejects_unsafe_redirect(self, monkeypatch):
+         """A 302 to a private/loopback target must be blocked per-hop, before
+         the redirect is followed (not only re-checked on the final URL)."""
+-        import aiohttp
+-        import tools.url_safety as url_safety
+-
+-        class _RedirectResponse:
+-            status = 302
+-            headers = {"Location": "http://127.0.0.1/private.png"}
+-            content_type = "image/png"
+-
+-            async def __aenter__(self):
+-                return self
+-
+-            async def __aexit__(self, *_args):
+-                return None
+-
+-            def raise_for_status(self):
+-                return None
+-
+-        class _Session:
+-            def __init__(self):
+-                self.requested = []
+-
+-            async def __aenter__(self):
+-                return self
+-
+-            async def __aexit__(self, *_args):
+-                return None
+-
+-            def get(self, url, *_args, **_kwargs):
+-                self.requested.append(url)
+-                return _RedirectResponse()
++        import httpx
++        from tools.safe_http import SafeHTTPError
++        from tools.safe_http import safe_download_bytes as real_safe_download_bytes
++
++        requested = []
++
++        def handler(request):
++            requested.append(str(request.url))
++            if str(request.url) == "https://example.com/image.png":
++                return httpx.Response(
++                    302,
++                    headers={"Location": "http://127.0.0.1/private.png"},
++                )
++            raise AssertionError(f"unexpected request to {request.url}")
++
++        async def safe_download_with_mock_transport(url, **kwargs):
++            return await real_safe_download_bytes(
++                url,
++                transport=httpx.MockTransport(handler),
++                allow_unverified_transport=True,
++                **kwargs,
++            )
+ 
+-        session = _Session()
+-        monkeypatch.setattr(aiohttp, "ClientSession", lambda **_kwargs: session)
+         monkeypatch.setattr(
+-            url_safety,
+-            "is_safe_url",
+-            lambda candidate, **_kwargs: str(candidate) == "https://example.com/image.png",
++            "plugins.platforms.matrix.adapter.safe_download_bytes",
++            safe_download_with_mock_transport,
+         )
+ 
+-        with pytest.raises(ValueError, match="unsafe redirect"):
++        with pytest.raises(SafeHTTPError, match="Blocked unsafe URL target"):
+             await self.adapter._download_external_media_with_cap(
+                 "https://example.com/image.png"
+             )
+ 
+         # Only the initial public URL was fetched — the loopback hop was never
+         # followed because it was rejected before the next GET.
+-        assert session.requested == ["https://example.com/image.png"]
++        assert requested == ["https://example.com/image.png"]
+ 
+     @pytest.mark.asyncio
+     async def test_external_media_download_follows_safe_redirect(self, monkeypatch):
+         """A redirect to another allowed URL is followed and its body returned."""
+-        import aiohttp
+-        import tools.url_safety as url_safety
+-
+-        class _Content:
+-            async def iter_chunked(self, _size):
+-                yield b"imgbytes"
+-
+-        class _RedirectResponse:
+-            status = 302
+-            headers = {"Location": "https://cdn.example.com/final.png"}
+-            content_type = "image/png"
+-
+-            async def __aenter__(self):
+-                return self
+-
+-            async def __aexit__(self, *_args):
+-                return None
+-
+-            def raise_for_status(self):
+-                return None
+-
+-        class _OkResponse:
+-            status = 200
+-            headers = {}
+-            content_type = "image/png"
+-            content = _Content()
+-
+-            async def __aenter__(self):
+-                return self
+-
+-            async def __aexit__(self, *_args):
+-                return None
+-
+-            def raise_for_status(self):
+-                return None
+-
+-        class _Session:
+-            def __init__(self):
+-                self.requested = []
+-
+-            async def __aenter__(self):
+-                return self
+-
+-            async def __aexit__(self, *_args):
+-                return None
+-
+-            def get(self, url, *_args, **_kwargs):
+-                self.requested.append(url)
+-                return _RedirectResponse() if len(self.requested) == 1 else _OkResponse()
++        import httpx
++        from tools.safe_http import safe_download_bytes as real_safe_download_bytes
++
++        png_bytes = b"\x89PNG\r\n\x1a\n"
++        requested = []
++
++        def handler(request):
++            requested.append(str(request.url))
++            if str(request.url) == "https://example.com/image.png":
++                return httpx.Response(
++                    302,
++                    headers={"Location": "https://example.com/final.png"},
++                )
++            if str(request.url) == "https://example.com/final.png":
++                return httpx.Response(
++                    200,
++                    headers={"Content-Type": "image/png"},
++                    content=png_bytes,
++                )
++            raise AssertionError(f"unexpected request to {request.url}")
++
++        async def safe_download_with_mock_transport(url, **kwargs):
++            assert kwargs["source_type"] == "gateway:matrix-outbound-image"
++            assert kwargs["policy"]["redirect_credentials"] == "no-credentials"
++            assert "image/png" in kwargs["allowed_content_types"]
++            return await real_safe_download_bytes(
++                url,
++                transport=httpx.MockTransport(handler),
++                allow_unverified_transport=True,
++                **kwargs,
++            )
+ 
+-        session = _Session()
+-        monkeypatch.setattr(aiohttp, "ClientSession", lambda **_kwargs: session)
+-        monkeypatch.setattr(url_safety, "is_safe_url", lambda *_args, **_kwargs: True)
++        monkeypatch.setattr(
++            "plugins.platforms.matrix.adapter.safe_download_bytes",
++            safe_download_with_mock_transport,
++        )
+ 
+         data, ct, _fname = await self.adapter._download_external_media_with_cap(
+             "https://example.com/image.png"
+         )
+ 
+-        assert data == b"imgbytes"
++        assert data == png_bytes
+         assert ct == "image/png"
+-        assert session.requested == [
++        assert requested == [
+             "https://example.com/image.png",
+-            "https://cdn.example.com/final.png",
++            "https://example.com/final.png",
+         ]
+ 
+     @pytest.mark.asyncio
+     async def test_external_media_download_httpx_installs_redirect_guard(self, monkeypatch):
+-        """The httpx fallback re-checks redirect targets via the shared guard."""
+-        import tools.url_safety as url_safety
+-        from gateway.platforms.base import _ssrf_redirect_guard
+-
+-        clients = []
+-
+-        class _Content:
+-            async def iter_chunked(self, _size):
+-                yield b"ok"
+-
+-        class _Response:
+-            headers = {"content-type": "image/png"}
+-
+-            async def __aenter__(self):
+-                return self
+-
+-            async def __aexit__(self, *_args):
+-                return None
+-
+-            def raise_for_status(self):
+-                return None
+-
+-            async def aiter_bytes(self):
+-                yield b"ok"
+-
+-        class _Client:
+-            def __init__(self, **kwargs):
+-                self.kwargs = kwargs
+-                clients.append(self)
+-
+-            async def __aenter__(self):
+-                return self
++        """The Safe HTTP seam owns redirect checks; tests use audited transports."""
++        import httpx
++        from tools.safe_http import safe_download_bytes as real_safe_download_bytes
++
++        png_bytes = b"\x89PNG\r\n\x1a\n"
++        requested = []
++
++        def handler(request):
++            requested.append(str(request.url))
++            return httpx.Response(
++                200,
++                headers={"Content-Type": "image/png"},
++                content=png_bytes,
++            )
+ 
+-            async def __aexit__(self, *_args):
+-                return None
++        async def safe_download_with_mock_transport(url, **kwargs):
++            return await real_safe_download_bytes(
++                url,
++                transport=httpx.MockTransport(handler),
++                allow_unverified_transport=True,
++                **kwargs,
++            )
+ 
+-            def stream(self, *_args, **_kwargs):
+-                return _Response()
++        monkeypatch.setattr(
++            "plugins.platforms.matrix.adapter.safe_download_bytes",
++            safe_download_with_mock_transport,
++        )
+ 
+-        monkeypatch.setattr(url_safety, "is_safe_url", lambda *_args, **_kwargs: True)
+-        with patch.dict(sys.modules, {"aiohttp": None}):
+-            with patch("httpx.AsyncClient", _Client):
+-                data, ct, _fname = await self.adapter._download_external_media_with_cap(
+-                    "https://example.com/image.png"
+-                )
++        data, ct, _fname = await self.adapter._download_external_media_with_cap(
++            "https://example.com/image.png"
++        )
+ 
+-        assert data == b"ok"
++        assert data == png_bytes
+         assert ct == "image/png"
+-        assert clients[0].kwargs["event_hooks"]["response"] == [_ssrf_redirect_guard]
++        assert requested == ["https://example.com/image.png"]
+ 
+     @pytest.mark.asyncio
+     async def test_external_media_download_rejects_unsafe_initial_url(self):
+-        with pytest.raises(ValueError, match="unsafe media URL"):
++        from tools.safe_http import SafeHTTPError
++
++        with pytest.raises(SafeHTTPError, match="unsafe URL scheme"):
+             await self.adapter._download_external_media_with_cap(
+                 "file:///etc/passwd"
+             )
+ 
+     @pytest.mark.asyncio
+     async def test_external_media_download_rejects_non_image_content_type(self, monkeypatch):
+-        import aiohttp
+-        import tools.url_safety as url_safety
+-
+-        class _Content:
+-            async def iter_chunked(self, _size):
+-                yield b"<html></html>"
+-
+-        class _Response:
+-            url = "https://example.com/image.png"
+-            status = 200
+-            headers = {}
+-            content_type = "text/html"
+-            content = _Content()
+-
+-            async def __aenter__(self):
+-                return self
+-
+-            async def __aexit__(self, *_args):
+-                return None
++        from tools.safe_http import SafeHTTPError
+ 
+-            def raise_for_status(self):
+-                return None
+-
+-        class _Session:
+-            async def __aenter__(self):
+-                return self
+-
+-            async def __aexit__(self, *_args):
+-                return None
+-
+-            def get(self, *_args, **_kwargs):
+-                return _Response()
++        async def fake_download(url, **kwargs):
++            assert url == "https://example.com/image.png"
++            assert "image/png" in kwargs["allowed_content_types"]
++            raise SafeHTTPError(
++                "Blocked disallowed content type text/html from https://example.com/image.png"
++            )
+ 
+-        monkeypatch.setattr(aiohttp, "ClientSession", lambda **_kwargs: _Session())
+-        monkeypatch.setattr(url_safety, "is_safe_url", lambda *_args, **_kwargs: True)
++        monkeypatch.setattr(
++            "plugins.platforms.matrix.adapter.safe_download_bytes",
++            fake_download,
++        )
+ 
+-        with pytest.raises(ValueError, match="not an image"):
++        with pytest.raises(SafeHTTPError, match="disallowed content type"):
+             await self.adapter._download_external_media_with_cap(
+                 "https://example.com/image.png"
+             )

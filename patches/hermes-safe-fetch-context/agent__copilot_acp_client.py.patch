@@ -1,0 +1,13 @@
+diff --git a/agent/copilot_acp_client.py b/agent/copilot_acp_client.py
+index 82f482273..85ee56ae8 100644
+--- a/agent/copilot_acp_client.py
++++ b/agent/copilot_acp_client.py
+@@ -106,8 +106,6 @@ def _build_subprocess_env() -> dict[str, str]:
+     env = hermes_subprocess_env(inherit_credentials=True)
+     home = _resolve_home_dir()
+     env["HOME"] = home
+-    from hermes_constants import apply_subprocess_home_env
+-    apply_subprocess_home_env(env)
+     return env
+ 
+ 

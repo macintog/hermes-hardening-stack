@@ -1,0 +1,188 @@
+diff --git a/agent/action_authority_catalog.py b/agent/action_authority_catalog.py
+new file mode 100644
+index 000000000..ca1bbd1e4
+--- /dev/null
++++ b/agent/action_authority_catalog.py
+@@ -0,0 +1,182 @@
++"""Stable action-authority catalog metadata and coverage helpers."""
++
++from __future__ import annotations
++
++from enum import StrEnum
++from typing import Callable, Mapping
++
++
++class ActionClass(StrEnum):
++    READ_ONLY_LOCAL_INSPECTION = "read_only_local_inspection"
++    READ_ONLY_NETWORK_FETCH = "read_only_network_fetch"
++    CREDENTIALED_NETWORK_CALL = "credentialed_network_call"
++    FILE_WRITE = "file_write"
++    FILE_DELETE = "file_delete"
++    TERMINAL_EXECUTION = "terminal_execution"
++    SECRET_READ = "secret_read"
++    SECRET_TRANSMISSION = "secret_transmission"
++    OUTBOUND_MESSAGE = "outbound_message"
++    MEMORY_WRITE = "memory_write"
++    CRON_CREATE_UPDATE_DELETE = "cron_create_update_delete"
++    SKILL_PLUGIN_INSTALL_UPDATE = "skill_plugin_install_update"
++    SKILL_PLUGIN_EXECUTE = "skill_plugin_execute"
++    CODE_EXECUTION_FROM_DOWNLOAD = "code_execution_from_download"
++    CONFIGURATION_CHANGE = "configuration_change"
++    AGENT_LOOP_INTERNAL = "agent_loop_internal"
++    UNKNOWN_SIDE_EFFECT = "unknown_side_effect"
++
++
++READ_ONLY_CLASSES = {
++    ActionClass.READ_ONLY_LOCAL_INSPECTION,
++    ActionClass.READ_ONLY_NETWORK_FETCH,
++}
++
++HIGH_RISK_APPROVAL_CLASSES = {
++    ActionClass.OUTBOUND_MESSAGE,
++    ActionClass.FILE_WRITE,
++    ActionClass.FILE_DELETE,
++    ActionClass.MEMORY_WRITE,
++    ActionClass.CRON_CREATE_UPDATE_DELETE,
++    ActionClass.CONFIGURATION_CHANGE,
++    ActionClass.SKILL_PLUGIN_INSTALL_UPDATE,
++    ActionClass.SKILL_PLUGIN_EXECUTE,
++    ActionClass.CREDENTIALED_NETWORK_CALL,
++    ActionClass.TERMINAL_EXECUTION,
++    ActionClass.SECRET_READ,
++    ActionClass.SECRET_TRANSMISSION,
++    ActionClass.CODE_EXECUTION_FROM_DOWNLOAD,
++    ActionClass.UNKNOWN_SIDE_EFFECT,
++}
++
++AGENT_LOOP_INTERNAL_TOOLS = {"todo", "clarify", "delegate_task", "session_search"}
++
++# Complete explicit classification for built-in registered tools. New registered
++# tools must be added here, or the registry coverage test fails. Unknown dynamic
++# tools require confirmation by default.
++TOOL_ACTION_CLASSES: dict[str, ActionClass] = {
++    "read_file": ActionClass.READ_ONLY_LOCAL_INSPECTION,
++    "search_files": ActionClass.READ_ONLY_LOCAL_INSPECTION,
++    "session_search": ActionClass.READ_ONLY_LOCAL_INSPECTION,
++    "skills_list": ActionClass.READ_ONLY_LOCAL_INSPECTION,
++    "skill_view": ActionClass.READ_ONLY_LOCAL_INSPECTION,
++    "web_search": ActionClass.READ_ONLY_NETWORK_FETCH,
++    "web_extract": ActionClass.READ_ONLY_NETWORK_FETCH,
++    "x_search": ActionClass.READ_ONLY_NETWORK_FETCH,
++    "spotify_albums": ActionClass.READ_ONLY_NETWORK_FETCH,
++    "spotify_devices": ActionClass.READ_ONLY_NETWORK_FETCH,
++    "spotify_playlists": ActionClass.READ_ONLY_NETWORK_FETCH,
++    "spotify_search": ActionClass.READ_ONLY_NETWORK_FETCH,
++    "browser_snapshot": ActionClass.READ_ONLY_NETWORK_FETCH,
++    # browser_console without expression is read-only console retrieval; expression
++    # evaluation executes JavaScript in the credentialed page context and is
++    # classified dynamically in action_authority.classify_action().
++    "browser_console": ActionClass.READ_ONLY_NETWORK_FETCH,
++    "browser_get_images": ActionClass.READ_ONLY_NETWORK_FETCH,
++    "browser_vision": ActionClass.READ_ONLY_NETWORK_FETCH,
++    "browser_scroll": ActionClass.READ_ONLY_NETWORK_FETCH,
++    "browser_back": ActionClass.READ_ONLY_NETWORK_FETCH,
++    "vision_analyze": ActionClass.READ_ONLY_NETWORK_FETCH,
++    "video_analyze": ActionClass.READ_ONLY_NETWORK_FETCH,
++    "feishu_doc_read": ActionClass.READ_ONLY_NETWORK_FETCH,
++    "feishu_drive_list_comments": ActionClass.READ_ONLY_NETWORK_FETCH,
++    "feishu_drive_list_comment_replies": ActionClass.READ_ONLY_NETWORK_FETCH,
++    "ha_list_entities": ActionClass.READ_ONLY_NETWORK_FETCH,
++    "ha_get_state": ActionClass.READ_ONLY_NETWORK_FETCH,
++    "ha_list_services": ActionClass.READ_ONLY_NETWORK_FETCH,
++    "rl_list_environments": ActionClass.READ_ONLY_NETWORK_FETCH,
++    "rl_get_current_config": ActionClass.READ_ONLY_LOCAL_INSPECTION,
++    "rl_check_status": ActionClass.READ_ONLY_NETWORK_FETCH,
++    "rl_get_results": ActionClass.READ_ONLY_NETWORK_FETCH,
++    "rl_list_runs": ActionClass.READ_ONLY_NETWORK_FETCH,
++    "hermes_customizations": ActionClass.READ_ONLY_LOCAL_INSPECTION,
++    "kanban_show": ActionClass.READ_ONLY_LOCAL_INSPECTION,
++    "kanban_list": ActionClass.READ_ONLY_LOCAL_INSPECTION,
++    "project_list": ActionClass.READ_ONLY_LOCAL_INSPECTION,
++    "read_terminal": ActionClass.READ_ONLY_LOCAL_INSPECTION,
++    "todo": ActionClass.AGENT_LOOP_INTERNAL,
++    "clarify": ActionClass.AGENT_LOOP_INTERNAL,
++    "delegate_task": ActionClass.AGENT_LOOP_INTERNAL,
++    "write_file": ActionClass.FILE_WRITE,
++    "patch": ActionClass.FILE_WRITE,
++    "kanban_block": ActionClass.FILE_WRITE,
++    "kanban_comment": ActionClass.FILE_WRITE,
++    "kanban_complete": ActionClass.FILE_WRITE,
++    "kanban_create": ActionClass.FILE_WRITE,
++    "kanban_heartbeat": ActionClass.FILE_WRITE,
++    "kanban_link": ActionClass.FILE_WRITE,
++    "kanban_unblock": ActionClass.FILE_WRITE,
++    "close_terminal": ActionClass.CONFIGURATION_CHANGE,
++    "terminal": ActionClass.TERMINAL_EXECUTION,
++    "execute_code": ActionClass.TERMINAL_EXECUTION,
++    "process": ActionClass.TERMINAL_EXECUTION,
++    "memory": ActionClass.MEMORY_WRITE,
++    "cronjob": ActionClass.CRON_CREATE_UPDATE_DELETE,
++    "send_message": ActionClass.OUTBOUND_MESSAGE,
++    "spotify_library": ActionClass.CREDENTIALED_NETWORK_CALL,
++    "spotify_playback": ActionClass.CREDENTIALED_NETWORK_CALL,
++    "spotify_queue": ActionClass.CREDENTIALED_NETWORK_CALL,
++    "discord": ActionClass.OUTBOUND_MESSAGE,
++    "discord_admin": ActionClass.CONFIGURATION_CHANGE,
++    "feishu_drive_reply_comment": ActionClass.OUTBOUND_MESSAGE,
++    "feishu_drive_add_comment": ActionClass.OUTBOUND_MESSAGE,
++    "yb_query_group_info": ActionClass.READ_ONLY_NETWORK_FETCH,
++    "yb_query_group_members": ActionClass.READ_ONLY_NETWORK_FETCH,
++    "yb_search_sticker": ActionClass.READ_ONLY_NETWORK_FETCH,
++    "yb_send_dm": ActionClass.OUTBOUND_MESSAGE,
++    "yb_send_sticker": ActionClass.OUTBOUND_MESSAGE,
++    "ha_call_service": ActionClass.CONFIGURATION_CHANGE,
++    "image_generate": ActionClass.CREDENTIALED_NETWORK_CALL,
++    "video_generate": ActionClass.CREDENTIALED_NETWORK_CALL,
++    "xai_video_edit": ActionClass.CREDENTIALED_NETWORK_CALL,
++    "xai_video_extend": ActionClass.CREDENTIALED_NETWORK_CALL,
++    "mixture_of_agents": ActionClass.CREDENTIALED_NETWORK_CALL,
++    "project_create": ActionClass.CONFIGURATION_CHANGE,
++    "project_switch": ActionClass.CONFIGURATION_CHANGE,
++    "rl_select_environment": ActionClass.CONFIGURATION_CHANGE,
++    "rl_edit_config": ActionClass.CONFIGURATION_CHANGE,
++    "rl_start_training": ActionClass.CONFIGURATION_CHANGE,
++    "rl_stop_training": ActionClass.CONFIGURATION_CHANGE,
++    "rl_test_inference": ActionClass.CREDENTIALED_NETWORK_CALL,
++    "text_to_speech": ActionClass.CREDENTIALED_NETWORK_CALL,
++    "skill_manage": ActionClass.SKILL_PLUGIN_EXECUTE,
++    "browser_navigate": ActionClass.READ_ONLY_NETWORK_FETCH,
++    "browser_click": ActionClass.CREDENTIALED_NETWORK_CALL,
++    "browser_type": ActionClass.CREDENTIALED_NETWORK_CALL,
++    "browser_press": ActionClass.CREDENTIALED_NETWORK_CALL,
++    "browser_cdp": ActionClass.CREDENTIALED_NETWORK_CALL,
++    "browser_dialog": ActionClass.CREDENTIALED_NETWORK_CALL,
++    "computer_use": ActionClass.CREDENTIALED_NETWORK_CALL,
++}
++
++EXPLICIT_TOOL_EXEMPTIONS: dict[str, str] = {
++    "todo": "agent-loop planning state only; mediated by the agent loop",
++    "clarify": "agent-loop user confirmation prompt; cannot perform external side effects by itself",
++    "delegate_task": "agent-loop orchestration primitive; subagent tool calls remain subject to their own authority gates",
++}
++
++
++def action_class_for_tool(tool_name: str) -> ActionClass:
++    """Return the stable catalog class for a tool name."""
++    return TOOL_ACTION_CLASSES.get((tool_name or "").lower(), ActionClass.UNKNOWN_SIDE_EFFECT)
++
++
++def classified_tool_names() -> set[str]:
++    return set(TOOL_ACTION_CLASSES)
++
++
++def action_authority_coverage_gaps(
++    tool_names: set[str],
++    *,
++    classifier: Callable[[str, Mapping[str, object] | None], ActionClass] | None = None,
++) -> dict[str, list[str]]:
++    classified = classified_tool_names() | set(EXPLICIT_TOOL_EXEMPTIONS)
++    missing = sorted(set(tool_names) - classified)
++    classify = classifier or (lambda name, _args=None: action_class_for_tool(name))
++    unknown = sorted(
++        name
++        for name in set(tool_names)
++        if name in classified
++        and name not in EXPLICIT_TOOL_EXEMPTIONS
++        and classify(name, {}) == ActionClass.UNKNOWN_SIDE_EFFECT
++    )
++    return {"missing": missing, "unknown": unknown}

@@ -1,0 +1,37 @@
+diff --git a/agent/memory_manager.py b/agent/memory_manager.py
+index fc5d96da4..01aa47063 100644
+--- a/agent/memory_manager.py
++++ b/agent/memory_manager.py
+@@ -30,6 +30,7 @@ import re
+ import inspect
+ from typing import Any, Dict, List, Optional
+ 
++from agent.context_safety import ContextSurface, render_untrusted_context
+ from agent.memory_provider import MemoryProvider
+ from tools.registry import tool_error
+ 
+@@ -320,13 +321,23 @@ class MemoryManager:
+ 
+         Returns combined text, or empty string if no providers contribute.
+         Each non-empty block is labeled with the provider name.
++        Built-in memory text keeps the upstream prompt contract. External
++        provider text is rendered as recalled-memory evidence, not as
++        system-prompt authority.
+         """
+         blocks = []
+         for provider in self._providers:
+             try:
+                 block = provider.system_prompt_block()
+                 if block and block.strip():
+-                    blocks.append(block)
++                    if provider.name == "builtin":
++                        blocks.append(block)
++                    else:
++                        blocks.append(render_untrusted_context(
++                            sanitize_context(block),
++                            surface=ContextSurface.MEMORY_CONTEXT,
++                            source_label=f"memory_provider:{provider.name}",
++                        ))
+             except Exception as e:
+                 logger.warning(
+                     "Memory provider '%s' system_prompt_block() failed: %s",

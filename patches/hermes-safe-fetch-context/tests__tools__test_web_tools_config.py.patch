@@ -1,0 +1,16 @@
+diff --git a/tests/tools/test_web_tools_config.py b/tests/tools/test_web_tools_config.py
+index e9bcd8e20..2ea3e360c 100644
+--- a/tests/tools/test_web_tools_config.py
++++ b/tests/tools/test_web_tools_config.py
+@@ -505,7 +505,10 @@ class TestWebSearchSchema:
+              patch.object(tools.web_tools._debug, "save"):
+             result = json.loads(tools.web_tools.web_search_tool("docs", limit=500))
+ 
+-        assert result == {"success": True, "data": {"web": []}}
++        assert result["success"] is True
++        assert result["data"] == {"web": []}
++        assert result["evidence_ledger"]["tool_name"] == "web_search"
++        assert result["evidence_ledger"]["tool_invocation"]["args_redacted"]["limit"] == 100
+         fake_search.assert_called_once_with("docs", 100)
+ 
+ 

@@ -1,0 +1,79 @@
+diff --git a/tests/tools/test_web_tools_tavily.py b/tests/tools/test_web_tools_tavily.py
+index d65baac3e..9cc50a81a 100644
+--- a/tests/tools/test_web_tools_tavily.py
++++ b/tests/tools/test_web_tools_tavily.py
+@@ -11,7 +11,7 @@ import json
+ import os
+ import asyncio
+ import pytest
+-from unittest.mock import patch, MagicMock
++from unittest.mock import AsyncMock, patch, MagicMock
+ 
+ from tests.tools.conftest import register_all_web_providers
+ 
+@@ -190,6 +190,21 @@ class TestWebSearchTavily:
+             assert result["success"] is True
+             assert len(result["data"]["web"]) == 1
+             assert result["data"]["web"][0]["title"] == "Result"
++            ledger = result["evidence_ledger"]
++            assert ledger["schema"] == "hermes.tool_result_ledger.v1"
++            assert ledger["ledger_origin"] == "native_tool"
++            assert ledger["tool_name"] == "web_search"
++            assert ledger["trust_boundary"] == "untrusted_external"
++            assert ledger["tool_invocation"]["name"] == "web_search"
++            item = ledger["evidence_items"][0]
++            assert item["kind"] == "web_search_snippet"
++            assert item["evidence_only"] is True
++            assert item["instruction_authority"] == "none"
++            assert item["can_authorize_action"] is False
++            assert item["side_effect_use_policy"] == "requires_independent_trusted_intent"
++            assert item["text"] is None
++            assert item["text_ref"] == "data.web[0].title_description"
++            assert item["source_uri"] == "https://r.com"
+ 
+ 
+ # ─── web_extract_tool (Tavily dispatch) ───────────────────────────────────────
+@@ -215,6 +230,7 @@ class TestWebExtractTavily:
+ 
+         with patch("tools.web_tools._get_backend", return_value="tavily"), \
+              patch.dict(os.environ, {"TAVILY_API_KEY": "tvly-test"}), \
++             patch("tools.web_tools.async_is_safe_url", new=AsyncMock(return_value=True)), \
+              patch("tools.web_tools.httpx.post", return_value=mock_response):
+             from tools.web_tools import web_extract_tool
+             result = json.loads(asyncio.get_event_loop().run_until_complete(
+@@ -223,5 +239,33 @@ class TestWebExtractTavily:
+             assert "results" in result
+             assert len(result["results"]) == 1
+             assert result["results"][0]["url"] == "https://example.com"
+-            assert "Extracted content" in result["results"][0]["content"]
+-
++            ledger = result["evidence_ledger"]
++            assert ledger["schema"] == "hermes.tool_result_ledger.v1"
++            assert ledger["ledger_origin"] == "native_tool"
++            assert ledger["tool_name"] == "web_extract"
++            assert ledger["tool_invocation"]["name"] == "web_extract"
++            item = ledger["evidence_items"][0]
++            assert item["kind"] == "downloaded_web_text"
++            assert item["verbatim"] is True
++            assert item["evidence_only"] is True
++            assert item["instruction_authority"] == "none"
++            assert item["can_authorize_action"] is False
++            assert item["text"] is None
++            assert item["text_ref"] == "results[0].content"
++            assert item["char_count"] == len("Extracted content")
++            assert item["source_uri"] == "https://example.com"
++
++    def test_extract_secret_url_block_includes_blocked_ledger_without_secret(self):
++        from tools.web_tools import web_extract_tool
++        result = json.loads(asyncio.get_event_loop().run_until_complete(
++            web_extract_tool(["https://example.com/?token=sk-test-secret"], use_llm_processing=False)
++        ))
++
++        assert result["success"] is False
++        serialized = json.dumps(result, ensure_ascii=False)
++        assert "sk-test-secret" not in serialized
++        ledger = result["evidence_ledger"]
++        assert ledger["tool_name"] == "web_extract"
++        assert ledger["tool_invocation"]["blocked"] is True
++        assert ledger["metadata"]["blocked_reason"] == "url_contains_secret"
++        assert ledger["evidence_items"] == []

@@ -1,0 +1,8 @@
+hermes_constants.py.patch
+hermes_cli__managed_uv.py.patch
+hermes_cli__main.py.patch
+tests__test_hermes_constants.py.patch
+tests__hermes_cli__test_managed_uv.py.patch
+tests__hermes_cli__test_update_autostash.py.patch
+tests__hermes_cli__test_uv_tool_update.py.patch
+tests__hermes_cli__test_web_ui_build.py.patch

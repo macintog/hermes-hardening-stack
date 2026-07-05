@@ -1,0 +1,11 @@
+.DS_Store
+*.swp
+*.swo
+/tmp/
+/worktrees/
+/verification-output/*.log
+/verification-output/*.raw.log
+/verification-output/*.local.log
+/verification-output/*.tmp
+/verification-output/worktrees/
+/.codex/qa/

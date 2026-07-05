@@ -1,0 +1,381 @@
+diff --git a/gateway/platforms/api_server.py b/gateway/platforms/api_server.py
+index ea91aea43..963514a42 100644
+--- a/gateway/platforms/api_server.py
++++ b/gateway/platforms/api_server.py
+@@ -810,6 +810,7 @@ class APIServerAdapter(BasePlatformAdapter):
+         # Number of in-flight runs on the non-streaming chat/responses paths
+         # (the /v1/runs path tracks its own in-flight set via _run_streams).
+         self._inflight_agent_runs: int = 0
++        self._gateway_active_intent_nonces: Dict[str, float] = {}
+ 
+     @staticmethod
+     def _parse_cors_origins(value: Any) -> tuple[str, ...]:
+@@ -982,6 +983,179 @@ class APIServerAdapter(BasePlatformAdapter):
+             status=401,
+         )
+ 
++    _GATEWAY_ACTIVE_INTENT_HEADER = "X-Hermes-Gateway-Active-Intent"
++    _GATEWAY_ACTIVE_INTENT_HEADER_VALUE = "hermes-gateway-remote-proxy-v2"
++    _GATEWAY_ACTIVE_INTENT_SIGNATURE_HEADER = "X-Hermes-Gateway-Active-Intent-Signature"
++    _GATEWAY_ACTIVE_INTENT_TIMESTAMP_HEADER = "X-Hermes-Gateway-Active-Intent-Timestamp"
++    _GATEWAY_ACTIVE_INTENT_NONCE_HEADER = "X-Hermes-Gateway-Active-Intent-Nonce"
++    _GATEWAY_ACTIVE_INTENT_MAX_CLOCK_SKEW_SECONDS = 300
++    _GATEWAY_ACTIVE_INTENT_MAX_NONCES = 2048
++    _MAX_ACTIVE_INTENT_TEXT_CHARS = 32_768
++    _MAX_ACTIVE_INTENT_EVIDENCE_CHARS = 131_072
++    _MAX_ACTIVE_INTENT_SEGMENTS = 64
++
++    @staticmethod
++    def _gateway_active_intent_secret() -> str:
++        return (
++            os.getenv("HERMES_GATEWAY_ACTIVE_INTENT_SECRET", "").strip()
++            or os.getenv("GATEWAY_ACTIVE_INTENT_SECRET", "").strip()
++        )
++
++    @classmethod
++    def _gateway_active_intent_signature(cls, raw_body: bytes, *, timestamp: str, nonce: str, secret: str) -> str:
++        payload = b"\n".join([
++            b"hermes-gateway-active-intent-v2",
++            timestamp.encode("utf-8"),
++            nonce.encode("utf-8"),
++            raw_body,
++        ])
++        return hmac.new(secret.encode("utf-8"), payload, hashlib.sha256).hexdigest()
++
++    async def _parse_json_request_body(self, request: "web.Request") -> tuple[Optional[Dict[str, Any]], bytes, Optional["web.Response"]]:
++        try:
++            raw_body = await request.read()
++            parsed = json.loads(raw_body.decode("utf-8"))
++        except (UnicodeDecodeError, json.JSONDecodeError, Exception):
++            return None, b"", web.json_response(_openai_error("Invalid JSON in request body"), status=400)
++        if not isinstance(parsed, dict):
++            return None, raw_body, web.json_response(_openai_error("Request body must be a JSON object"), status=400)
++        return parsed, raw_body, None
++
++    def _prune_gateway_active_intent_nonces(self, now: float) -> None:
++        nonces = getattr(self, "_gateway_active_intent_nonces", None)
++        if nonces is None:
++            nonces = {}
++            self._gateway_active_intent_nonces = nonces
++        cutoff = now - self._GATEWAY_ACTIVE_INTENT_MAX_CLOCK_SKEW_SECONDS
++        for nonce, seen_at in list(nonces.items()):
++            if seen_at < cutoff or len(nonces) > self._GATEWAY_ACTIVE_INTENT_MAX_NONCES:
++                nonces.pop(nonce, None)
++
++    def _verify_gateway_active_intent_signature(self, request: "web.Request", raw_body: bytes) -> Optional[str]:
++        """Return an error message when a body marker has an invalid internal signature."""
++        if not hmac.compare_digest(
++            request.headers.get(self._GATEWAY_ACTIVE_INTENT_HEADER, ""),
++            self._GATEWAY_ACTIVE_INTENT_HEADER_VALUE,
++        ):
++            return "Missing gateway active-intent signature"
++        secret = self._gateway_active_intent_secret()
++        if not secret:
++            return "Gateway active-intent secret is not configured"
++        timestamp = request.headers.get(self._GATEWAY_ACTIVE_INTENT_TIMESTAMP_HEADER, "").strip()
++        nonce = request.headers.get(self._GATEWAY_ACTIVE_INTENT_NONCE_HEADER, "").strip()
++        signature = request.headers.get(self._GATEWAY_ACTIVE_INTENT_SIGNATURE_HEADER, "").strip()
++        if not timestamp or not nonce or not signature:
++            return "Incomplete gateway active-intent signature"
++        try:
++            timestamp_value = int(timestamp)
++        except ValueError:
++            return "Invalid gateway active-intent timestamp"
++        now = time.time()
++        if abs(now - timestamp_value) > self._GATEWAY_ACTIVE_INTENT_MAX_CLOCK_SKEW_SECONDS:
++            return "Stale gateway active-intent signature"
++        if len(nonce) > 128:
++            return "Invalid gateway active-intent nonce"
++        self._prune_gateway_active_intent_nonces(now)
++        nonces = getattr(self, "_gateway_active_intent_nonces", {})
++        if nonce in nonces:
++            return "Replayed gateway active-intent signature"
++        expected = self._gateway_active_intent_signature(raw_body, timestamp=timestamp, nonce=nonce, secret=secret)
++        if not hmac.compare_digest(signature, expected):
++            return "Invalid gateway active-intent signature"
++        nonces[nonce] = now
++        return None
++
++    @staticmethod
++    def _contains_gateway_active_intent_marker(items: Any) -> bool:
++        if isinstance(items, dict):
++            return "__active_user_intent" in items
++        if isinstance(items, list):
++            return any(isinstance(item, dict) and "__active_user_intent" in item for item in items)
++        return False
++
++    def _body_has_signed_gateway_active_intent(self, request: "web.Request", raw_body: bytes, body: Dict[str, Any], container_key: str) -> tuple[bool, Optional["web.Response"]]:
++        if not self._contains_gateway_active_intent_marker(body.get(container_key)):
++            return False, None
++        signature = request.headers.get(self._GATEWAY_ACTIVE_INTENT_SIGNATURE_HEADER, "").strip()
++        if not signature:
++            return False, None
++        error = self._verify_gateway_active_intent_signature(request, raw_body)
++        if error:
++            return False, web.json_response(_openai_error(error), status=400)
++        return True, None
++
++    def _normalize_gateway_active_intent_marker(self, marker: Any) -> Dict[str, Any]:
++        """Validate and normalize the internal active-intent marker shape."""
++        if not isinstance(marker, dict):
++            raise ValueError("__active_user_intent must be an object")
++
++        normalized: Dict[str, Any] = {}
++        active_text = marker.get("active_text", "")
++        if active_text is not None:
++            if not isinstance(active_text, str):
++                raise ValueError("__active_user_intent.active_text must be a string")
++            if len(active_text) > self._MAX_ACTIVE_INTENT_TEXT_CHARS:
++                raise ValueError("__active_user_intent.active_text is too large")
++            normalized["active_text"] = active_text
++
++        evidence_text = marker.get("evidence_text")
++        if evidence_text is not None:
++            if not isinstance(evidence_text, str):
++                raise ValueError("__active_user_intent.evidence_text must be a string")
++            if len(evidence_text) > self._MAX_ACTIVE_INTENT_EVIDENCE_CHARS:
++                raise ValueError("__active_user_intent.evidence_text is too large")
++            normalized["evidence_text"] = evidence_text
++
++        raw_segments = marker.get("segments", [])
++        if raw_segments is None:
++            raw_segments = []
++        if not isinstance(raw_segments, list):
++            raise ValueError("__active_user_intent.segments must be an array")
++        if len(raw_segments) > self._MAX_ACTIVE_INTENT_SEGMENTS:
++            raise ValueError("__active_user_intent.segments has too many entries")
++
++        segments: List[Dict[str, Any]] = []
++        total_segment_text = 0
++        for idx, segment in enumerate(raw_segments):
++            if not isinstance(segment, dict):
++                raise ValueError(f"__active_user_intent.segments[{idx}] must be an object")
++            text = segment.get("text", "")
++            if not isinstance(text, str):
++                raise ValueError(f"__active_user_intent.segments[{idx}].text must be a string")
++            total_segment_text += len(text)
++            if total_segment_text > self._MAX_ACTIVE_INTENT_EVIDENCE_CHARS:
++                raise ValueError("__active_user_intent.segments text is too large")
++            trusted = segment.get("trusted_for_authority", False)
++            if not isinstance(trusted, bool):
++                raise ValueError(f"__active_user_intent.segments[{idx}].trusted_for_authority must be a boolean")
++            normalized_segment: Dict[str, Any] = {
++                "text": text,
++                "trusted_for_authority": trusted,
++            }
++            for key in ("kind", "surface", "source_label"):
++                value = segment.get(key)
++                if value is None:
++                    continue
++                if not isinstance(value, str):
++                    raise ValueError(f"__active_user_intent.segments[{idx}].{key} must be a string")
++                if len(value) > 256:
++                    raise ValueError(f"__active_user_intent.segments[{idx}].{key} is too large")
++                normalized_segment[key] = value
++            segments.append(normalized_segment)
++
++        normalized["segments"] = segments
++        trusted_segment_texts = [segment["text"] for segment in segments if segment.get("trusted_for_authority")]
++        active_text_value = normalized.get("active_text", "")
++        joined_trusted_text = "\n\n".join(text for text in trusted_segment_texts if text)
++        if active_text_value and segments:
++            if active_text_value not in trusted_segment_texts and active_text_value != joined_trusted_text:
++                raise ValueError("__active_user_intent.active_text must match trusted active-intent segments")
++        elif joined_trusted_text:
++            normalized["active_text"] = joined_trusted_text
++        if "active_text" not in normalized and not segments and "evidence_text" not in normalized:
++            raise ValueError("__active_user_intent must include active_text, evidence_text, or segments")
++        return normalized
++
+     # ------------------------------------------------------------------
+     # Session header helpers
+     # ------------------------------------------------------------------
+@@ -1825,11 +1999,10 @@ class APIServerAdapter(BasePlatformAdapter):
+         if limited is not None:
+             return limited
+ 
+-        # Parse request body
+-        try:
+-            body = await request.json()
+-        except (json.JSONDecodeError, Exception):
+-            return web.json_response(_openai_error("Invalid JSON in request body"), status=400)
++        body, raw_body, parse_error = await self._parse_json_request_body(request)
++        if parse_error:
++            return parse_error
++        assert body is not None
+ 
+         messages = body.get("messages")
+         if not messages or not isinstance(messages, list):
+@@ -1837,12 +2010,21 @@ class APIServerAdapter(BasePlatformAdapter):
+                 {"error": {"message": "Missing or invalid 'messages' field", "type": "invalid_request_error"}},
+                 status=400,
+             )
++        trusts_gateway_active_intent, signature_error = self._body_has_signed_gateway_active_intent(
++            request,
++            raw_body,
++            body,
++            "messages",
++        )
++        if signature_error:
++            return signature_error
+ 
+         stream = _coerce_request_bool(body.get("stream"), default=False)
+ 
+         # Extract system message (becomes ephemeral system prompt layered ON TOP of core)
+         system_prompt = None
+-        conversation_messages: List[Dict[str, str]] = []
++        conversation_messages: List[Dict[str, Any]] = []
++        active_user_intent: Any = None
+ 
+         for idx, msg in enumerate(messages):
+             role = msg.get("role", "")
+@@ -1860,14 +2042,26 @@ class APIServerAdapter(BasePlatformAdapter):
+                     content = _normalize_multimodal_content(raw_content)
+                 except ValueError as exc:
+                     return _multimodal_validation_error(exc, param=f"messages[{idx}].content")
+-                conversation_messages.append({"role": role, "content": content})
++                normalized_message: Dict[str, Any] = {"role": role, "content": content}
++                if role == "user" and trusts_gateway_active_intent and "__active_user_intent" in msg:
++                    try:
++                        normalized_message["__active_user_intent"] = self._normalize_gateway_active_intent_marker(
++                            msg.get("__active_user_intent")
++                        )
++                    except ValueError as exc:
++                        return web.json_response(_openai_error(str(exc), param=f"messages[{idx}].__active_user_intent"), status=400)
++                conversation_messages.append(normalized_message)
+ 
+         # Extract the last user message as the primary input
+         user_message: Any = ""
+         history = []
+         if conversation_messages:
+             user_message = conversation_messages[-1].get("content", "")
+-            history = conversation_messages[:-1]
++            active_user_intent = conversation_messages[-1].get("__active_user_intent")
++            history = [
++                {"role": item.get("role", ""), "content": item.get("content", "")}
++                for item in conversation_messages[:-1]
++            ]
+ 
+         if not _content_has_visible_payload(user_message):
+             return web.json_response(
+@@ -2029,6 +2223,7 @@ class APIServerAdapter(BasePlatformAdapter):
+                 tool_complete_callback=_on_tool_complete,
+                 agent_ref=agent_ref,
+                 gateway_session_key=gateway_session_key,
++                active_user_intent=active_user_intent,
+             ))
+             # Ensure SSE drain loops can terminate without relying on polling
+             # agent_task.done(), which can race with queue timeout checks.
+@@ -2048,6 +2243,7 @@ class APIServerAdapter(BasePlatformAdapter):
+                 ephemeral_system_prompt=system_prompt,
+                 session_id=session_id,
+                 gateway_session_key=gateway_session_key,
++                active_user_intent=active_user_intent,
+             )
+ 
+         idempotency_key = request.headers.get("Idempotency-Key")
+@@ -2959,18 +3155,22 @@ class APIServerAdapter(BasePlatformAdapter):
+         if key_err is not None:
+             return key_err
+ 
+-        # Parse request body
+-        try:
+-            body = await request.json()
+-        except (json.JSONDecodeError, Exception):
+-            return web.json_response(
+-                {"error": {"message": "Invalid JSON in request body", "type": "invalid_request_error"}},
+-                status=400,
+-            )
++        body, raw_body, parse_error = await self._parse_json_request_body(request)
++        if parse_error:
++            return parse_error
++        assert body is not None
+ 
+         raw_input = body.get("input")
+         if raw_input is None:
+             return web.json_response(_openai_error("Missing 'input' field"), status=400)
++        trusts_gateway_active_intent, signature_error = self._body_has_signed_gateway_active_intent(
++            request,
++            raw_body,
++            body,
++            "input",
++        )
++        if signature_error:
++            return signature_error
+ 
+         instructions = body.get("instructions")
+         previous_response_id = body.get("previous_response_id")
+@@ -3000,7 +3200,15 @@ class APIServerAdapter(BasePlatformAdapter):
+                         content = _normalize_multimodal_content(item.get("content", ""))
+                     except ValueError as exc:
+                         return _multimodal_validation_error(exc, param=f"input[{idx}].content")
+-                    input_messages.append({"role": role, "content": content})
++                    normalized_message: Dict[str, Any] = {"role": role, "content": content}
++                    if role == "user" and trusts_gateway_active_intent and "__active_user_intent" in item:
++                        try:
++                            normalized_message["__active_user_intent"] = self._normalize_gateway_active_intent_marker(
++                                item.get("__active_user_intent")
++                            )
++                        except ValueError as exc:
++                            return web.json_response(_openai_error(str(exc), param=f"input[{idx}].__active_user_intent"), status=400)
++                    input_messages.append(normalized_message)
+         else:
+             return web.json_response(_openai_error("'input' must be a string or array"), status=400)
+ 
+@@ -3043,10 +3251,11 @@ class APIServerAdapter(BasePlatformAdapter):
+ 
+         # Append new input messages to history (all but the last become history)
+         for msg in input_messages[:-1]:
+-            conversation_history.append(msg)
++            conversation_history.append({"role": msg.get("role", "user"), "content": msg.get("content", "")})
+ 
+         # Last input message is the user_message
+         user_message: Any = input_messages[-1].get("content", "") if input_messages else ""
++        active_user_intent = input_messages[-1].get("__active_user_intent") if input_messages else None
+         if not _content_has_visible_payload(user_message):
+             return web.json_response(_openai_error("No user message found in input"), status=400)
+ 
+@@ -3111,6 +3320,7 @@ class APIServerAdapter(BasePlatformAdapter):
+                 tool_complete_callback=_on_tool_complete,
+                 agent_ref=agent_ref,
+                 gateway_session_key=gateway_session_key,
++                active_user_intent=active_user_intent,
+             ))
+             # Ensure SSE drain loops can terminate without relying on polling
+             # agent_task.done(), which can race with queue timeout checks.
+@@ -3144,6 +3354,7 @@ class APIServerAdapter(BasePlatformAdapter):
+                 ephemeral_system_prompt=instructions,
+                 session_id=session_id,
+                 gateway_session_key=gateway_session_key,
++                active_user_intent=active_user_intent,
+             )
+ 
+         idempotency_key = request.headers.get("Idempotency-Key")
+@@ -3774,6 +3985,7 @@ class APIServerAdapter(BasePlatformAdapter):
+         tool_complete_callback=None,
+         agent_ref: Optional[list] = None,
+         gateway_session_key: Optional[str] = None,
++        active_user_intent: Optional[Any] = None,
+     ) -> tuple:
+         """
+         Create an agent and run a conversation in a thread executor.
+@@ -3809,11 +4021,14 @@ class APIServerAdapter(BasePlatformAdapter):
+                 if agent_ref is not None:
+                     agent_ref[0] = agent
+                 effective_task_id = session_id or str(uuid.uuid4())
+-                result = agent.run_conversation(
+-                    user_message=user_message,
+-                    conversation_history=conversation_history,
+-                    task_id=effective_task_id,
+-                )
++                run_conversation_kwargs = {
++                    "user_message": user_message,
++                    "conversation_history": conversation_history,
++                    "task_id": effective_task_id,
++                }
++                if active_user_intent is not None:
++                    run_conversation_kwargs["active_user_intent"] = active_user_intent
++                result = agent.run_conversation(**run_conversation_kwargs)
+                 usage = {
+                     "input_tokens": getattr(agent, "session_prompt_tokens", 0) or 0,
+                     "output_tokens": getattr(agent, "session_completion_tokens", 0) or 0,

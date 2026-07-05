@@ -1,0 +1,1562 @@
+#!/usr/bin/env python3
+"""Repo-owned control plane for Hermes Docker QA."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from collections import Counter, defaultdict
+from urllib.parse import quote
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+WRAPPER = REPO_ROOT / "scripts" / "qualify-hermes-patch-docker.sh"
+CLEANUP_WORKTREES = REPO_ROOT / "scripts" / "cleanup-hermes-verifier-worktrees"
+DEFAULT_CHECKOUT = "<hermes-checkout>"
+DEFAULT_SMOKE = "tests/docker/test_toplevel_chown.py::test_non_allowlisted_host_file_not_touched -q --tb=short -ra"
+DEFAULT_FACTS_PATH = REPO_ROOT / ".codex" / "qa" / "current-docker-prepared-image.json"
+DOCKERFILE = REPO_ROOT / "docker" / "hermes-upstream-test" / "Dockerfile"
+PAYLOAD_DIR = REPO_ROOT / "patches" / "hermes-safe-fetch-context"
+SERIES_FILE = PAYLOAD_DIR / "series"
+MANIFEST_FILE = PAYLOAD_DIR / "manifest.yaml"
+BASE_REF_FILE = PAYLOAD_DIR / "base.ref"
+LOCAL_AUTHORITY_BLOCKERS = (
+    ".codex/qa/index.sqlite writes",
+    "Docker socket access",
+    "loopback socket binds",
+    "verifier temp-worktree writes",
+)
+LOCAL_AUTHORITY_RULE = (
+    "Start codex-qa, Docker harness, payload verifier, and focused applied-tree pytest surfaces under local authority "
+    "whenever they need generated QA-index writes, Docker socket access, loopback socket binds, or verifier temp-worktree writes; "
+    "do not run a sandbox probe first."
+)
+DEFAULT_WORKER_AVENUES = (
+    ("agent-run-agent", "tests/agent tests/run_agent -q --tb=short -ra"),
+    ("tools", "tests/tools -q --tb=short -ra"),
+    ("gateway", "tests/gateway tests/tui_gateway tests/acp_adapter -q --ignore=tests/gateway/test_session.py --tb=short -ra"),
+    (
+        "cli-plugins",
+        "tests/hermes_cli tests/cli tests/scripts tests/ci tests/docker tests/plugins tests/honcho_plugin "
+        "tests/openviking_plugin tests/providers tests/hermes_state tests/cron tests/skills tests/computer_use "
+        "-q --ignore=tests/hermes_cli/test_setup_model_provider.py --tb=short -ra",
+    ),
+)
+DEFAULT_REPEAT_PYTEST_ARGS = (
+    "tests/ -q --ignore=tests/integration --ignore=tests/e2e --ignore=tests/gateway/test_session.py "
+    "--ignore=tests/hermes_cli/test_setup_model_provider.py --tb=short -ra"
+)
+DOCKER_TEST_ENV = (
+    ("TERM", "dumb"),
+    ("CI", "1"),
+    ("TZ", "UTC"),
+    ("LANG", "C.UTF-8"),
+    ("LC_ALL", "C.UTF-8"),
+    ("PYTHONHASHSEED", "0"),
+    ("UV_CACHE_DIR", "/uv-cache"),
+    ("UV_LINK_MODE", "copy"),
+    ("OPENROUTER_API_KEY", ""),
+    ("OPENAI_API_KEY", ""),
+    ("NOUS_API_KEY", ""),
+)
+FINGERPRINT_REUSE_TOLERATED_PATHS = {"scripts/codex-hermes-docker-qa", "scripts/qualify-hermes-patch-docker.sh"}
+PLAN_PREFIX = "HERMES_DOCKER_QA_PLAN_JSON "
+SUMMARY_PREFIX = "VERIFIER_SUMMARY_JSON "
+WORKTREE_PREFIX = "HERMES_VERIFIER_WORKTREES_JSON "
+
+
+@dataclass
+class CommandResult:
+    code: int
+    text: str
+
+
+class HarnessStop(Exception):
+    def __init__(self, status: str, code: str, message: str, facts: dict[str, object] | None = None):
+        super().__init__(message)
+        self.status = status
+        self.code = code
+        self.message = message
+        self.facts = facts or {}
+
+
+def compact(payload: dict[str, object]) -> str:
+    clean = {}
+    for key, value in payload.items():
+        if value in (None, "", [], {}):
+            continue
+        clean[key] = value
+    return json.dumps(clean, sort_keys=True, separators=(",", ":"))
+
+
+def repo_relative(path: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(REPO_ROOT))
+    except ValueError:
+        return str(path.resolve())
+
+
+def read_series() -> list[str]:
+    try:
+        lines = SERIES_FILE.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        raise HarnessStop("BLOCKED", "missing_source_fingerprint_input", "source fingerprint input is missing", {"path": str(SERIES_FILE)})
+    fragments: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        fragments.append(stripped)
+    if not fragments:
+        raise HarnessStop("BLOCKED", "empty_series", "series has no patch fragments for source fingerprinting", {"path": str(SERIES_FILE)})
+    return fragments
+
+
+def optional_current_upstream_files() -> list[Path]:
+    candidates: list[Path] = []
+    for pattern in ("current-upstream*", "current_upstream*"):
+        candidates.extend(PAYLOAD_DIR.glob(pattern))
+    return sorted(path for path in candidates if path.is_file())
+
+
+def current_upstream_marker_path(path: str) -> bool:
+    return path.startswith("patches/hermes-safe-fetch-context/current-upstream") or path.startswith(
+        "patches/hermes-safe-fetch-context/current_upstream"
+    )
+
+
+def source_fingerprint() -> dict[str, object]:
+    paths = [
+        Path(__file__).resolve(),
+        WRAPPER,
+        DOCKERFILE,
+        SERIES_FILE,
+        MANIFEST_FILE,
+        BASE_REF_FILE,
+        *optional_current_upstream_files(),
+    ]
+    paths.extend(PAYLOAD_DIR / fragment for fragment in read_series())
+
+    entries: list[dict[str, object]] = []
+    overall = hashlib.sha256()
+    missing: list[str] = []
+    for path in paths:
+        rel = repo_relative(path)
+        overall.update(f"path\0{rel}\0".encode())
+        if not path.exists():
+            missing.append(rel)
+            overall.update(b"<missing>")
+            entries.append({"path": rel, "missing": True})
+            continue
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        overall.update(digest.encode())
+        entries.append({"path": rel, "sha256": digest, "size": path.stat().st_size})
+    if missing:
+        raise HarnessStop("BLOCKED", "missing_source_fingerprint_input", "source fingerprint input is missing", {"missing": missing})
+    return {
+        "algorithm": "sha256",
+        "digest": overall.hexdigest(),
+        "entries": entries,
+        "schema": "hermes_docker_qa_source_fingerprint.v1",
+    }
+
+
+def shell_join(cmd: list[str], *, env: dict[str, str] | None = None) -> str:
+    prefix = [f"{key}={shlex.quote(value)}" for key, value in sorted((env or {}).items())]
+    return " ".join(prefix + [shlex.join(cmd)])
+
+
+def emit(status: str, code: str, message: str, **facts: object) -> None:
+    print(f"{status}: {code}: {message}")
+    payload = {"status": status, "code": code, "message": message}
+    payload.update(facts)
+    print("HERMES_DOCKER_QA_RESULT_JSON " + compact(payload))
+
+
+def exit_for(status: str) -> int:
+    if status == "PASS":
+        return 0
+    if status == "ATTENTION":
+        return 1
+    return 2
+
+
+def classify_failure(text: str) -> str:
+    lowered = text.lower()
+    if "permission denied while trying to connect to the docker api" in lowered:
+        return "docker_socket_permission"
+    if "cannot connect to the docker daemon" in lowered:
+        return "docker_socket_unavailable"
+    if "docker cli not found" in lowered or "command not found: docker" in lowered:
+        return "docker_cli_missing"
+    if "sqlite3.operationalerror: unable to open database file" in lowered:
+        return "qa_index_permission"
+    if "unable to open database file" in lowered and ".codex/qa" in lowered:
+        return "qa_index_permission"
+    if "prepared dependency image does not exist" in lowered:
+        return "missing_prepared_image"
+    if "stale dependency hash" in lowered:
+        return "stale_prepared_image"
+    if "timed out waiting for prepared-image lock" in lowered:
+        return "prepared_image_lock_timeout"
+    if "not a git repository" in lowered or "not a git dir" in lowered:
+        return "checkout_invalid"
+    return "command_failed"
+
+
+def now_stamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def default_log_dir() -> Path:
+    root = Path(os.environ.get("TMPDIR", "/tmp"))
+    path = root / f"hermes-docker-qa-{now_stamp()}"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def run_command(cmd: list[str], *, log_path: Path | None = None, stream: bool = False, env: dict[str, str] | None = None) -> CommandResult:
+    run_env = os.environ.copy()
+    if env:
+        run_env.update(env)
+    if log_path:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(REPO_ROOT),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=run_env,
+        bufsize=1,
+    )
+    chunks: list[str] = []
+    log_file = log_path.open("w", encoding="utf-8") if log_path else None
+    try:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            chunks.append(line)
+            if log_file:
+                log_file.write(line)
+            if stream:
+                print(line, end="")
+        code = proc.wait()
+    finally:
+        if log_file:
+            log_file.close()
+    return CommandResult(code=code, text="".join(chunks))
+
+
+def archive_env(enabled: bool) -> dict[str, str]:
+    if enabled:
+        return {"HERMES_PAYLOAD_ARCHIVE_MODE": "1"}
+    return {}
+
+
+def facts_backed_prepared_image_env() -> dict[str, str]:
+    return {"HERMES_TEST_ALLOW_PREPARED_IMAGE_HASH_MISMATCH": "1"}
+
+
+def merge_env(*parts: dict[str, str]) -> dict[str, str]:
+    merged: dict[str, str] = {}
+    for part in parts:
+        merged.update(part)
+    return merged
+
+
+def archive_mode_enabled(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "archive_mode", False) or os.environ.get("HERMES_PAYLOAD_ARCHIVE_MODE") == "1")
+
+
+def require_local_authority(surface: str) -> None:
+    if not os.environ.get("CODEX_SANDBOX"):
+        return
+    if os.environ.get("HERMES_DOCKER_QA_ALLOW_SANDBOX_PROBE") == "1":
+        return
+    raise HarnessStop(
+        "BLOCKED",
+        "local_authority_required",
+        f"{surface} needs local authority; rerun directly under local authority instead of probing the Codex sandbox",
+        {"surface": surface, "known_blockers": list(LOCAL_AUTHORITY_BLOCKERS)},
+    )
+
+
+def require_success(result: CommandResult, surface: str, log_path: Path | None = None) -> None:
+    if result.code == 0:
+        return
+    facts: dict[str, object] = {"surface": surface}
+    if log_path:
+        facts["log"] = str(log_path)
+    raise HarnessStop("BLOCKED", classify_failure(result.text), f"{surface} failed", facts)
+
+
+def parse_prefixed_json(text: str, prefix: str) -> dict[str, object]:
+    for line in text.splitlines():
+        if line.startswith(prefix):
+            return json.loads(line[len(prefix) :])
+    raise HarnessStop("BLOCKED", "missing_json_summary", f"missing {prefix.strip()} output")
+
+
+def verifier_worktree_candidates(checkout: str) -> list[dict[str, object]]:
+    result = run_command([str(CLEANUP_WORKTREES), "--checkout", checkout, "--json"])
+    require_success(result, "verifier_worktree_scan")
+    payload = parse_prefixed_json(result.text, WORKTREE_PREFIX)
+    candidates = payload.get("candidates", [])
+    if not isinstance(candidates, list):
+        raise HarnessStop("BLOCKED", "invalid_worktree_scan", "verifier worktree scan returned invalid candidate data")
+    return [candidate for candidate in candidates if isinstance(candidate, dict)]
+
+
+def wrapper_plan(extra: list[str] | None = None) -> dict[str, object]:
+    cmd = [str(WRAPPER), "--print-plan"]
+    if extra:
+        cmd.extend(extra)
+    result = run_command(cmd)
+    require_success(result, "wrapper_plan")
+    return parse_prefixed_json(result.text, PLAN_PREFIX)
+
+
+def fixture_text(plan: dict[str, object]) -> str:
+    args = plan.get("pytest_args", [])
+    if not isinstance(args, list):
+        args = []
+    return f"python -m pytest {shlex.join(str(part) for part in args)}"
+
+
+def validate_default_plan(plan: dict[str, object]) -> list[str]:
+    issues: list[str] = []
+    args = [str(part) for part in plan.get("pytest_args", [])]
+    if plan.get("docker_tty") is True:
+        issues.append("docker_tty_enabled")
+    if "pytest_timeout_seconds" in plan:
+        issues.append("pytest_timeout_configured")
+    required = {
+        "--ignore=tests/integration",
+        "--ignore=tests/e2e",
+        "--ignore=tests/gateway/test_session.py",
+        "--ignore=tests/hermes_cli/test_setup_model_provider.py",
+        "--tb=short",
+        "-ra",
+    }
+    missing = sorted(required.difference(args))
+    for item in missing:
+        issues.append(f"missing_pytest_arg:{item}")
+    for index, value in enumerate(args):
+        if value == "-n" or value.startswith("-n"):
+            issues.append("xdist_enabled_by_default")
+        if value == "auto" and index > 0 and args[index - 1] == "-n":
+            issues.append("xdist_enabled_by_default")
+    return issues
+
+
+def preflight(checkout: str, *, emit_pass: bool = False) -> dict[str, object]:
+    require_local_authority("docker_qa_preflight")
+    plan = wrapper_plan()
+    issues = validate_default_plan(plan)
+    if issues:
+        raise HarnessStop(
+            "BLOCKED",
+            "wrapper_fixture_drift",
+            "Docker wrapper default no longer matches the repo-approved reduced no-TTY fixture",
+            {"issues": issues, "fixture": fixture_text(plan)},
+        )
+    qa = run_command(["codex-qa", "--project", str(REPO_ROOT), "doctor"])
+    require_success(qa, "codex_qa_doctor")
+    docker = run_command(["docker", "version"])
+    require_success(docker, "docker_socket")
+    stale_worktrees = verifier_worktree_candidates(checkout)
+    if stale_worktrees:
+        paths = [str(item.get("path", "")) for item in stale_worktrees if item.get("path")]
+        raise HarnessStop(
+            "ATTENTION",
+            "stale_verifier_worktrees",
+            "Verifier temp worktrees are still registered; remove proof residue before starting QA",
+            {
+                "cleanup_command": "./scripts/codex-hermes-docker-qa cleanup-worktrees --force",
+                "worktrees": paths,
+            },
+        )
+    if emit_pass:
+        emit("PASS", "preflight_ok", "Docker QA preflight passed", checkout=checkout, fixture=fixture_text(plan))
+    return plan
+
+
+def parse_prepare(text: str) -> dict[str, object]:
+    out: dict[str, object] = {}
+    patterns = {
+        "prepared_image": [
+            r"Prepared dependency image only; skipping pytest: (\S+)",
+            r"Prepared Hermes dependency image ready: (\S+)",
+            r"Reusing prepared Hermes dependency image(?: after [^:]+)?: (\S+)",
+        ],
+        "dependency_hash": [r"Prepared dependency hash: ([0-9a-fA-F]+)"],
+        "image_id": [r"Prepared dependency image id: (\S+)"],
+    }
+    for key, regexes in patterns.items():
+        for regex in regexes:
+            match = re.search(regex, text)
+            if match:
+                out[key] = match.group(1)
+                break
+    missing = [key for key in ("prepared_image", "dependency_hash", "image_id") if key not in out]
+    if missing:
+        raise HarnessStop("BLOCKED", "missing_prepare_summary", "prepare-only output did not include required image facts", {"missing": missing})
+    try:
+        verifier = parse_prefixed_json(text, SUMMARY_PREFIX)
+    except HarnessStop:
+        verifier = {}
+    if verifier:
+        out["verifier_summary"] = verifier
+        for key in (
+            "active_base_commit",
+            "active_base_ref",
+            "current_upstream_commit",
+            "current_upstream_ref",
+            "recorded_base_commit",
+            "recorded_base_ref",
+        ):
+            value = verifier.get(key)
+            if value:
+                out[key] = str(value)
+    return out
+
+
+def payload_recorded_base_ref() -> str:
+    try:
+        lines = BASE_REF_FILE.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        raise HarnessStop("BLOCKED", "missing_base_ref", "payload base.ref is missing", {"path": str(BASE_REF_FILE)})
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("base="):
+            value = stripped.split("=", 1)[1].strip()
+            if value:
+                return value
+        elif stripped and not stripped.startswith("#"):
+            return stripped
+    raise HarnessStop("BLOCKED", "invalid_base_ref", "payload base.ref does not name a base commit", {"path": str(BASE_REF_FILE)})
+
+
+def facts_value(facts: dict[str, object], *keys: str) -> str:
+    for key in keys:
+        value = facts.get(key)
+        if value:
+            return str(value)
+    verifier = facts.get("verifier_summary")
+    if isinstance(verifier, dict):
+        for key in keys:
+            value = verifier.get(key)
+            if value:
+                return str(value)
+    return ""
+
+
+def facts_prepared_base_commit(facts: dict[str, object]) -> str:
+    return facts_value(facts, "prepared_base_commit", "active_base_commit")
+
+
+def facts_prepared_base_ref(facts: dict[str, object]) -> str:
+    return facts_value(facts, "prepared_base_ref", "active_base_ref", "recorded_base_ref")
+
+
+def facts_worker_base_ref(facts: dict[str, object]) -> str:
+    return facts_prepared_base_commit(facts) or facts_prepared_base_ref(facts) or payload_recorded_base_ref()
+
+
+def slug_token(value: object, *, length: int | None = None, fallback: str = "unknown") -> str:
+    token = re.sub(r"[^A-Za-z0-9]+", "-", str(value or "")).strip("-")
+    if not token:
+        token = fallback
+    if length:
+        return token[:length]
+    return token
+
+
+def docker_run_label(facts: dict[str, object], base_ref: str, label: str, plan_kind: str) -> str:
+    image_short = slug_token(str(facts.get("image_id", "")).removeprefix("sha256:"), length=12, fallback="image")
+    dependency_short = slug_token(facts.get("dependency_hash", ""), length=8, fallback="deps")
+    base_short = slug_token(base_ref, length=8, fallback="base")
+    return slug_token(f"{plan_kind}-{label}-{base_short}-{dependency_short}-{image_short}", length=96)
+
+
+def facts_date_compact(facts: dict[str, object]) -> str:
+    created = str(facts.get("created_at", ""))
+    if created:
+        try:
+            parsed = datetime.fromisoformat(created.replace("Z", "+00:00"))
+            return parsed.strftime("%Y%m%d")
+        except ValueError:
+            match = re.match(r"(\d{4})-(\d{2})-(\d{2})", created)
+            if match:
+                return "".join(match.groups())
+    return datetime.now(timezone.utc).strftime("%Y%m%d")
+
+
+def require_base_ref_matches_facts(requested: str | None, facts: dict[str, object], facts_path: Path) -> str:
+    prepared_base = facts_worker_base_ref(facts)
+    if not requested:
+        return prepared_base
+    if requested == prepared_base:
+        return requested
+    raise HarnessStop(
+        "ATTENTION",
+        "prepared_image_base_mismatch",
+        "requested base ref does not match the prepared-image baseline; omit --base-ref to reuse the warmed facts baseline, or rerun prepare for an intentional rebaseline",
+        {
+            "facts_path": str(facts_path),
+            "prepared_base_ref": prepared_base,
+            "requested_base_ref": requested,
+            "rerun_prepare": f"./scripts/codex-hermes-docker-qa prepare --base-ref {shlex.quote(requested)} --facts-path {shlex.quote(str(facts_path))}",
+        },
+    )
+
+
+def write_facts(
+    path: Path,
+    prepare: dict[str, object],
+    plan: dict[str, object],
+    log: Path,
+    event_id: str,
+    *,
+    checkout: str,
+    archive_mode: bool,
+) -> Path:
+    fingerprint = source_fingerprint()
+    payload = {
+        "archive_mode": archive_mode,
+        "checkout": checkout,
+        "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "dependency_hash": prepare["dependency_hash"],
+        "event_id": event_id,
+        "fixture": fixture_text(plan),
+        "image_id": prepare["image_id"],
+        "log": str(log),
+        "prepared_image": prepare["prepared_image"],
+        "schema": "hermes_docker_qa_prepared_image.v2",
+        "source_fingerprint": fingerprint,
+        "source_fingerprint_digest": str(fingerprint["digest"]),
+        "wrapper": str(WRAPPER),
+    }
+    if prepare.get("active_base_ref"):
+        payload["prepared_base_ref"] = str(prepare["active_base_ref"])
+    if prepare.get("active_base_commit"):
+        payload["prepared_base_commit"] = str(prepare["active_base_commit"])
+    for key in ("active_base_ref", "active_base_commit", "recorded_base_ref", "recorded_base_commit", "current_upstream_ref", "current_upstream_commit"):
+        if prepare.get(key):
+            payload[key] = str(prepare[key])
+    verifier_summary = prepare.get("verifier_summary")
+    if isinstance(verifier_summary, dict):
+        payload["verifier_summary"] = verifier_summary
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(compact(payload) + "\n", encoding="utf-8")
+    return path
+
+
+def read_facts(path: Path) -> dict[str, object]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise HarnessStop("BLOCKED", "missing_prepared_image_facts", "prepared-image facts file does not exist", {"facts_path": str(path)})
+    except json.JSONDecodeError as exc:
+        raise HarnessStop("BLOCKED", "invalid_prepared_image_facts", "prepared-image facts file is not valid JSON", {"facts_path": str(path), "error": str(exc)})
+    if not isinstance(payload, dict):
+        raise HarnessStop("BLOCKED", "invalid_prepared_image_facts", "prepared-image facts file must contain an object", {"facts_path": str(path)})
+    missing = [key for key in ("prepared_image", "dependency_hash", "image_id") if not payload.get(key)]
+    if missing:
+        raise HarnessStop("BLOCKED", "invalid_prepared_image_facts", "prepared-image facts file is missing required image facts", {"facts_path": str(path), "missing": missing})
+    return payload
+
+
+def require_current_wrapper_facts(facts: dict[str, object], path: Path) -> None:
+    wrapper = facts.get("wrapper")
+    if wrapper and str(wrapper) != str(WRAPPER):
+        raise HarnessStop(
+            "BLOCKED",
+            "prepared_image_facts_wrapper_mismatch",
+            "prepared-image facts were created for a different wrapper path",
+            {"facts_path": str(path), "facts_wrapper": str(wrapper), "current_wrapper": str(WRAPPER)},
+        )
+    current = source_fingerprint()
+    stored = facts.get("source_fingerprint")
+    stored_digest = facts.get("source_fingerprint_digest")
+    if isinstance(stored, dict) and stored.get("digest"):
+        stored_digest = stored.get("digest")
+    if not stored_digest:
+        raise HarnessStop(
+            "BLOCKED",
+            "prepared_image_facts_missing_source_fingerprint",
+            "prepared-image facts do not include a source fingerprint; rerun prepare before reusing this image",
+            {"facts_path": str(path), "rerun_prepare": f"./scripts/codex-hermes-docker-qa prepare --facts-path {shlex.quote(str(path))}"},
+        )
+    if str(stored_digest) != str(current["digest"]):
+        changed_paths = fingerprint_changed_paths(stored, current) if isinstance(stored, dict) else []
+        if changed_paths and all(fingerprint_reuse_tolerated_path(changed) for changed in changed_paths):
+            return
+        raise HarnessStop(
+            "BLOCKED",
+            "stale_prepared_image_facts",
+            "prepared-image facts are stale for the current Docker QA source fingerprint; rerun prepare before reusing this image",
+            {
+                "current_source_fingerprint": str(current["digest"]),
+                "changed_paths": changed_paths,
+                "facts_path": str(path),
+                "rerun_prepare": f"./scripts/codex-hermes-docker-qa prepare --facts-path {shlex.quote(str(path))}",
+                "stored_source_fingerprint": str(stored_digest),
+            },
+        )
+
+
+def refresh_existing_facts_metadata(path: Path, facts: dict[str, object], plan: dict[str, object]) -> dict[str, object]:
+    refreshed = dict(facts)
+    fingerprint = source_fingerprint()
+    refreshed["fixture"] = fixture_text(plan)
+    refreshed["metadata_refreshed_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    refreshed["source_fingerprint"] = fingerprint
+    refreshed["source_fingerprint_digest"] = str(fingerprint["digest"])
+    refreshed["wrapper"] = str(WRAPPER)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(compact(refreshed) + "\n", encoding="utf-8")
+    return refreshed
+
+
+def prepared_image_matches_facts(facts: dict[str, object]) -> bool:
+    result = run_command(["docker", "image", "inspect", "--format", "{{.Id}}", str(facts["prepared_image"])])
+    if result.code != 0:
+        return False
+    actual = result.text.strip()
+    expected = str(facts.get("image_id", "")).strip()
+    return bool(actual and expected and actual == expected)
+
+
+def facts_source_fingerprint_digest(facts: dict[str, object]) -> str:
+    stored = facts.get("source_fingerprint")
+    if isinstance(stored, dict) and stored.get("digest"):
+        return str(stored["digest"])
+    return str(facts.get("source_fingerprint_digest", ""))
+
+
+def fingerprint_entry_key(entry: dict[str, object]) -> tuple[object, object, object]:
+    return (entry.get("sha256"), entry.get("size"), entry.get("missing"))
+
+
+def fingerprint_changed_paths(stored: dict[str, object], current: dict[str, object]) -> list[str]:
+    stored_entries = stored.get("entries")
+    current_entries = current.get("entries")
+    if not isinstance(stored_entries, list) or not isinstance(current_entries, list):
+        return []
+    stored_by_path = {str(entry.get("path")): entry for entry in stored_entries if isinstance(entry, dict) and entry.get("path")}
+    current_by_path = {str(entry.get("path")): entry for entry in current_entries if isinstance(entry, dict) and entry.get("path")}
+    changed: list[str] = []
+    for path in sorted(set(stored_by_path) | set(current_by_path)):
+        if fingerprint_entry_key(stored_by_path.get(path, {})) != fingerprint_entry_key(current_by_path.get(path, {})):
+            changed.append(path)
+    return changed
+
+
+def fingerprint_reuse_tolerated_path(path: str) -> bool:
+    return path in FINGERPRINT_REUSE_TOLERATED_PATHS or current_upstream_marker_path(path)
+
+
+def optional_smoke_facts_path(value: str | None) -> Path | None:
+    if value:
+        return Path(value)
+    if DEFAULT_FACTS_PATH.exists():
+        return DEFAULT_FACTS_PATH
+    return None
+
+
+def parse_verifier(text: str) -> dict[str, object]:
+    try:
+        return parse_prefixed_json(text, SUMMARY_PREFIX)
+    except HarnessStop:
+        return {}
+
+
+def parse_pytest_summary(text: str) -> str:
+    for line in reversed(text.splitlines()):
+        stripped = line.strip()
+        if re.search(r"\b(passed|failed|skipped|error|errors)\b", stripped) and " in " in stripped:
+            return stripped
+    return ""
+
+
+def record_environment(prepare: dict[str, object], plan: dict[str, object], log: Path) -> str:
+    image = f"{prepare['prepared_image']}@{prepare['image_id']}"
+    cmd = [
+        "codex-qa",
+        "--project",
+        str(REPO_ROOT),
+        "record",
+        "environment",
+        "--name",
+        "Hermes Docker QA prepared image",
+        "--environment-kind",
+        "docker",
+        "--source-kind",
+        "docker_patched",
+        "--environment-id",
+        f"docker-qa-prepared-{prepare['dependency_hash']}",
+        "--fingerprint",
+        str(prepare["dependency_hash"]),
+        "--runtime",
+        "Docker local authority required for socket and QA index writes",
+        "--toolchain",
+        "python3.11 uv pytest; reduced no-TTY fixture",
+        "--image",
+        image,
+        "--fixture",
+        fixture_text(plan),
+        "--artifact",
+        str(log),
+    ]
+    result = run_command(cmd)
+    require_success(result, "codex_qa_record_environment")
+    match = re.search(r"event=(\S+)", result.text)
+    return match.group(1) if match else ""
+
+
+def record_verification(prepare: dict[str, object], verifier: dict[str, object], pytest_summary: str, log: Path) -> str:
+    evidence_parts = [
+        f"prepared image {prepare['prepared_image']}",
+        f"dependency hash {prepare['dependency_hash']}",
+        f"image id {prepare['image_id']}",
+    ]
+    if verifier:
+        for key in ("status", "series_count", "required_test_count"):
+            if key in verifier:
+                evidence_parts.append(f"{key}={verifier[key]}")
+    if pytest_summary:
+        evidence_parts.append(pytest_summary)
+    cmd = [
+        "codex-qa",
+        "--project",
+        str(REPO_ROOT),
+        "record",
+        "verification",
+        "--subject",
+        "hermes-docker-qa-harness-smoke",
+        "--result",
+        "passed",
+        "--source-kind",
+        "docker_patched",
+        "--verification-id",
+        f"docker-qa-harness-smoke-{now_stamp()}",
+        "--gate",
+        "docker_harness_preflight",
+        "--gate",
+        "docker_wrapper_prepare",
+        "--gate",
+        "docker_pytest_smoke",
+        "--method",
+        "Repo-owned Docker QA harness ran preflight, prepared-image proof, and a narrow wrapper pytest smoke.",
+        "--evidence",
+        "; ".join(evidence_parts),
+        "--next-step",
+        "Use scripts/codex-hermes-docker-qa for Docker QA preflight and prepared-image proof before broad baseline or patched matrix work.",
+        "--artifact",
+        str(log),
+    ]
+    result = run_command(cmd)
+    require_success(result, "codex_qa_record_verification")
+    match = re.search(r"event=(\S+)", result.text)
+    return match.group(1) if match else ""
+
+
+def command_doctor(args: argparse.Namespace) -> int:
+    try:
+        preflight(args.checkout, emit_pass=True)
+        return 0
+    except HarnessStop as exc:
+        emit(exc.status, exc.code, exc.message, **exc.facts)
+        return exit_for(exc.status)
+
+
+def prepare_image(args: argparse.Namespace, plan: dict[str, object]) -> tuple[dict[str, object], Path, str]:
+    require_local_authority("docker_qa_prepare")
+    log_dir = Path(args.log_dir) if args.log_dir else default_log_dir()
+    log = log_dir / "prepare-only.log"
+    cmd = [str(WRAPPER), "--prepare-only", args.checkout]
+    if getattr(args, "base_ref", None):
+        cmd[1:1] = ["--base-ref", args.base_ref]
+    result = run_command(cmd, log_path=log, stream=True, env=archive_env(archive_mode_enabled(args)))
+    require_success(result, "wrapper_prepare_only", log)
+    prepared = parse_prepare(result.text)
+    event_id = ""
+    if not args.no_record:
+        event_id = record_environment(prepared, plan, log)
+    return prepared, log, event_id
+
+
+def command_prepare(args: argparse.Namespace) -> int:
+    try:
+        plan = preflight(args.checkout, emit_pass=False) if not args.skip_preflight else wrapper_plan()
+        facts_path = Path(args.facts_path)
+        if facts_path.exists() and not getattr(args, "base_ref", None):
+            facts = read_facts(facts_path)
+            require_current_wrapper_facts(facts, facts_path)
+            if prepared_image_matches_facts(facts):
+                refreshed = refresh_existing_facts_metadata(facts_path, facts, plan)
+                emit(
+                    "PASS",
+                    "prepared_image_ready",
+                    "Prepared Docker QA dependency image is ready from existing facts",
+                    prepared_image=refreshed["prepared_image"],
+                    dependency_hash=refreshed["dependency_hash"],
+                    image_id=refreshed["image_id"],
+                    facts_path=str(facts_path),
+                    prepared_base_ref=str(facts_worker_base_ref(refreshed)),
+                    source_fingerprint=source_fingerprint()["digest"],
+                    reused_existing_facts=True,
+                )
+                return 0
+        prepared, log, event_id = prepare_image(args, plan)
+        facts_path = write_facts(
+            facts_path,
+            prepared,
+            plan,
+            log,
+            event_id,
+            checkout=args.checkout,
+            archive_mode=archive_mode_enabled(args),
+        )
+        emit(
+            "PASS",
+            "prepared_image_ready",
+            "Prepared Docker QA dependency image is ready",
+            prepared_image=prepared["prepared_image"],
+            dependency_hash=prepared["dependency_hash"],
+            image_id=prepared["image_id"],
+            facts_path=str(facts_path),
+            log=str(log),
+            event_id=event_id,
+            prepared_base_ref=str(prepared.get("active_base_commit") or prepared.get("active_base_ref") or ""),
+            source_fingerprint=source_fingerprint()["digest"],
+        )
+        return 0
+    except HarnessStop as exc:
+        emit(exc.status, exc.code, exc.message, **exc.facts)
+        return exit_for(exc.status)
+
+
+def command_smoke(args: argparse.Namespace) -> int:
+    try:
+        require_local_authority("docker_qa_smoke")
+        plan = preflight(args.checkout, emit_pass=False) if not args.skip_preflight else wrapper_plan()
+        smoke_archive_mode = archive_mode_enabled(args)
+        facts_path = optional_smoke_facts_path(args.facts_path) if not args.prepared_image else None
+        if facts_path:
+            facts = read_facts(facts_path)
+            require_current_wrapper_facts(facts, facts_path)
+            prepared = {
+                "prepared_image": str(facts["prepared_image"]),
+                "dependency_hash": str(facts["dependency_hash"]),
+                "image_id": str(facts["image_id"]),
+            }
+            base_ref = require_base_ref_matches_facts(args.base_ref, facts, facts_path)
+            smoke_archive_mode = bool(smoke_archive_mode or facts.get("archive_mode"))
+            prepare_log = None
+        elif args.prepared_image:
+            inspect = run_command(["docker", "image", "inspect", "--format", "{{.Id}}", args.prepared_image])
+            require_success(inspect, "docker_image_inspect")
+            prepared = {
+                "prepared_image": args.prepared_image,
+                "dependency_hash": args.prepared_image.split("-")[-2] if "-" in args.prepared_image else "unknown",
+                "image_id": inspect.text.strip(),
+            }
+            base_ref = args.base_ref
+            prepare_log = None
+        else:
+            prepared, prepare_log, _ = prepare_image(args, plan)
+            base_ref = str(prepared.get("active_base_commit") or prepared.get("active_base_ref") or payload_recorded_base_ref())
+        log_dir = Path(args.log_dir) if args.log_dir else (prepare_log.parent if prepare_log else default_log_dir())
+        log = log_dir / "smoke.log"
+        cmd = [
+            str(WRAPPER),
+            "--skip-image-build",
+            "--skip-prepared-image-build",
+            "--prepared-image",
+            prepared["prepared_image"],
+            "--pytest-args",
+            args.pytest_args,
+            args.checkout,
+        ]
+        if base_ref:
+            cmd[1:1] = ["--base-ref", base_ref]
+        result = run_command(cmd, log_path=log, stream=True, env=merge_env(archive_env(smoke_archive_mode), facts_backed_prepared_image_env() if facts_path else {}))
+        if result.code != 0:
+            code = classify_failure(result.text)
+            status = "BLOCKED" if code != "command_failed" else "ATTENTION"
+            raise HarnessStop(status, code if status == "BLOCKED" else "docker_pytest_failed", "Docker QA smoke did not pass", {"log": str(log)})
+        verifier = parse_verifier(result.text)
+        pytest_summary = parse_pytest_summary(result.text)
+        event_id = ""
+        if not args.no_record:
+            event_id = record_verification(prepared, verifier, pytest_summary, log)
+        emit(
+            "PASS",
+            "smoke_passed",
+            "Docker QA harness smoke passed",
+            prepared_image=prepared["prepared_image"],
+            dependency_hash=prepared["dependency_hash"],
+            image_id=prepared["image_id"],
+            verifier_status=verifier.get("status") if verifier else "",
+            series_count=verifier.get("series_count") if verifier else "",
+            required_test_count=verifier.get("required_test_count") if verifier else "",
+            pytest_summary=pytest_summary,
+            log=str(log),
+            event_id=event_id,
+        )
+        return 0
+    except HarnessStop as exc:
+        emit(exc.status, exc.code, exc.message, **exc.facts)
+        return exit_for(exc.status)
+
+
+def command_facts(args: argparse.Namespace) -> int:
+    try:
+        facts_path = Path(args.facts_path)
+        facts = read_facts(facts_path)
+        require_current_wrapper_facts(facts, facts_path)
+        display_facts = dict(facts)
+        display_facts.setdefault("prepared_base_ref", facts_worker_base_ref(facts))
+        print("HERMES_DOCKER_QA_PREPARED_IMAGE_JSON " + compact(display_facts))
+        return 0
+    except HarnessStop as exc:
+        emit(exc.status, exc.code, exc.message, **exc.facts)
+        return exit_for(exc.status)
+
+
+def command_source_fingerprint(args: argparse.Namespace) -> int:
+    try:
+        print("HERMES_DOCKER_QA_SOURCE_FINGERPRINT_JSON " + compact(source_fingerprint()))
+        return 0
+    except HarnessStop as exc:
+        emit(exc.status, exc.code, exc.message, **exc.facts)
+        return exit_for(exc.status)
+
+
+def command_worker_command(args: argparse.Namespace) -> int:
+    try:
+        facts_path = Path(args.facts_path)
+        facts = read_facts(facts_path)
+        require_current_wrapper_facts(facts, facts_path)
+        base_ref = require_base_ref_matches_facts(args.base_ref, facts, facts_path)
+        cmd = [str(WRAPPER), "--skip-image-build", "--skip-prepared-image-build", "--prepared-image", str(facts["prepared_image"])]
+        if args.targeted_payload_tests:
+            cmd.append("--targeted-payload-tests")
+        if args.e2e:
+            cmd.append("--e2e")
+        if args.image_smoke:
+            cmd.append("--image-smoke")
+        if base_ref:
+            cmd.extend(["--base-ref", base_ref])
+        if args.pytest_args:
+            cmd.extend(["--pytest-args", args.pytest_args])
+        run_label = args.run_label or docker_run_label(
+            facts,
+            base_ref,
+            f"one-off-{slug_token(args.pytest_args or 'default', length=24)}",
+            "worker",
+        )
+        cmd.extend(["--run-label", run_label])
+        cmd.append(args.checkout)
+        archive_enabled = bool(args.archive_mode or facts.get("archive_mode"))
+        env = merge_env(archive_env(archive_enabled), facts_backed_prepared_image_env())
+        command = shell_join(cmd, env=env)
+        payload = {
+            "archive_mode": archive_enabled,
+            "authority": LOCAL_AUTHORITY_RULE,
+            "command": command,
+            "dependency_hash": str(facts["dependency_hash"]),
+            "facts_path": str(Path(args.facts_path)),
+            "image_id": str(facts["image_id"]),
+            "plan_kind": "one-off",
+            "prepared_base_ref": base_ref,
+            "prepared_image": str(facts["prepared_image"]),
+            "run_label": run_label,
+            "source_fingerprint": facts_source_fingerprint_digest(facts),
+        }
+        print(command)
+        print("HERMES_DOCKER_QA_WORKER_COMMAND_JSON " + compact(payload))
+        return 0
+    except HarnessStop as exc:
+        emit(exc.status, exc.code, exc.message, **exc.facts)
+        return exit_for(exc.status)
+
+
+def worker_plan_items(args: argparse.Namespace, facts: dict[str, object], env: dict[str, str], base_ref: str) -> list[dict[str, object]]:
+    if args.plan_kind == "repeat":
+        avenues = tuple((f"repeat-pass-{index}", DEFAULT_REPEAT_PYTEST_ARGS) for index in range(1, 5))
+    else:
+        avenues = DEFAULT_WORKER_AVENUES
+    items: list[dict[str, object]] = []
+    for label, pytest_args in avenues:
+        cmd = [
+            str(WRAPPER),
+            "--skip-image-build",
+            "--skip-prepared-image-build",
+            "--prepared-image",
+            str(facts["prepared_image"]),
+        ]
+        if base_ref:
+            cmd.extend(["--base-ref", base_ref])
+        run_label = docker_run_label(facts, base_ref, label, args.plan_kind)
+        cmd.extend(["--run-label", run_label])
+        cmd.extend(["--pytest-args", pytest_args, args.checkout])
+        command = shell_join(cmd, env=env)
+        items.append(
+            {
+                "authority": LOCAL_AUTHORITY_RULE,
+                "command": command,
+                "label": label,
+                "plan_kind": args.plan_kind,
+                "prepared_base_ref": base_ref,
+                "pytest_args": pytest_args,
+                "run_label": run_label,
+                "status": "pending",
+            }
+        )
+    return items
+
+
+def clean_baseline_metadata(facts: dict[str, object], base_ref: str, suffix: str = "") -> dict[str, object]:
+    date = facts_date_compact(facts)
+    base_short = slug_token(base_ref, length=8, fallback="base")
+    dependency_short = slug_token(facts["dependency_hash"], length=8, fallback="deps")
+    image_short = slug_token(str(facts["image_id"]).removeprefix("sha256:"), length=12, fallback="image")
+    clean_suffix = slug_token(suffix, length=40, fallback="") if suffix else ""
+    suffix_part = f"-{clean_suffix}" if clean_suffix else ""
+    baseline_id = f"stock-docker-{date}-{base_short}-{dependency_short}-{image_short}{suffix_part}"
+    suggested_run_id = f"clean-baseline-{date}-{base_short}-{dependency_short}-{image_short}{suffix_part}"
+    return {
+        "baseline_id": baseline_id,
+        "comparator_id": f"hermes-origin-main-{base_short}",
+        "comparator_kind": "docker_clean",
+        "comparator_version": base_ref,
+        "environment_id": f"docker-qa-prepared-{facts['dependency_hash']}",
+        "name": f"{date} clean Docker baseline for {base_short}",
+        "suggested_run_id": suggested_run_id,
+    }
+
+
+def clean_docker_command(checkout: str, base_ref: str, prepared_image: str, pytest_args: str, label: str, container_name: str) -> str:
+    docker_cmd = ["docker", "run", "--name", '"$container"', "-v", '"$worktree:/workspace"', "-w", "/workspace", "-v", "hermes-upstream-uv-cache:/uv-cache"]
+    for key, value in DOCKER_TEST_ENV:
+        docker_cmd.extend(["-e", f"{key}={value}"])
+    inner = f"set -euo pipefail; source /opt/hermes-test-venv/bin/activate; uv pip install --no-deps -e .; python -m pytest {pytest_args}"
+    docker_cmd.extend([prepared_image, "bash", "-lc", inner])
+    docker_command = " ".join(part if part.startswith('"$') else shlex.quote(part) for part in docker_cmd)
+    script = " ".join(
+        [
+            "set -euo pipefail;",
+            f"container={shlex.quote(container_name)};",
+            "follow_container() { status=$(docker inspect --format '{{.State.Status}}' \"$container\" 2>/dev/null || true); [ -n \"$status\" ] || return 2; echo \"Found existing clean-baseline Docker QA container: $container status=$status\"; if [ \"$status\" = running ] || [ \"$status\" = restarting ]; then docker logs --tail 0 -f \"$container\" & logs_pid=$!; set +e; wait_output=$(docker wait \"$container\"); wait_status=$?; set -e; kill \"$logs_pid\" >/dev/null 2>&1 || true; wait \"$logs_pid\" >/dev/null 2>&1 || true; [ \"$wait_status\" -eq 0 ] || return \"$wait_status\"; code=$(printf '%s\\n' \"$wait_output\" | tail -n 1); case \"$code\" in ''|*[!0-9]*) code=125;; esac; docker rm \"$container\" >/dev/null 2>&1 || true; return \"$code\"; fi; docker logs \"$container\" || true; code=$(docker inspect --format '{{.State.ExitCode}}' \"$container\" 2>/dev/null || echo 125); case \"$code\" in ''|*[!0-9]*) code=125;; esac; docker rm \"$container\" >/dev/null 2>&1 || true; return \"$code\"; };",
+            f"worktree=$(mktemp -d \"${{TMPDIR:-/tmp}}/hermes-clean-baseline-{slug_token(label)}.XXXXXX\");",
+            f"git -C {shlex.quote(checkout)} worktree add --detach \"$worktree\" {shlex.quote(base_ref)};",
+            "trap 'git -C "
+            + shlex.quote(checkout)
+            + " worktree remove --force \"$worktree\" >/dev/null 2>&1 || true' EXIT;",
+            "if docker container inspect \"$container\" >/dev/null 2>&1; then follow_container; exit $?; fi;",
+            "set +e;",
+            docker_command + ";",
+            "status=$?; set -e; docker rm \"$container\" >/dev/null 2>&1 || true; exit \"$status\";",
+        ]
+    )
+    return shell_join(["bash", "-lc", script])
+
+
+def clean_baseline_items(args: argparse.Namespace, facts: dict[str, object], base_ref: str) -> list[dict[str, object]]:
+    items: list[dict[str, object]] = []
+    for repeat_index in range(1, args.repeat_count + 1):
+        label = f"clean-repeat-pass-{repeat_index}"
+        run_label = docker_run_label(facts, base_ref, label, "clean")
+        container_name = f"hermes-clean-baseline-{run_label}"
+        command = clean_docker_command(args.checkout, base_ref, str(facts["prepared_image"]), DEFAULT_REPEAT_PYTEST_ARGS, label, container_name)
+        items.append(
+            {
+                "authority": LOCAL_AUTHORITY_RULE,
+                "container_name": container_name,
+                "command": command,
+                "label": label,
+                "plan_kind": "repeat",
+                "prepared_base_ref": base_ref,
+                "pytest_args": DEFAULT_REPEAT_PYTEST_ARGS,
+                "repeat_index": repeat_index,
+                "run_label": run_label,
+                "status": "pending",
+                "target": "clean_upstream",
+            }
+        )
+    return items
+
+
+def baseline_establish_command(metadata: dict[str, object], base_ref: str, *, run_dir: str = "$RUN_DIR") -> str:
+    cmd = [
+        "<codex-qa>",
+        "--project",
+        str(REPO_ROOT),
+        "baseline",
+        "establish",
+        "--run-dir",
+        run_dir,
+        "--base-commit",
+        base_ref,
+        "--name",
+        str(metadata["name"]),
+        "--baseline-id",
+        str(metadata["baseline_id"]),
+        "--comparator-id",
+        str(metadata["comparator_id"]),
+        "--comparator-kind",
+        str(metadata["comparator_kind"]),
+        "--comparator-version",
+        str(metadata["comparator_version"]),
+        "--environment-id",
+        str(metadata["environment_id"]),
+        "--stable-file",
+        f"{run_dir}/known-bad-stable.txt",
+        "--fringe-file",
+        f"{run_dir}/known-bad-fringe.txt",
+    ]
+    passthrough = {"$RUN_DIR", "$RUN_DIR/known-bad-stable.txt", "$RUN_DIR/known-bad-fringe.txt"}
+    return " ".join(f'"{part}"' if part in passthrough else shlex.quote(part) for part in cmd)
+
+
+def codex_qa_ingest_command(run_dir: str, metadata: dict[str, object], base_ref: str) -> str:
+    stable_failed = metadata.get("stable_failed")
+    fringe_failed = metadata.get("fringe_failed")
+    union_failed = metadata.get("union_failed")
+    summary = (
+        f"{facts_date_from_metadata(metadata)} same-day clean Docker baseline on prepared image "
+        f"{metadata.get('dependency_hash', 'unknown')}; monolithic 4-repeat clean comparator"
+        + (f"; upstream clean is red with {stable_failed} stable and {fringe_failed} fringe failed node ids." if stable_failed is not None and fringe_failed is not None else ".")
+    )
+    cmd = [
+        "<codex-qa>",
+        "--project",
+        str(REPO_ROOT),
+        "ingest",
+        "run",
+        "--kind",
+        "docker_clean",
+        "--run-dir",
+        run_dir,
+        "--run-id",
+        str(metadata["suggested_run_id"]),
+        "--base-commit",
+        base_ref,
+        "--summary",
+        summary,
+        "--recursive",
+        "--metadata",
+        f"baseline_id={metadata['baseline_id']}",
+        "--metadata",
+        f"prepared_image={metadata.get('prepared_image', '')}",
+        "--metadata",
+        f"image_id={metadata.get('image_id', '')}",
+        "--metadata",
+        f"dependency_hash={metadata.get('dependency_hash', '')}",
+        "--metadata",
+        "plan_kind=repeat",
+    ]
+    if stable_failed is not None:
+        cmd.extend(["--metadata", f"stable_failed={stable_failed}"])
+    if fringe_failed is not None:
+        cmd.extend(["--metadata", f"fringe_failed={fringe_failed}"])
+    if union_failed is not None:
+        cmd.extend(["--metadata", f"union_failed={union_failed}"])
+    cmd.extend(
+        [
+            "--artifact",
+            f"{run_dir}/SUMMARY.md",
+            "--artifact",
+            f"{run_dir}/failure-frequency.tsv",
+            "--artifact",
+            f"{run_dir}/pass-summary.tsv",
+        ]
+    )
+    return shlex.join(cmd)
+
+
+def facts_date_from_metadata(metadata: dict[str, object]) -> str:
+    baseline_id = str(metadata.get("baseline_id", ""))
+    match = re.search(r"stock-docker-(\d{8})-", baseline_id)
+    return match.group(1) if match else datetime.now(timezone.utc).strftime("%Y%m%d")
+
+
+def clean_baseline_record_commands(queue: dict[str, object], run_dir: str, base_ref: str) -> tuple[str, str]:
+    metadata = {
+        "baseline_id": str(queue["baseline_id"]),
+        "comparator_id": str(queue["comparator_id"]),
+        "comparator_kind": str(queue["comparator_kind"]),
+        "comparator_version": str(queue["comparator_version"]),
+        "dependency_hash": str(queue["dependency_hash"]),
+        "environment_id": str(queue["environment_id"]),
+        "image_id": str(queue["image_id"]),
+        "name": f"{facts_date_from_metadata(queue)} clean Docker baseline for {slug_token(base_ref, length=8, fallback='base')}",
+        "prepared_image": str(queue["prepared_image"]),
+        "suggested_run_id": str(queue["suggested_run_id"]),
+    }
+    for key in ("stable_failed", "fringe_failed", "union_failed"):
+        if key in queue:
+            metadata[key] = queue[key]
+    return codex_qa_ingest_command(run_dir, metadata, base_ref), baseline_establish_command(metadata, base_ref, run_dir=run_dir)
+
+
+def read_json_file(path: Path) -> dict[str, object]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise HarnessStop("BLOCKED", "missing_json_file", "required JSON file does not exist", {"path": str(path)})
+    except json.JSONDecodeError as exc:
+        raise HarnessStop("BLOCKED", "invalid_json_file", "required JSON file is not valid JSON", {"path": str(path), "error": str(exc)})
+    if not isinstance(payload, dict):
+        raise HarnessStop("BLOCKED", "invalid_json_file", "required JSON file must contain an object", {"path": str(path)})
+    return payload
+
+
+def read_failed_nodes(path: Path) -> list[str]:
+    return sorted({line.strip() for line in path.read_text(encoding="utf-8", errors="replace").splitlines() if line.strip() and "::" in line})
+
+
+def normalize_node_for_codex_qa(node: str, normalization: dict[str, str]) -> str:
+    if " " not in node and "\t" not in node:
+        return node
+    normalized = quote(node, safe="/:[]_.-=")
+    normalization[normalized] = node
+    return normalized
+
+
+def clean_baseline_failed_file(directory: Path) -> Path | None:
+    for name in ("failed-node-ids.txt", "failed-nodes.txt", "failed-nodeids.txt"):
+        path = directory / name
+        if path.exists():
+            return path
+    return None
+
+
+def command_clean_baseline_finalize(args: argparse.Namespace) -> int:
+    try:
+        run_dir = Path(args.run_dir)
+        queue_file = Path(args.queue_file) if args.queue_file else run_dir / "worker-queue.json"
+        queue = read_json_file(queue_file)
+        if queue.get("plan_kind") != "repeat":
+            raise HarnessStop(
+                "ATTENTION",
+                "non_comparable_clean_baseline_queue",
+                "clean baseline finalization requires monolithic repeat-pass artifacts; shard queues are discovery evidence, not baseline evidence",
+                {"plan_kind": str(queue.get("plan_kind", "")), "queue_file": str(queue_file), "run_dir": str(run_dir)},
+            )
+        repeat_count = int(queue.get("repeat_count") or 0)
+        if repeat_count < 1:
+            raise HarnessStop("BLOCKED", "invalid_clean_baseline_queue", "clean baseline queue has no repeat_count", {"queue_file": str(queue_file)})
+        base_ref = str(queue.get("prepared_base_ref") or "")
+        if not base_ref:
+            raise HarnessStop("BLOCKED", "invalid_clean_baseline_queue", "clean baseline queue has no prepared_base_ref", {"queue_file": str(queue_file)})
+
+        missing: list[str] = []
+        pass_nodes: dict[int, list[str]] = {}
+        normalization: dict[str, str] = {}
+        summary_rows: list[tuple[int, str, int, str]] = []
+        for repeat in range(1, repeat_count + 1):
+            artifact_dir = run_dir / f"clean-repeat-pass-{repeat}"
+            failed_file = clean_baseline_failed_file(artifact_dir)
+            summary_file = artifact_dir / "summary.txt"
+            exit_file = artifact_dir / "exit-code.txt"
+            if failed_file is None or not summary_file.exists() or not exit_file.exists():
+                missing.append(str(artifact_dir))
+                continue
+            raw_nodes = read_failed_nodes(failed_file)
+            normalized_nodes = sorted(normalize_node_for_codex_qa(node, normalization) for node in raw_nodes)
+            pass_nodes[repeat] = normalized_nodes
+            summary_rows.append(
+                (
+                    repeat,
+                    exit_file.read_text(encoding="utf-8", errors="replace").strip(),
+                    len(normalized_nodes),
+                    summary_file.read_text(encoding="utf-8", errors="replace").strip(),
+                )
+            )
+        if missing:
+            raise HarnessStop(
+                "ATTENTION",
+                "incomplete_clean_baseline_artifacts",
+                "clean baseline finalization requires every planned monolithic repeat-pass artifact before recording a formal baseline",
+                {"missing": missing, "queue_file": str(queue_file), "run_dir": str(run_dir)},
+            )
+
+        for repeat, nodes in pass_nodes.items():
+            (run_dir / f"pass-{repeat}.failed-node-ids.txt").write_text("\n".join(nodes) + ("\n" if nodes else ""), encoding="utf-8")
+
+        frequency = Counter(node for nodes in pass_nodes.values() for node in nodes)
+        passes_by_node: defaultdict[str, list[str]] = defaultdict(list)
+        for repeat, nodes in pass_nodes.items():
+            for node in nodes:
+                passes_by_node[node].append(str(repeat))
+        stable = sorted(node for node, count in frequency.items() if count == repeat_count)
+        fringe = sorted(node for node, count in frequency.items() if count != repeat_count)
+        (run_dir / "known-bad-stable.txt").write_text("\n".join(stable) + ("\n" if stable else ""), encoding="utf-8")
+        (run_dir / "known-bad-fringe.txt").write_text("\n".join(fringe) + ("\n" if fringe else ""), encoding="utf-8")
+        with (run_dir / "failure-frequency.tsv").open("w", encoding="utf-8") as handle:
+            handle.write("node_id\tfail_count\tpasses\n")
+            for node in sorted(frequency):
+                handle.write(f"{node}\t{frequency[node]}\t{','.join(passes_by_node[node])}\n")
+        with (run_dir / "pass-summary.tsv").open("w", encoding="utf-8") as handle:
+            handle.write("repeat\texit_code\tfailed_node_count\tpytest_summary\n")
+            for repeat, exit_code, failed_count, summary in summary_rows:
+                handle.write(f"{repeat}\t{exit_code}\t{failed_count}\t{summary}\n")
+        with (run_dir / "node-id-normalization.tsv").open("w", encoding="utf-8") as handle:
+            handle.write("normalized_node_id\traw_node_id\n")
+            for normalized, raw in sorted(normalization.items()):
+                handle.write(f"{normalized}\t{raw}\n")
+
+        summary_lines = [
+            f"# Clean Docker Baseline {facts_date_from_metadata(queue)}",
+            "",
+            f"Baseline id: {queue['baseline_id']}",
+            f"Prepared image: {queue['prepared_image']}",
+            f"Prepared base: {base_ref}",
+            f"Image id: {queue['image_id']}",
+            "",
+            f"Stable failed node ids: {len(stable)}",
+            f"Fringe failed node ids: {len(fringe)}",
+            f"Union failed node ids: {len(frequency)}",
+            f"Whitespace-normalized node ids: {len(normalization)}",
+            "",
+            "Pass files are one-to-one copies of monolithic clean Docker repeat-pass outputs.",
+            "Pass files percent-encode whitespace in pytest parameter IDs so codex-qa can ingest them; see node-id-normalization.tsv for raw mappings.",
+        ]
+        if any((run_dir / f"clean-repeat-1-{avenue}").exists() for avenue, _ in DEFAULT_WORKER_AVENUES):
+            summary_lines.append("Shard artifacts under clean-repeat-<n>-<avenue> are ignored; they are discovery evidence, not baseline evidence.")
+        (run_dir / "SUMMARY.md").write_text("\n".join(summary_lines) + "\n", encoding="utf-8")
+
+        record_queue = dict(queue)
+        record_queue.update({"fringe_failed": len(fringe), "stable_failed": len(stable), "union_failed": len(frequency)})
+        ingest_command, establish_command = clean_baseline_record_commands(record_queue, str(run_dir), base_ref)
+        payload = {
+            "baseline_establish_command": establish_command,
+            "baseline_id": str(queue["baseline_id"]),
+            "fringe_failed": len(fringe),
+            "ingest_command": ingest_command,
+            "normalization_file": str(run_dir / "node-id-normalization.tsv"),
+            "pass_files": [str(run_dir / f"pass-{repeat}.failed-node-ids.txt") for repeat in range(1, repeat_count + 1)],
+            "repeat_count": repeat_count,
+            "run_dir": str(run_dir),
+            "stable_failed": len(stable),
+            "union_failed": len(frequency),
+        }
+        emit("PASS", "clean_baseline_finalized", "Clean baseline monolithic repeat-pass artifacts were finalized for codex-qa recording", **payload)
+        return 0
+    except HarnessStop as exc:
+        emit(exc.status, exc.code, exc.message, **exc.facts)
+        return exit_for(exc.status)
+
+
+def write_queue(path: Path, payload: dict[str, object]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(compact(payload) + "\n", encoding="utf-8")
+    return path
+
+
+def command_worker_plan(args: argparse.Namespace) -> int:
+    try:
+        facts_path = Path(args.facts_path)
+        facts = read_facts(facts_path)
+        require_current_wrapper_facts(facts, facts_path)
+        base_ref = require_base_ref_matches_facts(args.base_ref, facts, facts_path)
+        archive_enabled = bool(args.archive_mode or facts.get("archive_mode"))
+        env = merge_env(archive_env(archive_enabled), facts_backed_prepared_image_env())
+        items = worker_plan_items(args, facts, env, base_ref)
+        for item in items:
+            print(f"{item['label']}: {item['command']}")
+        payload = {
+            "archive_mode": archive_enabled,
+            "authority": LOCAL_AUTHORITY_RULE,
+            "dependency_hash": str(facts["dependency_hash"]),
+            "facts_path": str(facts_path),
+            "image_id": str(facts["image_id"]),
+            "items": items,
+            "max_parallel_workers": 4,
+            "plan_kind": args.plan_kind,
+            "prepared_base_ref": base_ref,
+            "prepared_image": str(facts["prepared_image"]),
+            "source_fingerprint": facts_source_fingerprint_digest(facts),
+        }
+        if args.queue_file:
+            queue_path = write_queue(Path(args.queue_file), payload)
+            payload["queue_file"] = str(queue_path)
+        print("HERMES_DOCKER_QA_WORKER_PLAN_JSON " + compact(payload))
+        return 0
+    except HarnessStop as exc:
+        emit(exc.status, exc.code, exc.message, **exc.facts)
+        return exit_for(exc.status)
+
+
+def command_clean_baseline_plan(args: argparse.Namespace) -> int:
+    try:
+        if args.repeat_count < 1 or args.repeat_count > 4:
+            raise HarnessStop(
+                "ATTENTION",
+                "invalid_repeat_count",
+                "clean baseline repeat count must be between 1 and 4; formal same-day baselines use 4, smaller counts are provisional smoke only",
+                {"repeat_count": args.repeat_count},
+            )
+        facts_path = Path(args.facts_path)
+        facts = read_facts(facts_path)
+        require_current_wrapper_facts(facts, facts_path)
+        base_ref = require_base_ref_matches_facts(args.base_ref, facts, facts_path)
+        metadata = clean_baseline_metadata(facts, base_ref, args.run_suffix)
+        items = clean_baseline_items(args, facts, base_ref)
+        for item in items:
+            print(f"{item['label']}: {item['command']}")
+        baseline_command = baseline_establish_command(metadata, base_ref)
+        print(f"baseline-establish-template: RUN_DIR=validation/runs/{metadata['suggested_run_id']}; {baseline_command}")
+        payload = {
+            "authority": LOCAL_AUTHORITY_RULE,
+            "baseline_establish_command": baseline_command,
+            "baseline_id": str(metadata["baseline_id"]),
+            "comparator_id": str(metadata["comparator_id"]),
+            "comparator_kind": str(metadata["comparator_kind"]),
+            "comparator_version": str(metadata["comparator_version"]),
+            "dependency_hash": str(facts["dependency_hash"]),
+            "environment_id": str(metadata["environment_id"]),
+            "facts_path": str(facts_path),
+            "fixture": DEFAULT_REPEAT_PYTEST_ARGS,
+            "image_id": str(facts["image_id"]),
+            "items": items,
+            "max_parallel_workers": 4,
+            "plan_kind": "repeat",
+            "prepared_base_ref": base_ref,
+            "prepared_image": str(facts["prepared_image"]),
+            "qa_recording_next_step": "After the planned monolithic clean worker runs finish, run clean-baseline-finalize on the run directory, then run the emitted ingest_command and baseline_establish_command.",
+            "repeat_count": args.repeat_count,
+            "source_fingerprint": facts_source_fingerprint_digest(facts),
+            "suggested_run_id": str(metadata["suggested_run_id"]),
+            "target": "clean_upstream",
+        }
+        if args.queue_file:
+            queue_path = write_queue(Path(args.queue_file), payload)
+            payload["queue_file"] = str(queue_path)
+        print("HERMES_DOCKER_QA_CLEAN_BASELINE_PLAN_JSON " + compact(payload))
+        return 0
+    except HarnessStop as exc:
+        emit(exc.status, exc.code, exc.message, **exc.facts)
+        return exit_for(exc.status)
+
+
+def command_cleanup_worktrees(args: argparse.Namespace) -> int:
+    if args.force:
+        try:
+            require_local_authority("verifier_worktree_cleanup")
+        except HarnessStop as exc:
+            emit(exc.status, exc.code, exc.message, **exc.facts)
+            return exit_for(exc.status)
+    cmd = [str(CLEANUP_WORKTREES), "--checkout", args.checkout]
+    if args.include_extra_proof_prefixes:
+        cmd.append("--include-extra-proof-prefixes")
+    if args.force:
+        cmd.extend(["--remove", "--force"])
+    result = run_command(cmd, stream=True)
+    return result.code
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--checkout", default=DEFAULT_CHECKOUT, help=f"Hermes checkout path. Default: {DEFAULT_CHECKOUT}")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    sub.add_parser("doctor", help="Check QA index, Docker socket, and wrapper fixture drift.").set_defaults(func=command_doctor)
+
+    prepare = sub.add_parser("prepare", help="Run preflight, prepare dependency image, and record the environment.")
+    prepare.add_argument("--log-dir", help="Directory for harness logs. Default: timestamped TMPDIR path.")
+    prepare.add_argument("--facts-path", default=str(DEFAULT_FACTS_PATH), help=f"Prepared-image facts JSON path. Default: {DEFAULT_FACTS_PATH}")
+    prepare.add_argument("--no-record", action="store_true", help="Do not write codex-qa environment events.")
+    prepare.add_argument("--skip-preflight", action="store_true", help="Skip doctor checks before preparing.")
+    prepare.add_argument("--base-ref", help="Intentional baseline ref for this prepared image. Defaults to payload base.ref.")
+    prepare.add_argument("--archive-mode", action="store_true", help="Run wrapper with HERMES_PAYLOAD_ARCHIVE_MODE=1 for intentionally dirty payload fragments.")
+    prepare.set_defaults(func=command_prepare)
+
+    smoke = sub.add_parser("smoke", help="Run preflight, prepare image if needed, and execute a narrow Docker pytest smoke.")
+    smoke.add_argument("--log-dir", help="Directory for harness logs. Default: timestamped TMPDIR path.")
+    smoke.add_argument("--no-record", action="store_true", help="Do not write codex-qa verification events.")
+    smoke.add_argument("--skip-preflight", action="store_true", help="Skip doctor checks before running.")
+    smoke.add_argument("--facts-path", help=f"Reuse prepared-image facts written by prepare. Default: {DEFAULT_FACTS_PATH} when present.")
+    smoke.add_argument("--prepared-image", help="Reuse an already-proven prepared image tag.")
+    smoke.add_argument("--base-ref", help="Base ref for direct prepared-image smoke, or an exact match to the facts baseline.")
+    smoke.add_argument("--pytest-args", default=DEFAULT_SMOKE, help=f"Smoke pytest args. Default: {DEFAULT_SMOKE}")
+    smoke.add_argument("--archive-mode", action="store_true", help="Run wrapper with HERMES_PAYLOAD_ARCHIVE_MODE=1 for intentionally dirty payload fragments.")
+    smoke.set_defaults(func=command_smoke)
+
+    facts = sub.add_parser("facts", help="Print the current prepared-image facts JSON without running Docker.")
+    facts.add_argument("--facts-path", default=str(DEFAULT_FACTS_PATH), help=f"Prepared-image facts JSON path. Default: {DEFAULT_FACTS_PATH}")
+    facts.set_defaults(func=command_facts)
+
+    sub.add_parser("source-fingerprint", help="Print the current Docker QA source fingerprint without running Docker.").set_defaults(
+        func=command_source_fingerprint
+    )
+
+    worker = sub.add_parser("worker-command", help="Print the exact broad-worker wrapper command that reuses prepared-image facts.")
+    worker.add_argument("--facts-path", default=str(DEFAULT_FACTS_PATH), help=f"Prepared-image facts JSON path. Default: {DEFAULT_FACTS_PATH}")
+    worker.add_argument("--base-ref", help="Base ref passed through to the wrapper.")
+    worker.add_argument("--pytest-args", help="Pytest args passed through to the wrapper.")
+    worker.add_argument("--run-label", help="Stable Docker QA run label. Defaults to a facts-backed label.")
+    worker.add_argument("--targeted-payload-tests", action="store_true", help="Run full payload verifier before Docker tests.")
+    worker.add_argument("--e2e", action="store_true", help="Also run upstream tests/e2e after unit tests.")
+    worker.add_argument("--image-smoke", action="store_true", help="Also build the patched Hermes production image and run --help.")
+    worker.add_argument("--archive-mode", action="store_true", help="Prefix command with HERMES_PAYLOAD_ARCHIVE_MODE=1.")
+    worker.set_defaults(func=command_worker_command)
+
+    worker_plan = sub.add_parser("worker-plan", help="Print four broad Docker worker commands from the current prepared-image facts.")
+    worker_plan.add_argument("--facts-path", default=str(DEFAULT_FACTS_PATH), help=f"Prepared-image facts JSON path. Default: {DEFAULT_FACTS_PATH}")
+    worker_plan.add_argument("--base-ref", help="Base ref passed through to each wrapper command.")
+    worker_plan.add_argument(
+        "--plan-kind",
+        choices=("shard", "repeat"),
+        default="shard",
+        help="shard prints four disjoint broad avenues; repeat prints four full-pass stability runs. Default: shard.",
+    )
+    worker_plan.add_argument("--queue-file", help="Write a JSON queue file for asynchronous worker refilling.")
+    worker_plan.add_argument("--archive-mode", action="store_true", help="Prefix commands with HERMES_PAYLOAD_ARCHIVE_MODE=1.")
+    worker_plan.set_defaults(func=command_worker_plan)
+
+    clean_baseline = sub.add_parser("clean-baseline-plan", help="Print clean/upstream Docker baseline commands from prepared-image facts.")
+    clean_baseline.add_argument("--facts-path", default=str(DEFAULT_FACTS_PATH), help=f"Prepared-image facts JSON path. Default: {DEFAULT_FACTS_PATH}")
+    clean_baseline.add_argument("--base-ref", help="Base ref for the clean comparator; must match the prepared-image facts baseline.")
+    clean_baseline.add_argument("--repeat-count", type=int, default=4, help="Number of clean repeat passes to plan, 1-4. Default: 4 for formal same-day baseline stability.")
+    clean_baseline.add_argument("--queue-file", help="Write a JSON queue file for asynchronous clean-baseline workers.")
+    clean_baseline.add_argument("--run-suffix", help="Append a short suffix to the generated baseline and run IDs for corrective reruns.")
+    clean_baseline.set_defaults(func=command_clean_baseline_plan)
+
+    finalize = sub.add_parser("clean-baseline-finalize", help="Finalize monolithic clean-baseline repeat artifacts into codex-qa pass files and buckets.")
+    finalize.add_argument("--run-dir", required=True, help="Clean baseline run directory containing clean-repeat-pass-* worker artifact directories.")
+    finalize.add_argument("--queue-file", help="Clean baseline queue JSON. Default: <run-dir>/worker-queue.json.")
+    finalize.set_defaults(func=command_clean_baseline_finalize)
+
+    cleanup = sub.add_parser("cleanup-worktrees", help="List or remove verifier-created Hermes temp worktrees.")
+    cleanup.add_argument("--force", action="store_true", help="Remove matching verifier temp worktrees.")
+    cleanup.add_argument(
+        "--include-extra-proof-prefixes",
+        action="store_true",
+        help="Also match older ad hoc proof prefixes used by previous patch-repo cleanup lanes.",
+    )
+    cleanup.set_defaults(func=command_cleanup_worktrees)
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

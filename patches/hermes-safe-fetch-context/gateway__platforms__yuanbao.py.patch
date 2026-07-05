@@ -1,0 +1,53 @@
+diff --git a/gateway/platforms/yuanbao.py b/gateway/platforms/yuanbao.py
+index 83cd66956..2a824e9b9 100644
+--- a/gateway/platforms/yuanbao.py
++++ b/gateway/platforms/yuanbao.py
+@@ -65,6 +65,8 @@ from gateway.platforms.yuanbao_media import (
+     build_file_msg_body,
+     guess_mime_type,
+     md5_hex,
++    YUANBAO_FILE_CONTENT_TYPES,
++    YUANBAO_IMAGE_CONTENT_TYPES,
+ )
+ from gateway.platforms.yuanbao_proto import (
+     CMD_TYPE,
+@@ -2271,7 +2273,14 @@ class MediaResolveMiddleware(InboundMiddleware):
+         """Download a Yuanbao resource and cache locally. Returns ``(local_path, mime)`` or ``None``."""
+         try:
+             file_bytes, content_type = await media_download_url(
+-                fetch_url, max_size_mb=adapter.MEDIA_MAX_SIZE_MB,
++                fetch_url,
++                max_size_mb=adapter.MEDIA_MAX_SIZE_MB,
++                allowed_content_types=(
++                    YUANBAO_IMAGE_CONTENT_TYPES
++                    if kind == "image"
++                    else YUANBAO_FILE_CONTENT_TYPES
++                ),
++                source_type=f"gateway:yuanbao-inbound-{kind}",
+             )
+         except Exception as exc:
+             logger.warning(
+@@ -3408,7 +3417,10 @@ class ImageUrlHandler(MediaSendHandler):
+         image_url: str = kwargs["image_url"]
+         logger.info("[%s] ImageUrlHandler: downloading %s", adapter.name, image_url)
+         file_bytes, content_type = await media_download_url(
+-            image_url, max_size_mb=adapter.MEDIA_MAX_SIZE_MB,
++            image_url,
++            max_size_mb=adapter.MEDIA_MAX_SIZE_MB,
++            allowed_content_types=YUANBAO_IMAGE_CONTENT_TYPES,
++            source_type="gateway:yuanbao-outbound-image",
+         )
+         if not content_type or content_type == "application/octet-stream":
+             path_part = image_url.split("?")[0]
+@@ -3461,7 +3473,10 @@ class FileUrlHandler(MediaSendHandler):
+         file_url: str = kwargs["file_url"]
+         logger.info("[%s] FileUrlHandler: downloading %s", adapter.name, file_url)
+         file_bytes, content_type = await media_download_url(
+-            file_url, max_size_mb=adapter.MEDIA_MAX_SIZE_MB,
++            file_url,
++            max_size_mb=adapter.MEDIA_MAX_SIZE_MB,
++            allowed_content_types=YUANBAO_FILE_CONTENT_TYPES,
++            source_type="gateway:yuanbao-outbound-file",
+         )
+         filename = kwargs.get("filename")
+         if not filename:

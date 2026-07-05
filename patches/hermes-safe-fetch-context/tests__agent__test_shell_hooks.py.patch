@@ -1,0 +1,93 @@
+diff --git a/tests/agent/test_shell_hooks.py b/tests/agent/test_shell_hooks.py
+index 088c23eb4..2be41798c 100644
+--- a/tests/agent/test_shell_hooks.py
++++ b/tests/agent/test_shell_hooks.py
+@@ -314,6 +314,88 @@ class TestCallbackSubprocess:
+         )
+         assert msg == "blocked-by-shell"
+ 
++    def test_pre_tool_call_plugin_hook_non_block_return_does_not_block_by_default(self, monkeypatch):
++        from hermes_cli import plugins
++
++        plugins._plugin_manager = plugins.PluginManager()
++        mgr = plugins.get_plugin_manager()
++        manifest = plugins.PluginManifest(name="policy-test", key="policy-test", source="user")
++        ctx = plugins.PluginContext(manifest, mgr)
++
++        ctx.register_hook(
++            "pre_tool_call",
++            lambda **kwargs: {"action": "allow", "message": "plugin tried to allow"},
++        )
++
++        assert plugins.invoke_hook("pre_tool_call", tool_name="write_file", args={}) == [
++            {"action": "allow", "message": "plugin tried to allow"}
++        ]
++        assert plugins.get_pre_tool_call_block_message("write_file", {"path": "/tmp/x"}) is None
++
++    def test_pre_tool_call_plugin_hook_can_still_block_by_default(self, monkeypatch):
++        from hermes_cli import plugins
++
++        plugins._plugin_manager = plugins.PluginManager()
++        mgr = plugins.get_plugin_manager()
++        manifest = plugins.PluginManifest(name="policy-test", key="policy-test", source="user")
++        ctx = plugins.PluginContext(manifest, mgr)
++
++        ctx.register_hook(
++            "pre_tool_call",
++            lambda **kwargs: {"action": "block", "message": "blocked by policy"},
++        )
++
++        assert plugins.get_pre_tool_call_block_message("terminal", {"command": "date"}) == "blocked by policy"
++
++    def test_side_effect_capable_hook_requires_manifest_policy(self, monkeypatch):
++        from hermes_cli import plugins
++
++        plugins._plugin_manager = plugins.PluginManager()
++        mgr = plugins.get_plugin_manager()
++        manifest = plugins.PluginManifest(name="policy-test", key="policy-test", source="user")
++        ctx = plugins.PluginContext(manifest, mgr)
++
++        cb = lambda **kwargs: {"action": "allow"}
++        ctx.register_hook("pre_tool_call", cb, authority=plugins.SIDE_EFFECT_CAPABLE_HOOK_POLICY)
++
++        assert mgr._hook_policies[id(cb)]["policy"] == plugins.BLOCK_ONLY_HOOK_POLICY
++        assert plugins.invoke_hook("pre_tool_call", tool_name="write_file", args={}) == [{"action": "allow"}]
++        assert plugins.get_pre_tool_call_block_message("write_file", {"path": "/tmp/x"}) is None
++
++    def test_trusted_side_effect_capable_hook_is_explicit_and_audited(self, caplog, monkeypatch):
++        import logging
++        from hermes_cli import plugins
++
++        plugins._plugin_manager = plugins.PluginManager()
++        mgr = plugins.get_plugin_manager()
++        manifest = plugins.PluginManifest(
++            name="trusted-policy-test",
++            key="trusted-policy-test",
++            source="user",
++            hook_authority={"pre_tool_call": plugins.SIDE_EFFECT_CAPABLE_HOOK_POLICY},
++        )
++        ctx = plugins.PluginContext(manifest, mgr)
++
++        ctx.register_hook("pre_tool_call", lambda **kwargs: {"action": "allow"})
++
++        with caplog.at_level(logging.INFO, logger=plugins.logger.name):
++            results = plugins.invoke_hook("pre_tool_call", tool_name="write_file", args={})
++
++        assert results == [{"action": "allow"}]
++        assert any("Trusted plugin hook altered Hermes execution" in r.getMessage() for r in caplog.records)
++
++    def test_post_tool_call_plugin_hook_is_observational_by_default(self, monkeypatch):
++        from hermes_cli import plugins
++
++        plugins._plugin_manager = plugins.PluginManager()
++        mgr = plugins.get_plugin_manager()
++        manifest = plugins.PluginManifest(name="policy-test", key="policy-test", source="user")
++        ctx = plugins.PluginContext(manifest, mgr)
++
++        ctx.register_hook("post_tool_call", lambda **kwargs: {"result": "mutated"})
++
++        assert plugins.invoke_hook("post_tool_call", tool_name="terminal", result="ok") == []
++
+     def test_matcher_regex_filters_callback(self, tmp_path, monkeypatch):
+         """A matcher set to 'terminal' must not fire for 'web_search'."""
+         calls = tmp_path / "calls.log"

@@ -1,0 +1,301 @@
+diff --git a/tests/gateway/test_matrix_yuanbao_media_downloads.py b/tests/gateway/test_matrix_yuanbao_media_downloads.py
+new file mode 100644
+index 000000000..949405e47
+--- /dev/null
++++ b/tests/gateway/test_matrix_yuanbao_media_downloads.py
+@@ -0,0 +1,295 @@
++from types import SimpleNamespace
++from unittest.mock import AsyncMock, patch
++
++import httpx
++import pytest
++
++from gateway.config import PlatformConfig
++from gateway.platforms.base import SendResult
++from plugins.platforms.matrix.adapter import MatrixAdapter
++from gateway.platforms.yuanbao import ImageUrlHandler, MediaResolveMiddleware
++from gateway.platforms.yuanbao_media import (
++    YUANBAO_IMAGE_CONTENT_TYPES,
++    download_url as yuanbao_download_url,
++)
++from tools.safe_http import SafeHTTPError
++from tools.safe_http import safe_download_bytes as real_safe_download_bytes
++
++
++class _SafeResult:
++    def __init__(self, content=b"\x89PNG\r\n\x1a\n image", content_type="image/png"):
++        self.content = content
++        self.content_type = content_type
++
++
++@pytest.fixture
++def matrix_adapter():
++    adapter = MatrixAdapter(
++        PlatformConfig(
++            enabled=True,
++            token="matrix-token",
++            extra={"homeserver": "https://matrix.example.test"},
++        )
++    )
++    adapter._client = AsyncMock()
++    adapter._client.upload_media = AsyncMock(return_value="mxc://example.test/media")
++    adapter._client.send_message_event = AsyncMock(return_value="$event")
++    return adapter
++
++
++@pytest.mark.asyncio
++async def test_matrix_send_image_uses_safe_download_with_image_policy(matrix_adapter):
++    calls = []
++
++    async def fake_download(url, **kwargs):
++        calls.append((url, kwargs))
++        return _SafeResult()
++
++    with patch("plugins.platforms.matrix.adapter.safe_download_bytes", side_effect=fake_download):
++        result = await matrix_adapter.send_image(
++            "!room:example.test",
++            "https://cdn.example.test/image.png?token=secret",
++            "caption",
++        )
++
++    assert result == SendResult(success=True, message_id="$event")
++    assert calls[0][0] == "https://cdn.example.test/image.png?token=secret"
++    kwargs = calls[0][1]
++    assert kwargs["source_type"] == "gateway:matrix-outbound-image"
++    assert kwargs["max_bytes"] == 100 * 1024 * 1024
++    assert kwargs["policy"]["redirect_credentials"] == "no-credentials"
++    assert "image/png" in kwargs["allowed_content_types"]
++    matrix_adapter._client.upload_media.assert_awaited_once()
++
++
++@pytest.mark.asyncio
++async def test_matrix_send_image_blocks_private_redirect_without_url_fallback(matrix_adapter):
++    async def safe_download_with_mock_transport(url, **kwargs):
++        def handler(request):
++            if str(request.url) == "https://cdn.example.test/image.png?token=secret":
++                return httpx.Response(
++                    302,
++                    headers={"Location": "http://169.254.169.254/latest/meta-data"},
++                )
++            return httpx.Response(200, headers={"Content-Type": "image/png"}, content=b"\x89PNG\r\n\x1a\n")
++
++        return await real_safe_download_bytes(
++            url,
++            transport=httpx.MockTransport(handler),
++            allow_unverified_transport=True,
++            **kwargs,
++        )
++
++    with patch(
++        "plugins.platforms.matrix.adapter.safe_download_bytes",
++        side_effect=safe_download_with_mock_transport,
++    ), patch.object(
++        MatrixAdapter,
++        "send",
++        AsyncMock(return_value=SendResult(success=True, message_id="$fallback")),
++    ) as fallback_send:
++        result = await matrix_adapter.send_image(
++            "!room:example.test",
++            "https://cdn.example.test/image.png?token=secret",
++            "caption",
++        )
++
++    assert not result.success
++    assert "Blocked unsafe URL target" in (result.error or "")
++    fallback_send.assert_not_awaited()
++    matrix_adapter._client.upload_media.assert_not_awaited()
++
++
++@pytest.mark.asyncio
++async def test_matrix_inbound_media_uses_provider_download_not_safe_http(matrix_adapter):
++    matrix_adapter._user_id = "@bot:example.test"
++    matrix_adapter._startup_ts = 0.0
++    matrix_adapter._dm_rooms = {}
++    matrix_adapter._client.download_media = AsyncMock(return_value=b"\x89PNG\r\n\x1a\n image")
++    matrix_adapter._client.state_store = SimpleNamespace(
++        get_member=AsyncMock(return_value=SimpleNamespace(displayname="Alice")),
++        get_members=AsyncMock(return_value=[object()]),
++    )
++    captured = []
++
++    async def capture(event):
++        captured.append(event)
++
++    matrix_adapter.handle_message = capture
++    event = SimpleNamespace(
++        event_id="$image",
++        sender="@alice:example.test",
++        room_id="!room:example.test",
++        timestamp=1_700_000_000_000,
++        content={
++            "msgtype": "m.image",
++            "body": "image.png",
++            "url": "mxc://example.test/media",
++            "info": {"mimetype": "image/png"},
++        },
++    )
++
++    with patch("plugins.platforms.matrix.adapter.safe_download_bytes", new_callable=AsyncMock) as mock_download, patch.object(
++        matrix_adapter,
++        "_resolve_message_context",
++        AsyncMock(return_value=("image.png", True, "dm", None, "Alice", "matrix:!room")),
++    ):
++        await matrix_adapter._handle_media_message(
++            event.room_id,
++            event.sender,
++            event.event_id,
++            event.timestamp / 1000.0,
++            event.content,
++            {},
++            "m.image",
++        )
++
++    mock_download.assert_not_called()
++    matrix_adapter._client.download_media.assert_awaited_once()
++    assert captured and captured[0].media_urls
++    assert not captured[0].media_urls[0].startswith("http")
++
++
++@pytest.mark.asyncio
++async def test_yuanbao_download_url_blocks_oversized_response():
++    async def safe_download_with_mock_transport(url, **kwargs):
++        def handler(request):
++            return httpx.Response(
++                200,
++                headers={"Content-Type": "image/png", "Content-Length": str(1024 * 1024 + 1)},
++                content=b"",
++            )
++
++        return await real_safe_download_bytes(
++            url,
++            transport=httpx.MockTransport(handler),
++            allow_unverified_transport=True,
++            **kwargs,
++        )
++
++    with patch(
++        "gateway.platforms.yuanbao_media.safe_download_bytes",
++        side_effect=safe_download_with_mock_transport,
++    ), patch("tools.url_safety.is_safe_url", return_value=True), patch("tools.safe_http.is_safe_url", return_value=True):
++        with pytest.raises(SafeHTTPError, match="Response too large"):
++            await yuanbao_download_url(
++                "https://cdn.example.test/image.png",
++                max_size_mb=1,
++                allowed_content_types=YUANBAO_IMAGE_CONTENT_TYPES,
++            )
++
++
++@pytest.mark.asyncio
++async def test_yuanbao_download_url_blocks_private_redirect():
++    async def safe_download_with_mock_transport(url, **kwargs):
++        def handler(request):
++            if str(request.url) == "https://cdn.example.test/image.png":
++                return httpx.Response(302, headers={"Location": "http://127.0.0.1/private.png"})
++            return httpx.Response(200, headers={"Content-Type": "image/png"}, content=b"\x89PNG\r\n\x1a\n")
++
++        return await real_safe_download_bytes(
++            url,
++            transport=httpx.MockTransport(handler),
++            allow_unverified_transport=True,
++            **kwargs,
++        )
++
++    with patch(
++        "gateway.platforms.yuanbao_media.safe_download_bytes",
++        side_effect=safe_download_with_mock_transport,
++    ), patch("tools.url_safety.is_safe_url", side_effect=lambda url: "127.0.0.1" not in str(url)), patch(
++        "tools.safe_http.is_safe_url",
++        side_effect=lambda url: "127.0.0.1" not in str(url),
++    ):
++        with pytest.raises(SafeHTTPError, match="Blocked"):
++            await yuanbao_download_url(
++                "https://cdn.example.test/image.png",
++                max_size_mb=5,
++                allowed_content_types=YUANBAO_IMAGE_CONTENT_TYPES,
++            )
++
++
++@pytest.mark.asyncio
++async def test_yuanbao_download_url_blocks_disallowed_content_type():
++    async def safe_download_with_mock_transport(url, **kwargs):
++        def handler(request):
++            return httpx.Response(
++                200,
++                headers={"Content-Type": "text/html"},
++                content=b"<html>login</html>",
++            )
++
++        return await real_safe_download_bytes(
++            url,
++            transport=httpx.MockTransport(handler),
++            allow_unverified_transport=True,
++            **kwargs,
++        )
++
++    with patch(
++        "gateway.platforms.yuanbao_media.safe_download_bytes",
++        side_effect=safe_download_with_mock_transport,
++    ), patch("tools.url_safety.is_safe_url", return_value=True), patch("tools.safe_http.is_safe_url", return_value=True):
++        with pytest.raises(SafeHTTPError, match="disallowed content type"):
++            await yuanbao_download_url(
++                "https://cdn.example.test/image.png",
++                max_size_mb=5,
++                allowed_content_types=YUANBAO_IMAGE_CONTENT_TYPES,
++            )
++
++
++@pytest.mark.asyncio
++async def test_yuanbao_image_url_handler_passes_image_content_policy():
++    adapter = SimpleNamespace(MEDIA_MAX_SIZE_MB=50, name="yuanbao")
++    calls = []
++
++    async def fake_download(url, **kwargs):
++        calls.append((url, kwargs))
++        return b"\x89PNG\r\n\x1a\n image", "image/png"
++
++    with patch("gateway.platforms.yuanbao.media_download_url", side_effect=fake_download):
++        file_bytes, filename, content_type = await ImageUrlHandler().acquire_file(
++            adapter,
++            image_url="https://cdn.example.test/picture.png?sig=secret",
++        )
++
++    assert file_bytes.startswith(b"\x89PNG")
++    assert filename == "picture.png"
++    assert content_type == "image/png"
++    kwargs = calls[0][1]
++    assert kwargs["source_type"] == "gateway:yuanbao-outbound-image"
++    assert kwargs["allowed_content_types"] == YUANBAO_IMAGE_CONTENT_TYPES
++
++
++@pytest.mark.asyncio
++async def test_yuanbao_resource_api_is_provider_mediated_before_safe_download():
++    adapter = SimpleNamespace(MEDIA_MAX_SIZE_MB=50, name="yuanbao")
++    calls = []
++
++    async def fake_fetch_resource_url(_adapter, resource_id):
++        assert resource_id == "res-123"
++        return "https://cos.example.test/res-123.png"
++
++    async def fake_download(url, **kwargs):
++        calls.append((url, kwargs))
++        return b"\x89PNG\r\n\x1a\n image", "image/png"
++
++    with patch.object(
++        MediaResolveMiddleware,
++        "_fetch_resource_url",
++        side_effect=fake_fetch_resource_url,
++    ), patch("gateway.platforms.yuanbao.media_download_url", side_effect=fake_download):
++        cached = await MediaResolveMiddleware._download_and_cache(
++            adapter,
++            fetch_url=await MediaResolveMiddleware._resolve_download_url(
++                adapter,
++                "https://hunyuan.tencent.com/api/resource/download?resourceId=res-123",
++            ),
++            kind="image",
++            log_tag="test",
++        )
++
++    assert cached is not None
++    assert calls[0][0] == "https://cos.example.test/res-123.png"
++    assert calls[0][1]["source_type"] == "gateway:yuanbao-inbound-image"
++    assert calls[0][1]["allowed_content_types"] == YUANBAO_IMAGE_CONTENT_TYPES

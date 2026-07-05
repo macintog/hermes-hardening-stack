@@ -1,0 +1,115 @@
+diff --git a/tools/registry.py b/tools/registry.py
+index 49c23c358..1ea18f4ef 100644
+--- a/tools/registry.py
++++ b/tools/registry.py
+@@ -17,6 +17,7 @@ Import chain (circular-import safe):
+ import ast
+ import importlib
+ import json
++import os
+ import logging
+ import threading
+ import time
+@@ -135,11 +136,52 @@ _CHECK_FN_TTL_SECONDS = 30.0
+ # as a flake (last-good True is served) rather than a real outage. Kept short
+ # so a genuinely-down backend is reflected within a couple of turns.
+ _CHECK_FN_FAILURE_GRACE_SECONDS = 60.0
+-_check_fn_cache: Dict[Callable, tuple[float, bool]] = {}
++_check_fn_cache: Dict[tuple[Callable, tuple[tuple[str, str], ...]], tuple[float, bool]] = {}
+ # Monotonic timestamp of the most recent True result per check_fn.
+ _check_fn_last_good: Dict[Callable, float] = {}
+ _check_fn_cache_lock = threading.Lock()
+ 
++_CHECK_FN_ENV_PREFIXES = (
++    "TERMINAL_",
++    "MODAL_",
++    "VERCEL_",
++    "DAYTONA_",
++    "BROWSER_",
++    "CAMOFOX_",
++)
++_CHECK_FN_ENV_NAMES = frozenset({
++    "HERMES_CONTAINER",
++    "HERMES_MANAGED",
++    "TOOL_GATEWAY_USER_TOKEN",
++    "HASS_TOKEN",
++})
++_SECRET_ENV_MARKERS = ("TOKEN", "KEY", "SECRET", "PASSWORD", "CREDENTIAL")
++
++
++def _availability_env_value(name: str, value: str) -> str:
++    """Return a non-secret value suitable for an availability-cache key."""
++    if any(marker in name for marker in _SECRET_ENV_MARKERS):
++        return "<set>" if value else ""
++    return value
++
++
++def _check_fn_env_fingerprint() -> tuple[tuple[str, str], ...]:
++    """Fingerprint env inputs that affect tool availability probes.
++
++    Check functions decide whether tools like terminal/file/browser-backed
++    tools are available. Several tests intentionally flip these env vars in a
++    single process, so caching only by callable can reuse a stale negative
++    result after the env is restored.
++    """
++    return tuple(
++        sorted(
++            (name, _availability_env_value(name, value))
++            for name, value in os.environ.items()
++            if name in _CHECK_FN_ENV_NAMES
++            or any(name.startswith(prefix) for prefix in _CHECK_FN_ENV_PREFIXES)
++        )
++    )
++
+ 
+ def _check_fn_cached(fn: Callable) -> bool:
+     """Return bool(fn()), TTL-cached across calls.
+@@ -151,8 +193,9 @@ def _check_fn_cached(fn: Callable) -> bool:
+     contention, probe timeout) from silently stripping tools mid-session.
+     """
+     now = time.monotonic()
++    cache_key = (fn, _check_fn_env_fingerprint())
+     with _check_fn_cache_lock:
+-        cached = _check_fn_cache.get(fn)
++        cached = _check_fn_cache.get(cache_key)
+         if cached is not None:
+             ts, value = cached
+             if now - ts < _CHECK_FN_TTL_SECONDS:
+@@ -168,31 +211,24 @@ def _check_fn_cached(fn: Callable) -> bool:
+     with _check_fn_cache_lock:
+         if value:
+             _check_fn_last_good[fn] = now
+-            _check_fn_cache[fn] = (now, True)
++            _check_fn_cache[cache_key] = (now, True)
+             return True
+ 
+         last_good = _check_fn_last_good.get(fn)
+         if last_good is not None and now - last_good < _CHECK_FN_FAILURE_GRACE_SECONDS:
+-            # Recent success → treat this failure as a flake. Serve last-good
++            # Recent success -> treat this failure as a flake. Serve last-good
+             # True and do NOT cache the failure, so the next call re-probes
+             # rather than pinning a stale verdict for the full TTL.
+             logger.warning(
+                 "check_fn %s failed (%s) within %.0fs of last success; "
+-                "treating as transient and keeping tool(s) available",
+-                getattr(fn, "__qualname__", fn),
+-                "raised" if raised else "returned False",
++                "serving last-good availability",
++                getattr(fn, "__name__", repr(fn)),
++                "exception" if raised else "false",
+                 _CHECK_FN_FAILURE_GRACE_SECONDS,
+             )
+             return True
+ 
+-        # No recent success (or grace expired) — honor the failure. Log it so
+-        # silent tool loss in quiet mode (subagents) is diagnosable.
+-        logger.warning(
+-            "check_fn %s %s; dependent tools will be unavailable this turn",
+-            getattr(fn, "__qualname__", fn),
+-            "raised" if raised else "returned False",
+-        )
+-        _check_fn_cache[fn] = (now, False)
++        _check_fn_cache[cache_key] = (now, False)
+         return False
+ 
+ 

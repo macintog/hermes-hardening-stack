@@ -1,0 +1,120 @@
+diff --git a/tests/security/test_gateway_media_delivery_authority.py b/tests/security/test_gateway_media_delivery_authority.py
+new file mode 100644
+index 000000000..65f739234
+--- /dev/null
++++ b/tests/security/test_gateway_media_delivery_authority.py
+@@ -0,0 +1,100 @@
++from unittest.mock import AsyncMock
++
++import pytest
++
++from gateway.config import Platform, PlatformConfig
++from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
++from gateway.session import SessionSource, build_session_key
++
++
++class _MediaAuthorityAdapter(BasePlatformAdapter):
++    def __init__(self):
++        super().__init__(PlatformConfig(enabled=True, token="test"), Platform.TELEGRAM)
++
++    async def connect(self):
++        return True
++
++    async def disconnect(self):
++        pass
++
++    async def send(self, chat_id, content=None, **kwargs):
++        return SendResult(success=True, message_id="text")
++
++    async def get_chat_info(self, chat_id):
++        return {"id": chat_id, "type": "dm"}
++
++
++def _event():
++    source = SessionSource(
++        platform=Platform.TELEGRAM,
++        chat_id="chat-1",
++        chat_type="dm",
++    )
++    return MessageEvent(
++        text="respond",
++        message_type=MessageType.TEXT,
++        source=source,
++        message_id="msg-1",
++    )
++
++
++def _allowed_media_path(tmp_path, monkeypatch, name):
++    root = tmp_path / "media-cache"
++    media_file = root / name
++    media_file.parent.mkdir(parents=True, exist_ok=True)
++    media_file.write_bytes(b"media")
++    monkeypatch.setattr(
++        "gateway.platforms.base.MEDIA_DELIVERY_SAFE_ROOTS",
++        (root,),
++    )
++    return media_file.resolve()
++
++
++def test_raw_media_tag_is_not_delivery_authority():
++    media, cleaned = BasePlatformAdapter.extract_media(
++        "Here\nMEDIA:/tmp/secret.png",
++        require_trusted_marker=True,
++    )
++
++    assert media == []
++    assert "MEDIA:" not in cleaned
++    assert "Here" in cleaned
++
++
++def test_trusted_media_artifact_marker_allows_delivery_extraction(tmp_path, monkeypatch):
++    media_file = _allowed_media_path(tmp_path, monkeypatch, "speech.ogg")
++    content = BasePlatformAdapter.mark_trusted_media_artifact_response(
++        f"[[audio_as_voice]]\nMEDIA:{media_file}"
++    )
++
++    media, cleaned = BasePlatformAdapter.extract_media(
++        content,
++        require_trusted_marker=True,
++    )
++
++    assert media == [(str(media_file), True)]
++    assert "MEDIA:" not in cleaned
++    assert "[[hermes_trusted_media_artifact_v1]]" not in cleaned
++
++
++@pytest.mark.asyncio
++async def test_final_response_raw_media_tag_does_not_upload_file():
++    adapter = _MediaAuthorityAdapter()
++    event = _event()
++    adapter._message_handler = AsyncMock(return_value="Answer\nMEDIA:/tmp/secret.png")
++    adapter.send_multiple_images = AsyncMock(return_value=SendResult(success=True, message_id="image-batch"))
++    adapter.send_image_file = AsyncMock(return_value=SendResult(success=True, message_id="image"))
++    adapter.send_document = AsyncMock(return_value=SendResult(success=True, message_id="doc"))
++
++    await adapter._process_message_background(event, build_session_key(event.source))
++
++    adapter.send_multiple_images.assert_not_awaited()
++    adapter.send_image_file.assert_not_awaited()
++    adapter.send_document.assert_not_awaited()
++
++
++@pytest.mark.asyncio
++async def test_trusted_media_artifact_response_uploads_file(tmp_path, monkeypatch):
++    adapter = _MediaAuthorityAdapter()
++    event = _event()
++    media_file = _allowed_media_path(tmp_path, monkeypatch, "speech.flac")
++    adapter._message_handler = AsyncMock(
++        return_value=BasePlatformAdapter.mark_trusted_media_artifact_response(
++            f"MEDIA:{media_file}"
++        )
++    )
++    adapter.send_document = AsyncMock(return_value=SendResult(success=True, message_id="doc"))
++
++    await adapter._process_message_background(event, build_session_key(event.source))
++
++    adapter.send_document.assert_awaited_once_with(
++        chat_id="chat-1",
++        file_path=str(media_file),
++        metadata={"notify": True},
++    )

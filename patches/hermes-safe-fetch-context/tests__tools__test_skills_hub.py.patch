@@ -1,0 +1,423 @@
+diff --git a/tests/tools/test_skills_hub.py b/tests/tools/test_skills_hub.py
+index 265a12287..45c3ced27 100644
+--- a/tests/tools/test_skills_hub.py
++++ b/tests/tools/test_skills_hub.py
+@@ -2,8 +2,10 @@
+ 
+ import json
+ import time
++from pathlib import Path
++from types import SimpleNamespace
+ from typing import List, Optional
+-from unittest.mock import patch, MagicMock
++from unittest.mock import AsyncMock, patch, MagicMock
+ 
+ import httpx
+ import pytest
+@@ -32,6 +34,10 @@ from tools.skills_hub import (
+ )
+ 
+ 
++def _safe_download_result(text: str):
++    return SimpleNamespace(content=text.encode("utf-8"))
++
++
+ # ---------------------------------------------------------------------------
+ # GitHubSource._parse_frontmatter_quick
+ # ---------------------------------------------------------------------------
+@@ -802,16 +808,15 @@ class TestWellKnownSkillSource:
+ 
+     @patch("tools.skills_hub._write_index_cache")
+     @patch("tools.skills_hub._read_index_cache", return_value=None)
+-    @patch("tools.skills_hub.httpx.get")
+-    def test_search_reads_index_from_well_known_url(self, mock_get, _mock_read_cache, _mock_write_cache):
+-        mock_get.return_value = MagicMock(
+-            status_code=200,
+-            json=lambda: {
++    @patch("tools.safe_http.safe_download_bytes", new_callable=AsyncMock)
++    def test_search_reads_index_from_well_known_url(self, mock_download, _mock_read_cache, _mock_write_cache):
++        mock_download.return_value = _safe_download_result(
++            json.dumps({
+                 "skills": [
+                     {"name": "git-workflow", "description": "Git rules", "files": ["SKILL.md"]},
+                     {"name": "code-review", "description": "Review code", "files": ["SKILL.md", "references/checklist.md"]},
+                 ]
+-            },
++            })
+         )
+ 
+         results = self._source().search("https://example.com/.well-known/skills/index.json", limit=10)
+@@ -824,33 +829,32 @@ class TestWellKnownSkillSource:
+ 
+     @patch("tools.skills_hub._write_index_cache")
+     @patch("tools.skills_hub._read_index_cache", return_value=None)
+-    @patch("tools.skills_hub.httpx.get")
+-    def test_search_accepts_domain_root_and_resolves_index(self, mock_get, _mock_read_cache, _mock_write_cache):
+-        mock_get.return_value = MagicMock(
+-            status_code=200,
+-            json=lambda: {"skills": [{"name": "git-workflow", "description": "Git rules", "files": ["SKILL.md"]}]},
++    @patch("tools.safe_http.safe_download_bytes", new_callable=AsyncMock)
++    def test_search_accepts_domain_root_and_resolves_index(self, mock_download, _mock_read_cache, _mock_write_cache):
++        mock_download.return_value = _safe_download_result(
++            json.dumps({"skills": [{"name": "git-workflow", "description": "Git rules", "files": ["SKILL.md"]}]})
+         )
+ 
+         results = self._source().search("https://example.com", limit=10)
+ 
+         assert len(results) == 1
+-        called_url = mock_get.call_args.args[0]
++        called_url = mock_download.call_args.args[0]
+         assert called_url == "https://example.com/.well-known/skills/index.json"
+ 
+     @patch("tools.skills_hub._write_index_cache")
+     @patch("tools.skills_hub._read_index_cache", return_value=None)
+-    @patch("tools.skills_hub.httpx.get")
+-    def test_inspect_fetches_skill_md_from_well_known_endpoint(self, mock_get, _mock_read_cache, _mock_write_cache):
+-        def fake_get(url, *args, **kwargs):
++    @patch("tools.safe_http.safe_download_bytes", new_callable=AsyncMock)
++    def test_inspect_fetches_skill_md_from_well_known_endpoint(self, mock_download, _mock_read_cache, _mock_write_cache):
++        def fake_download(url, *args, **kwargs):
+             if url.endswith("/index.json"):
+-                return MagicMock(status_code=200, json=lambda: {
++                return _safe_download_result(json.dumps({
+                     "skills": [{"name": "git-workflow", "description": "Git rules", "files": ["SKILL.md"]}]
+-                })
++                }))
+             if url.endswith("/git-workflow/SKILL.md"):
+-                return MagicMock(status_code=200, text="---\nname: git-workflow\ndescription: Git rules\n---\n\n# Git Workflow\n")
++                return _safe_download_result("---\nname: git-workflow\ndescription: Git rules\n---\n\n# Git Workflow\n")
+             raise AssertionError(url)
+ 
+-        mock_get.side_effect = fake_get
++        mock_download.side_effect = fake_download
+ 
+         meta = self._source().inspect("well-known:https://example.com/.well-known/skills/git-workflow")
+ 
+@@ -861,24 +865,24 @@ class TestWellKnownSkillSource:
+ 
+     @patch("tools.skills_hub._write_index_cache")
+     @patch("tools.skills_hub._read_index_cache", return_value=None)
+-    @patch("tools.skills_hub.httpx.get")
+-    def test_fetch_downloads_skill_files_from_well_known_endpoint(self, mock_get, _mock_read_cache, _mock_write_cache):
+-        def fake_get(url, *args, **kwargs):
++    @patch("tools.safe_http.safe_download_bytes", new_callable=AsyncMock)
++    def test_fetch_downloads_skill_files_from_well_known_endpoint(self, mock_download, _mock_read_cache, _mock_write_cache):
++        def fake_download(url, *args, **kwargs):
+             if url.endswith("/index.json"):
+-                return MagicMock(status_code=200, json=lambda: {
++                return _safe_download_result(json.dumps({
+                     "skills": [{
+                         "name": "code-review",
+                         "description": "Review code",
+                         "files": ["SKILL.md", "references/checklist.md"],
+                     }]
+-                })
++                }))
+             if url.endswith("/code-review/SKILL.md"):
+-                return MagicMock(status_code=200, text="# Code Review\n")
++                return _safe_download_result("# Code Review\n")
+             if url.endswith("/code-review/references/checklist.md"):
+-                return MagicMock(status_code=200, text="- [ ] security\n")
++                return _safe_download_result("- [ ] security\n")
+             raise AssertionError(url)
+ 
+-        mock_get.side_effect = fake_get
++        mock_download.side_effect = fake_download
+ 
+         bundle = self._source().fetch("well-known:https://example.com/.well-known/skills/code-review")
+ 
+@@ -889,22 +893,22 @@ class TestWellKnownSkillSource:
+ 
+     @patch("tools.skills_hub._write_index_cache")
+     @patch("tools.skills_hub._read_index_cache", return_value=None)
+-    @patch("tools.skills_hub.httpx.get")
+-    def test_fetch_rejects_unsafe_file_paths_from_well_known_endpoint(self, mock_get, _mock_read_cache, _mock_write_cache):
+-        def fake_get(url, *args, **kwargs):
++    @patch("tools.safe_http.safe_download_bytes", new_callable=AsyncMock)
++    def test_fetch_rejects_unsafe_file_paths_from_well_known_endpoint(self, mock_download, _mock_read_cache, _mock_write_cache):
++        def fake_download(url, *args, **kwargs):
+             if url.endswith("/index.json"):
+-                return MagicMock(status_code=200, json=lambda: {
++                return _safe_download_result(json.dumps({
+                     "skills": [{
+                         "name": "code-review",
+                         "description": "Review code",
+                         "files": ["SKILL.md", "../../../escape.txt"],
+                     }]
+-                })
++                }))
+             if url.endswith("/code-review/SKILL.md"):
+-                return MagicMock(status_code=200, text="# Code Review\n")
++                return _safe_download_result("# Code Review\n")
+             raise AssertionError(url)
+ 
+-        mock_get.side_effect = fake_get
++        mock_download.side_effect = fake_download
+ 
+         bundle = self._source().fetch("well-known:https://example.com/.well-known/skills/code-review")
+ 
+@@ -954,11 +958,10 @@ class TestUrlSource:
+         assert self._source().search("anything") == []
+ 
+     # ── inspect ─────────────────────────────────────────────────────────
+-    @patch("tools.skills_hub.httpx.get")
+-    def test_inspect_reads_frontmatter_from_url(self, mock_get):
+-        mock_get.return_value = MagicMock(
+-            status_code=200,
+-            text=(
++    @patch("tools.safe_http.safe_download_bytes", new_callable=AsyncMock)
++    def test_inspect_reads_frontmatter_from_url(self, mock_download):
++        mock_download.return_value = _safe_download_result(
++            (
+                 "---\n"
+                 "name: sharethis-chat\n"
+                 "description: Share agent conversations.\n"
+@@ -978,53 +981,49 @@ class TestUrlSource:
+         assert meta.tags == ["sharing", "chat"]
+         assert meta.extra["awaiting_name"] is False
+ 
+-    @patch("tools.skills_hub.httpx.get")
+-    def test_inspect_returns_none_when_url_not_md(self, mock_get):
++    @patch("tools.safe_http.safe_download_bytes", new_callable=AsyncMock)
++    def test_inspect_returns_none_when_url_not_md(self, mock_download):
+         # _matches filters first — no HTTP call.
+         meta = self._source().inspect("https://example.com/not-a-skill")
+         assert meta is None
+-        mock_get.assert_not_called()
++        mock_download.assert_not_called()
+ 
+-    @patch("tools.skills_hub.httpx.get")
+-    def test_inspect_returns_none_on_404(self, mock_get):
+-        mock_get.return_value = MagicMock(status_code=404)
++    @patch("tools.safe_http.safe_download_bytes", new_callable=AsyncMock)
++    def test_inspect_returns_none_on_404(self, mock_download):
++        mock_download.side_effect = RuntimeError("not found")
+         assert self._source().inspect("https://example.com/SKILL.md") is None
+ 
+-    @patch("tools.skills_hub.httpx.get")
+-    def test_inspect_returns_none_on_http_error(self, mock_get):
+-        mock_get.side_effect = httpx.HTTPError("boom")
++    @patch("tools.safe_http.safe_download_bytes", new_callable=AsyncMock)
++    def test_inspect_returns_none_on_http_error(self, mock_download):
++        mock_download.side_effect = httpx.HTTPError("boom")
+         assert self._source().inspect("https://example.com/SKILL.md") is None
+ 
+-    @patch("tools.skills_hub.httpx.get")
+-    @patch("tools.skills_hub.check_website_access", return_value=None)
+-    @patch("tools.skills_hub.is_safe_url", return_value=False)
+-    def test_inspect_blocks_private_url(self, _mock_safe, _mock_policy, mock_get):
++    @patch("tools.safe_http.safe_download_bytes", new_callable=AsyncMock)
++    def test_inspect_blocks_private_url(self, mock_download):
++        mock_download.side_effect = RuntimeError("blocked unsafe URL")
+         assert self._source().inspect("http://127.0.0.1/SKILL.md") is None
+-        mock_get.assert_not_called()
++        assert mock_download.call_args.args[0] == "http://127.0.0.1/SKILL.md"
+ 
+-    @patch("tools.skills_hub.httpx.get")
+-    def test_inspect_flags_awaiting_name_when_unresolvable(self, mock_get):
++    @patch("tools.safe_http.safe_download_bytes", new_callable=AsyncMock)
++    def test_inspect_flags_awaiting_name_when_unresolvable(self, mock_download):
+         # No frontmatter name + a URL path that can't produce a valid slug
+         # (``SKILL`` isn't a valid skill name).
+-        mock_get.return_value = MagicMock(
+-            status_code=200,
+-            text="---\ndescription: unnamed.\n---\n",
+-        )
++        mock_download.return_value = _safe_download_result("---\ndescription: unnamed.\n---\n")
+         meta = self._source().inspect("https://example.com/SKILL.md")
+         assert meta is not None
+         assert meta.name == ""
+         assert meta.extra["awaiting_name"] is True
+ 
+     # ── fetch ───────────────────────────────────────────────────────────
+-    @patch("tools.skills_hub.httpx.get")
+-    def test_fetch_builds_single_file_bundle(self, mock_get):
++    @patch("tools.safe_http.safe_download_bytes", new_callable=AsyncMock)
++    def test_fetch_builds_single_file_bundle(self, mock_download):
+         skill_md = (
+             "---\n"
+             "name: sharethis-chat\n"
+             "description: Share.\n"
+             "---\n\n# Body\n"
+         )
+-        mock_get.return_value = MagicMock(status_code=200, text=skill_md)
++        mock_download.return_value = _safe_download_result(skill_md)
+ 
+         bundle = self._source().fetch("https://sharethis.chat/SKILL.md")
+ 
+@@ -1037,36 +1036,27 @@ class TestUrlSource:
+         assert bundle.metadata["url"] == "https://sharethis.chat/SKILL.md"
+         assert bundle.metadata["awaiting_name"] is False
+ 
+-    @patch("tools.skills_hub.httpx.get")
+-    def test_fetch_falls_back_to_url_directory_name(self, mock_get):
++    @patch("tools.safe_http.safe_download_bytes", new_callable=AsyncMock)
++    def test_fetch_falls_back_to_url_directory_name(self, mock_download):
+         # Frontmatter has no ``name:`` — we slug from the URL directory.
+-        mock_get.return_value = MagicMock(
+-            status_code=200,
+-            text="---\ndescription: No name.\n---\n\n# Body\n",
+-        )
++        mock_download.return_value = _safe_download_result("---\ndescription: No name.\n---\n\n# Body\n")
+         bundle = self._source().fetch("https://example.com/my-skill/SKILL.md")
+         assert bundle is not None
+         assert bundle.name == "my-skill"
+         assert bundle.metadata["awaiting_name"] is False
+ 
+-    @patch("tools.skills_hub.httpx.get")
+-    def test_fetch_falls_back_to_filename_when_no_parent_dir(self, mock_get):
+-        mock_get.return_value = MagicMock(
+-            status_code=200,
+-            text="---\ndescription: Bare file.\n---\n",
+-        )
++    @patch("tools.safe_http.safe_download_bytes", new_callable=AsyncMock)
++    def test_fetch_falls_back_to_filename_when_no_parent_dir(self, mock_download):
++        mock_download.return_value = _safe_download_result("---\ndescription: Bare file.\n---\n")
+         bundle = self._source().fetch("https://example.com/my-skill.md")
+         assert bundle is not None
+         assert bundle.name == "my-skill"
+         assert bundle.metadata["awaiting_name"] is False
+ 
+-    @patch("tools.skills_hub.httpx.get")
+-    def test_fetch_awaiting_name_when_unresolvable(self, mock_get):
++    @patch("tools.safe_http.safe_download_bytes", new_callable=AsyncMock)
++    def test_fetch_awaiting_name_when_unresolvable(self, mock_download):
+         # Bare ``SKILL.md`` at the domain root with no frontmatter name.
+-        mock_get.return_value = MagicMock(
+-            status_code=200,
+-            text="---\ndescription: Bare.\n---\n\n# Body\n",
+-        )
++        mock_download.return_value = _safe_download_result("---\ndescription: Bare.\n---\n\n# Body\n")
+         bundle = self._source().fetch("https://example.com/SKILL.md")
+         assert bundle is not None
+         assert bundle.name == ""
+@@ -1074,58 +1064,46 @@ class TestUrlSource:
+         # File content still present — CLI will reuse it after picking a name.
+         assert bundle.files["SKILL.md"].startswith("---\n")
+ 
+-    @patch("tools.skills_hub.httpx.get")
+-    def test_fetch_awaiting_name_rejects_sentinel_slug(self, mock_get):
++    @patch("tools.safe_http.safe_download_bytes", new_callable=AsyncMock)
++    def test_fetch_awaiting_name_rejects_sentinel_slug(self, mock_download):
+         # Frontmatter has no name AND the URL filename slug is ``README`` —
+         # our valid-name check rejects it, so we flag awaiting_name.
+-        mock_get.return_value = MagicMock(
+-            status_code=200,
+-            text="---\ndescription: no name.\n---\n",
+-        )
++        mock_download.return_value = _safe_download_result("---\ndescription: no name.\n---\n")
+         bundle = self._source().fetch("https://example.com/README.md")
+         assert bundle is not None
+         assert bundle.name == ""
+         assert bundle.metadata["awaiting_name"] is True
+ 
+-    @patch("tools.skills_hub.httpx.get")
+-    def test_fetch_ignores_unsafe_frontmatter_name_and_falls_through_to_slug(self, mock_get):
++    @patch("tools.safe_http.safe_download_bytes", new_callable=AsyncMock)
++    def test_fetch_ignores_unsafe_frontmatter_name_and_falls_through_to_slug(self, mock_download):
+         # Traversal / unsafe names are rejected by ``_is_valid_skill_name``;
+         # resolver falls through to URL slug (``my-skill`` here) and succeeds.
+-        mock_get.return_value = MagicMock(
+-            status_code=200,
+-            text="---\nname: ../evil\ndescription: Bad.\n---\n",
+-        )
++        mock_download.return_value = _safe_download_result("---\nname: ../evil\ndescription: Bad.\n---\n")
+         bundle = self._source().fetch("https://example.com/my-skill/SKILL.md")
+         assert bundle is not None
+         assert bundle.name == "my-skill"
+ 
+-    @patch("tools.skills_hub.httpx.get")
+-    def test_fetch_returns_none_on_404(self, mock_get):
+-        mock_get.return_value = MagicMock(status_code=404)
++    @patch("tools.safe_http.safe_download_bytes", new_callable=AsyncMock)
++    def test_fetch_returns_none_on_404(self, mock_download):
++        mock_download.side_effect = RuntimeError("not found")
+         assert self._source().fetch("https://example.com/SKILL.md") is None
+ 
+-    @patch("tools.skills_hub.httpx.get")
+-    @patch("tools.skills_hub.check_website_access", return_value=None)
+-    @patch("tools.skills_hub.is_safe_url", side_effect=[True, False])
+-    def test_fetch_blocks_redirect_to_private_url(self, _mock_safe, _mock_policy, mock_get):
+-        redirect = MagicMock(status_code=302)
+-        redirect.headers = {"location": "http://127.0.0.1/private/SKILL.md"}
+-        mock_get.return_value = redirect
+-
++    @patch("tools.safe_http.safe_download_bytes", new_callable=AsyncMock)
++    def test_fetch_blocks_redirect_to_private_url(self, mock_download):
++        mock_download.side_effect = RuntimeError("blocked unsafe redirect")
+         assert self._source().fetch("https://example.com/SKILL.md") is None
+-        assert mock_get.call_count == 1
++        assert mock_download.call_args.args[0] == "https://example.com/SKILL.md"
+ 
+-    @patch("tools.skills_hub.httpx.get")
+-    @patch("tools.skills_hub.check_website_access", return_value=None)
+-    @patch("tools.skills_hub.is_safe_url", return_value=False)
+-    def test_fetch_blocks_private_url(self, _mock_safe, _mock_policy, mock_get):
++    @patch("tools.safe_http.safe_download_bytes", new_callable=AsyncMock)
++    def test_fetch_blocks_private_url(self, mock_download):
++        mock_download.side_effect = RuntimeError("blocked unsafe URL")
+         assert self._source().fetch("http://127.0.0.1/SKILL.md") is None
+-        mock_get.assert_not_called()
++        assert mock_download.call_args.args[0] == "http://127.0.0.1/SKILL.md"
+ 
+-    @patch("tools.skills_hub.httpx.get")
+-    def test_fetch_skips_non_matching_identifier(self, mock_get):
++    @patch("tools.safe_http.safe_download_bytes", new_callable=AsyncMock)
++    def test_fetch_skips_non_matching_identifier(self, mock_download):
+         assert self._source().fetch("owner/repo/skill") is None
+-        mock_get.assert_not_called()
++        mock_download.assert_not_called()
+ 
+     # ── _is_valid_skill_name ────────────────────────────────────────────
+     def test_is_valid_skill_name_accepts_identifiers(self):
+@@ -1892,6 +1870,50 @@ class TestQuarantineBundleBinaryAssets:
+         assert (q_path / "SKILL.md").read_text(encoding="utf-8").startswith("---")
+         assert (q_path / "assets" / "neutts-cli" / "samples" / "jo.wav").read_bytes() == b"RIFF\x00\x01fakewav"
+ 
++    def test_install_writes_provenance_sidecar_for_external_skill(self, tmp_path):
++        import tools.skills_hub as hub
++
++        hub_dir = tmp_path / "skills" / ".hub"
++        original_lock_file = hub.HubLockFile
++
++        class TempHubLockFile(original_lock_file):
++            def __init__(self, path=None):
++                super().__init__(path or hub.LOCK_FILE)
++
++        with patch.object(hub, "SKILLS_DIR", tmp_path / "skills"), \
++             patch.object(hub, "HUB_DIR", hub_dir), \
++             patch.object(hub, "LOCK_FILE", hub_dir / "lock.json"), \
++             patch.object(hub, "QUARANTINE_DIR", hub_dir / "quarantine"), \
++             patch.object(hub, "AUDIT_LOG", hub_dir / "audit.log"), \
++             patch.object(hub, "TAPS_FILE", hub_dir / "taps.json"), \
++             patch.object(hub, "INDEX_CACHE_DIR", hub_dir / "index-cache"), \
++             patch.object(hub, "HubLockFile", TempHubLockFile):
++            bundle = SkillBundle(
++                name="copied-skill",
++                files={"SKILL.md": "---\nname: copied-skill\n---\n\nBody\n"},
++                source="url",
++                identifier="https://example.com/skills/copied-skill/SKILL.md",
++                trust_level="community",
++            )
++            q_path = hub.quarantine_bundle(bundle)
++            install_dir = hub.install_from_quarantine(
++                q_path,
++                "copied-skill",
++                "",
++                bundle,
++                hub.ScanResult("copied-skill", "url", "community", "safe"),
++            )
++
++            sidecar = json.loads((install_dir / ".hermes_skill_provenance.json").read_text(encoding="utf-8"))
++            lock_entry = hub.HubLockFile(path=hub.LOCK_FILE).load()["installed"]["copied-skill"]
++
++        assert sidecar["source"] == "url"
++        assert sidecar["identifier"] == "https://example.com/skills/copied-skill/SKILL.md"
++        assert sidecar["provenance"]["source_type"] == "direct-url"
++        assert sidecar["provenance"]["authority"] == "evidence_only"
++        assert lock_entry["provenance"]["source_type"] == "direct-url"
++        assert lock_entry["provenance"]["authority"] == "evidence_only"
++
+     def test_quarantine_bundle_rejects_traversal_file_paths(self, tmp_path):
+         import tools.skills_hub as hub
+ 

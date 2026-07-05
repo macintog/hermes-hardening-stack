@@ -1,0 +1,284 @@
+diff --git a/tests/tools/test_skills_tool.py b/tests/tools/test_skills_tool.py
+index d95fc0671..0c7937aa3 100644
+--- a/tests/tools/test_skills_tool.py
++++ b/tests/tools/test_skills_tool.py
+@@ -16,6 +16,7 @@ from tools.skills_tool import (
+     _find_all_skills,
+     skill_matches_platform,
+     skills_list,
++    skill_trust_promote,
+     skill_view,
+     MAX_DESCRIPTION_LENGTH,
+ )
+@@ -56,6 +57,75 @@ def _symlink_category(skills_dir: Path, linked_root: Path, category: str) -> Pat
+     return external_category
+
+
++def _write_hub_lock(
++    skills_dir: Path,
++    name: str,
++    *,
++    source: str = "github",
++    trust_level: str = "community",
++    install_path: str | None = None,
++) -> None:
++    hub_dir = skills_dir / ".hub"
++    hub_dir.mkdir(parents=True, exist_ok=True)
++    if install_path is None:
++        install_path = name
++    hub_dir.joinpath("lock.json").write_text(
++        json.dumps(
++            {
++                "version": 1,
++                "installed": {
++                    name: {
++                        "source": source,
++                        "identifier": f"{source}:example/{name}",
++                        "trust_level": trust_level,
++                        "provenance": {
++                            "source_type": "bundled" if source == "official" else "community-hub",
++                            "authority": "trusted_by_local_policy" if source == "official" else "evidence_only",
++                            "promotion_required": source != "official",
++                        },
++                        "scan_verdict": "pass",
++                        "content_hash": "old-hash",
++                        "install_path": install_path,
++                        "files": ["SKILL.md"],
++                        "metadata": {},
++                        "installed_at": "2026-04-29T00:00:00+00:00",
++                        "updated_at": "2026-04-29T00:00:00+00:00",
++                    }
++                },
++            }
++        )
++        + "\n",
++        encoding="utf-8",
++    )
++
++
++def _write_skill_provenance_sidecar(
++    skills_dir: Path,
++    name: str,
++    *,
++    source_type: str = "community-hub",
++    source: str = "github",
++    identifier: str = "owner/repo/skill",
++) -> None:
++    (skills_dir / name / ".hermes_skill_provenance.json").write_text(
++        json.dumps(
++            {
++                "version": 1,
++                "source": source,
++                "identifier": identifier,
++                "trust_level": "community",
++                "provenance": {
++                    "source_type": source_type,
++                    "authority": "evidence_only",
++                    "promotion_required": True,
++                },
++            }
++        )
++        + "\n",
++        encoding="utf-8",
++    )
++
++
+ # ---------------------------------------------------------------------------
+ # _parse_frontmatter
+ # ---------------------------------------------------------------------------
+@@ -411,6 +481,195 @@ class TestSkillView:
+         assert "Current date: !`printf SHOULD_NOT_RUN`" in result["content"]
+         assert "Current date: SHOULD_NOT_RUN" not in result["content"]
+
++    def test_hub_installed_skill_is_evidence_only_and_does_not_expand_shell(self, tmp_path):
++        _make_skill(
++            tmp_path,
++            "hub-skill",
++            body="Install note: !`printf SHOULD_NOT_RUN`",
++        )
++        _write_hub_lock(tmp_path, "hub-skill")
++
++        with (
++            patch("tools.skills_tool.SKILLS_DIR", tmp_path),
++            patch(
++                "agent.skill_preprocessing.load_skills_config",
++                return_value={"template_vars": True, "inline_shell": True},
++            ),
++            patch(
++                "agent.skill_preprocessing.expand_inline_shell",
++                side_effect=AssertionError("evidence-only skill expanded inline shell"),
++            ),
++        ):
++            raw = skill_view("hub-skill")
++
++        result = json.loads(raw)
++        assert result["success"] is True
++        assert result["authority"] == "evidence_only"
++        assert result["skill_provenance"]["provenance"] == "community-hub"
++        assert "Install note: !`printf SHOULD_NOT_RUN`" in result["content"]
++
++    def test_copied_hub_skill_sidecar_stays_evidence_only_without_lock(self, tmp_path):
++        _make_skill(
++            tmp_path,
++            "copied-skill",
++            body="Copied note: !`printf SHOULD_NOT_RUN`",
++        )
++        _write_skill_provenance_sidecar(tmp_path, "copied-skill", source_type="direct-url", source="url")
++
++        with (
++            patch("tools.skills_tool.SKILLS_DIR", tmp_path),
++            patch(
++                "agent.skill_preprocessing.load_skills_config",
++                return_value={"template_vars": True, "inline_shell": True},
++            ),
++            patch(
++                "agent.skill_preprocessing.expand_inline_shell",
++                side_effect=AssertionError("copied external skill expanded inline shell"),
++            ),
++        ):
++            raw = skill_view("copied-skill")
++
++        result = json.loads(raw)
++        assert result["success"] is True
++        assert result["authority"] == "evidence_only"
++        assert result["skill_provenance"]["provenance"] == "direct-url"
++        assert result["skill_provenance"]["sidecar_provenance"] is True
++        assert "Copied note: !`printf SHOULD_NOT_RUN`" in result["content"]
++
++    def test_skill_trust_promotion_records_metadata_and_enables_local_policy(self, tmp_path):
++        _make_skill(tmp_path, "hub-skill", body="Trusted after explicit local review.")
++        _write_hub_lock(tmp_path, "hub-skill")
++
++        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
++            before = json.loads(skill_view("hub-skill"))
++            promoted = json.loads(
++                skill_trust_promote(
++                    "hub-skill",
++                    promoted_by="test-user",
++                    reason="reviewed local copy",
++                )
++            )
++            after = json.loads(skill_view("hub-skill"))
++
++        assert before["authority"] == "evidence_only"
++        assert promoted["success"] is True
++        assert promoted["provenance"] == "manually-promoted"
++        assert promoted["trust_promotion"]["promoted_by"] == "test-user"
++        assert after["authority"] == "trusted_by_local_policy"
++        assert after["skill_provenance"]["provenance"] == "manually-promoted"
++        assert after["trust_promotion"]["reason"] == "reviewed local copy"
++
++    def test_skill_manage_promote_trust_routes_to_local_promotion_metadata(self, tmp_path):
++        from tools.skill_manager_tool import skill_manage
++
++        _make_skill(tmp_path, "hub-skill", body="Trusted through skill_manage.")
++        _write_hub_lock(tmp_path, "hub-skill")
++
++        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
++            promoted = json.loads(
++                skill_manage(
++                    action="promote_trust",
++                    name="hub-skill",
++                    reason="reviewed through skill manager",
++                )
++            )
++            after = json.loads(skill_view("hub-skill"))
++
++        assert promoted["success"] is True
++        assert promoted["trust_promotion"]["promoted_by"] == "skill_manage"
++        assert after["authority"] == "trusted_by_local_policy"
++        assert after["trust_promotion"]["reason"] == "reviewed through skill manager"
++
++    def test_official_bundled_hub_skill_remains_low_friction(self, tmp_path):
++        _make_skill(tmp_path, "official-skill", body="Use the bundled helper.")
++        _write_hub_lock(
++            tmp_path,
++            "official-skill",
++            source="official",
++            trust_level="builtin",
++        )
++
++        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
++            result = json.loads(skill_view("official-skill"))
++
++        assert result["success"] is True
++        assert result["authority"] == "trusted_by_local_policy"
++        assert result["skill_provenance"]["provenance"] == "bundled"
++
++    def test_plugin_skill_is_evidence_only_and_does_not_expand_shell(self, tmp_path):
++        skill_dir = tmp_path / "plugin" / "skills" / "demo"
++        skill_dir.mkdir(parents=True)
++        skill_md = skill_dir / "SKILL.md"
++        skill_md.write_text(
++            "---\nname: demo\ndescription: Plugin skill.\n---\n\nRun !`printf SHOULD_NOT_RUN`",
++            encoding="utf-8",
++        )
++
++        class Manager:
++            def list_plugin_skills(self, namespace):
++                return []
++
++        with (
++            patch("hermes_cli.plugins._get_disabled_plugins", return_value=set()),
++            patch("hermes_cli.plugins.get_plugin_manager", return_value=Manager()),
++            patch(
++                "agent.skill_preprocessing.load_skills_config",
++                return_value={"template_vars": True, "inline_shell": True},
++            ),
++            patch(
++                "agent.skill_preprocessing.expand_inline_shell",
++                side_effect=AssertionError("plugin skill expanded inline shell"),
++            ),
++        ):
++            result = json.loads(
++                skills_tool_module._serve_plugin_skill(
++                    skill_md,
++                    "plug",
++                    "demo",
++                    preprocess=True,
++                )
++            )
++
++        assert result["success"] is True
++        assert result["authority"] == "evidence_only"
++        assert result["skill_provenance"]["provenance"] == "plugin"
++        assert "!`printf SHOULD_NOT_RUN`" in result["content"]
++
++    def test_evidence_only_slash_skill_does_not_advertise_running_scripts(self, tmp_path):
++        from agent.skill_commands import _build_skill_message
++
++        skill_dir = tmp_path / "hub-skill"
++        scripts_dir = skill_dir / "scripts"
++        scripts_dir.mkdir(parents=True)
++        (scripts_dir / "run.sh").write_text("echo SHOULD_NOT_RUN", encoding="utf-8")
++
++        with (
++            patch("tools.skills_tool.SKILLS_DIR", tmp_path),
++            patch(
++                "agent.skill_commands._load_skills_config",
++                return_value={"template_vars": True, "inline_shell": True},
++            ),
++            patch(
++                "agent.skill_commands._expand_inline_shell",
++                side_effect=AssertionError("slash skill expanded inline shell"),
++            ),
++        ):
++            message = _build_skill_message(
++                {
++                    "name": "hub-skill",
++                    "content": "Run !`printf SHOULD_NOT_RUN`",
++                    "authority": "evidence_only",
++                    "linked_files": {"scripts": ["scripts/run.sh"]},
++                },
++                skill_dir,
++                activation_note="Load skill",
++            )
++
++        assert "<untrusted-context" in message
++        assert "!`printf SHOULD_NOT_RUN`" in message
++        assert "run scripts directly" not in message
++        assert "Load any of these as evidence" in message
++
+     def test_view_nonexistent_skill(self, tmp_path):
+         with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+             _make_skill(tmp_path, "other-skill")

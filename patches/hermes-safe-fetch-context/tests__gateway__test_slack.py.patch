@@ -1,0 +1,247 @@
+diff --git a/tests/gateway/test_slack.py b/tests/gateway/test_slack.py
+index 016524b84..4a779c628 100644
+--- a/tests/gateway/test_slack.py
++++ b/tests/gateway/test_slack.py
+@@ -888,6 +888,124 @@ class TestSlackProxyBehavior:
+         assert adapter._handler.client.proxy is None
+ 
+ 
++class TestSlackSafeDownloads:
++    @pytest.mark.asyncio
++    async def test_send_image_uses_safe_download_bytes(self, adapter, monkeypatch):
++        calls = []
++
++        class Result:
++            content = b"\x89PNG\r\n\x1a\nimage"
++            content_type = "image/png"
++
++        async def fake_safe_download(url, **kwargs):
++            calls.append((url, kwargs))
++            return Result()
++
++        monkeypatch.setattr("plugins.platforms.slack.adapter.safe_download_bytes", fake_safe_download)
++        monkeypatch.setattr("tools.url_safety.is_safe_url", lambda _url: True)
++        adapter._app.client.files_upload_v2 = AsyncMock(return_value={"ok": True, "file": {"id": "F1"}})
++
++        result = await adapter.send_image("C123", "https://cdn.example/image.png", caption="hi")
++
++        assert result.success is True
++        assert calls[0][0] == "https://cdn.example/image.png"
++        kwargs = calls[0][1]
++        assert kwargs["max_bytes"] > 0
++        assert kwargs["source_type"] == "gateway:slack-outbound-image"
++        assert kwargs["policy"]["redirect_credentials"] == "no-credentials"
++        adapter._app.client.files_upload_v2.assert_awaited_once()
++        assert adapter._app.client.files_upload_v2.await_args.kwargs["content"] == Result.content
++
++    @pytest.mark.asyncio
++    async def test_private_file_download_keeps_bearer_on_slack_origin_only(self, adapter, monkeypatch):
++        calls = []
++
++        class Result:
++            content = b"%PDF-1.4\n%%EOF"
++            content_type = "application/pdf"
++
++        async def fake_safe_download(url, **kwargs):
++            calls.append((url, kwargs))
++            return Result()
++
++        monkeypatch.setattr("plugins.platforms.slack.adapter.safe_download_bytes", fake_safe_download)
++
++        content = await adapter._download_slack_file_bytes("https://files.slack.com/report.pdf")
++
++        assert content == Result.content
++        kwargs = calls[0][1]
++        assert kwargs["headers"]["Authorization"] == "Bearer xoxb-fake-token"
++        assert kwargs["policy"]["redirect_credentials"] == "same-origin-only"
++
++    @pytest.mark.asyncio
++    async def test_private_file_download_does_not_send_bearer_to_non_slack_origin(self, adapter, monkeypatch):
++        calls = []
++
++        class Result:
++            content = b"%PDF-1.4\n%%EOF"
++            content_type = "application/pdf"
++
++        async def fake_safe_download(url, **kwargs):
++            calls.append((url, kwargs))
++            return Result()
++
++        monkeypatch.setattr("plugins.platforms.slack.adapter.safe_download_bytes", fake_safe_download)
++
++        await adapter._download_slack_file_bytes("https://cdn.example/report.pdf")
++
++        kwargs = calls[0][1]
++        assert kwargs["headers"] == {}
++        assert kwargs["policy"]["redirect_credentials"] == "no-credentials"
++
++    @pytest.mark.asyncio
++    async def test_send_multiple_images_uses_safe_download_bytes(self, adapter, monkeypatch):
++        calls = []
++
++        class Result:
++            content = b"\x89PNG\r\n\x1a\nimage"
++            content_type = "image/png"
++
++        async def fake_safe_download(url, **kwargs):
++            calls.append((url, kwargs))
++            return Result()
++
++        monkeypatch.setattr("plugins.platforms.slack.adapter.safe_download_bytes", fake_safe_download)
++        adapter._app.client.files_upload_v2 = AsyncMock(return_value={"ok": True})
++
++        await adapter.send_multiple_images(
++            "C123",
++            [("https://cdn.example/image.png", "alt text")],
++        )
++
++        assert calls[0][0] == "https://cdn.example/image.png"
++        kwargs = calls[0][1]
++        assert kwargs["source_type"] == "gateway:slack-outbound-image"
++        assert kwargs["policy"]["redirect_credentials"] == "no-credentials"
++        adapter._app.client.files_upload_v2.assert_awaited_once()
++        upload = adapter._app.client.files_upload_v2.await_args.kwargs["file_uploads"][0]
++        assert upload["content"] == Result.content
++
++    @pytest.mark.asyncio
++    async def test_send_multiple_images_blocks_safe_http_redirect_without_upload(self, adapter, monkeypatch):
++        from tools.safe_http import SafeHTTPError
++
++        mock_download = AsyncMock(
++            side_effect=SafeHTTPError(
++                "Blocked unsafe URL target: http://169.254.169.254/latest/meta-data"
++            )
++        )
++        monkeypatch.setattr("plugins.platforms.slack.adapter.safe_download_bytes", mock_download)
++        adapter._app.client.files_upload_v2 = AsyncMock(return_value={"ok": True})
++
++        await adapter.send_multiple_images(
++            "C123",
++            [("https://public.example/redirect.png", "alt text")],
++        )
++
++        mock_download.assert_awaited_once()
++        adapter._app.client.files_upload_v2.assert_not_awaited()
++
++
+ # ---------------------------------------------------------------------------
+ # TestSendDocument
+ # ---------------------------------------------------------------------------
+@@ -3410,37 +3528,22 @@ class TestSendImageSSRFGuards:
+ 
+     @pytest.mark.asyncio
+     async def test_send_image_blocks_private_redirect_target(self, adapter):
+-        redirect_response = MagicMock()
+-        redirect_response.is_redirect = True
+-        redirect_response.next_request = MagicMock(
+-            url="http://169.254.169.254/latest/meta-data"
+-        )
++        from tools.safe_http import SafeHTTPError
+ 
+-        client_kwargs = {}
+-        mock_client = AsyncMock()
+-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+-        mock_client.__aexit__ = AsyncMock(return_value=False)
+-
+-        async def fake_get(_url):
+-            for hook in client_kwargs["event_hooks"]["response"]:
+-                await hook(redirect_response)
+-
+-        mock_client.get = AsyncMock(side_effect=fake_get)
+         adapter._app.client.files_upload_v2 = AsyncMock(return_value={"ok": True})
+         adapter._app.client.chat_postMessage = AsyncMock(
+             return_value={"ts": "reply_ts"}
+         )
+ 
+-        def fake_async_client(*args, **kwargs):
+-            client_kwargs.update(kwargs)
+-            return mock_client
+-
+         def fake_is_safe_url(url):
+             return url == "https://public.example/image.png"
+ 
+         with (
+             patch("tools.url_safety.is_safe_url", side_effect=fake_is_safe_url),
+-            patch("httpx.AsyncClient", side_effect=fake_async_client),
++            patch(
++                "plugins.platforms.slack.adapter.safe_download_bytes",
++                AsyncMock(side_effect=SafeHTTPError("Blocked unsafe URL target: http://169.254.169.254/latest/meta-data")),
++            ) as mock_download,
+         ):
+             result = await adapter.send_image(
+                 chat_id="C123",
+@@ -3448,58 +3551,39 @@ class TestSendImageSSRFGuards:
+                 caption="see this",
+             )
+ 
+-        assert result.success
+-        assert client_kwargs["follow_redirects"] is True
+-        assert client_kwargs["event_hooks"]["response"]
++        assert not result.success
++        assert "unsafe URL target" in (result.error or "")
++        mock_download.assert_awaited_once()
++        assert mock_download.await_args.kwargs["policy"]["redirect_credentials"] == "no-credentials"
+         adapter._app.client.files_upload_v2.assert_not_awaited()
+-        adapter._app.client.chat_postMessage.assert_awaited_once()
+-        call_kwargs = adapter._app.client.chat_postMessage.call_args.kwargs
+-        assert "see this" in call_kwargs["text"]
+-        assert "https://public.example/image.png" in call_kwargs["text"]
++        adapter._app.client.chat_postMessage.assert_not_awaited()
+ 
+     @pytest.mark.asyncio
+-    async def test_send_image_fallback_preserves_thread_metadata(self, adapter):
+-        redirect_response = MagicMock()
+-        redirect_response.is_redirect = True
+-        redirect_response.next_request = MagicMock(
+-            url="http://169.254.169.254/latest/meta-data"
+-        )
+-
+-        client_kwargs = {}
+-        mock_client = AsyncMock()
+-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+-        mock_client.__aexit__ = AsyncMock(return_value=False)
++    async def test_send_image_safe_download_failure_does_not_fallback_with_thread_metadata(self, adapter):
++        from tools.safe_http import SafeHTTPError
+ 
+-        async def fake_get(_url):
+-            for hook in client_kwargs["event_hooks"]["response"]:
+-                await hook(redirect_response)
+-
+-        mock_client.get = AsyncMock(side_effect=fake_get)
+         adapter._app.client.files_upload_v2 = AsyncMock(return_value={"ok": True})
+         adapter._app.client.chat_postMessage = AsyncMock(
+             return_value={"ts": "reply_ts"}
+         )
+-
+-        def fake_async_client(*args, **kwargs):
+-            client_kwargs.update(kwargs)
+-            return mock_client
+-
+-        def fake_is_safe_url(url):
+-            return url == "https://public.example/image.png"
++        mock_download = AsyncMock(
++            side_effect=SafeHTTPError("Blocked unsafe URL target: http://169.254.169.254/latest/meta-data")
++        )
+ 
+         with (
+-            patch("tools.url_safety.is_safe_url", side_effect=fake_is_safe_url),
+-            patch("httpx.AsyncClient", side_effect=fake_async_client),
++            patch("plugins.platforms.slack.adapter.safe_download_bytes", mock_download),
+         ):
+-            await adapter.send_image(
++            result = await adapter.send_image(
+                 chat_id="C123",
+                 image_url="https://public.example/image.png",
+                 caption="see this",
+                 metadata={"thread_id": "parent_ts_789"},
+             )
+ 
+-        call_kwargs = adapter._app.client.chat_postMessage.call_args.kwargs
+-        assert call_kwargs.get("thread_ts") == "parent_ts_789"
++        assert not result.success
++        mock_download.assert_awaited_once()
++        adapter._app.client.files_upload_v2.assert_not_awaited()
++        adapter._app.client.chat_postMessage.assert_not_awaited()
+ 
+ 
+ # ---------------------------------------------------------------------------
